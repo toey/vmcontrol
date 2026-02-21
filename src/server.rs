@@ -90,6 +90,17 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "vnc_stop", operations::vnc_stop).await
 }
 
+async fn list_vms_handler() -> HttpResponse {
+    match crate::db::list_vms() {
+        Ok(vms) => HttpResponse::Ok().json(vms),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list VMs: {}", e),
+            output: None,
+        }),
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -136,6 +147,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/unmountiso", web::post().to(unmountiso_vm))
             .route("/api/vm/livemigrate", web::post().to(livemigrate_vm))
             .route("/api/vm/backup", web::post().to(backup_vm))
+            .route("/api/vm/list", web::get().to(list_vms_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

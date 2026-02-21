@@ -74,6 +74,11 @@
             font-weight: 600;
         }
         .btn-back:hover { background: #484f58; }
+        .btn-reset {
+            background: #d29922;
+            color: #000;
+        }
+        .btn-reset:hover { background: #e3b341; }
         #status {
             font-size: 13px;
             padding: 2px 8px;
@@ -113,6 +118,7 @@
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
+        <button class="btn-reset" onclick="doReset()">Reset VM</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
     <div id="vnc-container">
@@ -179,6 +185,32 @@
                 el.requestFullscreen();
             } else {
                 document.exitFullscreen();
+            }
+        };
+
+        window.doReset = async function() {
+            var params = new URLSearchParams(window.location.search);
+            var smac = params.get('smac');
+            if (!smac) {
+                smac = prompt('Enter VM name (smac):');
+                if (!smac) return;
+            }
+            if (!confirm('Reset VM "' + smac + '"?')) return;
+            setStatus('Resetting...', 'status-connecting');
+            try {
+                var res = await fetch('/api/vm/reset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ smac: smac }),
+                });
+                var data = await res.json();
+                if (data.success) {
+                    setStatus('Reset OK', 'status-connected');
+                } else {
+                    setStatus('Reset failed: ' + data.message, 'status-disconnected');
+                }
+            } catch (e) {
+                setStatus('Reset error: ' + e.message, 'status-disconnected');
             }
         };
 

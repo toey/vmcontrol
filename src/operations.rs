@@ -1,5 +1,6 @@
 use crate::api_helpers::{send_cmd_pctl, set_ma_mode, set_update_status};
 use crate::config::get_conf;
+use crate::db;
 use crate::mds;
 use crate::models::*;
 use crate::ssh::send_cmd;
@@ -236,6 +237,10 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
     if let Ok(out) = send_cmd(&format!("rm -f {}/{}.qcow2", disk_path, cmd.smac)) {
         output.push_str(&out);
     }
+    // Remove VM from database
+    if let Err(e) = db::delete_vm(&cmd.smac) {
+        output.push_str(&format!("WARNING: DB delete failed: {}\n", e));
+    }
     set_update_status("2", &cmd.smac);
     set_ma_mode("0", &cmd.smac);
     Ok(output)
@@ -271,6 +276,10 @@ pub fn create(json_str: &str) -> Result<String, String> {
     if let Ok(out) = send_cmd(&format!("{} info {}/{}.qcow2", qemu_img, disk_path, cmd.smac)) {
         output.push_str(&out);
     }
+    // Save VM to database
+    if let Err(e) = db::insert_vm(&cmd.smac, "", &cmd.size) {
+        output.push_str(&format!("WARNING: DB insert failed: {}\n", e));
+    }
     Ok(output)
 }
 
@@ -295,6 +304,10 @@ pub fn copyimage(json_str: &str) -> Result<String, String> {
     }
     if let Ok(out) = send_cmd(&format!("{} info {}/{}.qcow2", qemu_img, disk_path, cmd.smac)) {
         output.push_str(&out);
+    }
+    // Save VM to database
+    if let Err(e) = db::insert_vm(&cmd.smac, "", &cmd.size) {
+        output.push_str(&format!("WARNING: DB insert failed: {}\n", e));
     }
     Ok(output)
 }

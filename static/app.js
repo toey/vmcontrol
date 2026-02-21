@@ -34,14 +34,17 @@ async function apiCall(operation, payload) {
             statusEl.className = 'success';
             statusEl.textContent = data.message;
             outputEl.textContent = data.output || '(no output)';
+            return true;
         } else {
             statusEl.className = 'error';
             statusEl.textContent = 'Error: ' + data.message;
             outputEl.textContent = data.output || '';
+            return false;
         }
     } catch (err) {
         statusEl.className = 'error';
         statusEl.textContent = 'Network error: ' + err.message;
+        return false;
     } finally {
         document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = false; });
     }
@@ -53,10 +56,11 @@ function val(id) {
 }
 
 // SimpleCmd operations (smac only)
-function executeSimple(operation) {
-    apiCall(operation, {
+async function executeSimple(operation) {
+    var ok = await apiCall(operation, {
         smac: val(operation + '-smac'),
     });
+    if (ok) loadVmList();
 }
 
 // Start VM
@@ -134,20 +138,22 @@ function addDisk() {
 }
 
 // Create disk
-function executeCreate() {
-    apiCall('create', {
+async function executeCreate() {
+    var ok = await apiCall('create', {
         smac: val('create-smac'),
         size: val('create-size'),
     });
+    if (ok) loadVmList();
 }
 
 // Copy image
-function executeCopyImage() {
-    apiCall('copyimage', {
+async function executeCopyImage() {
+    var ok = await apiCall('copyimage', {
         itemplate: val('copyimage-itemplate'),
         smac: val('copyimage-smac'),
         size: val('copyimage-size'),
     });
+    if (ok) loadVmList();
 }
 
 // Mount ISO
@@ -189,7 +195,7 @@ async function executeVnc(mode) {
             var port = val('vnc-start-novncport');
             var linkDiv = document.getElementById('vnc-console-link');
             var linkEl = document.getElementById('vnc-console-url');
-            linkEl.href = '/vnc.html?port=' + port;
+            linkEl.href = '/vnc.html?port=' + port + '&smac=' + val('vnc-start-smac');
             linkDiv.style.display = 'block';
         }
     }
@@ -202,7 +208,7 @@ function openConsole() {
         alert('Please enter the noVNC port first');
         return;
     }
-    window.open('/vnc.html?port=' + port, '_blank');
+    window.open('/vnc.html?port=' + port + '&smac=' + val('vnc-start-smac'), '_blank');
 }
 
 // MDS Config - Load
@@ -276,8 +282,38 @@ async function saveMdsConfig() {
     }
 }
 
+// Load VM list from database and populate all SMAC dropdowns
+async function loadVmList() {
+    try {
+        var response = await fetch('/api/vm/list');
+        var vms = await response.json();
+        var selects = [
+            'stop-smac', 'reset-smac', 'powerdown-smac',
+            'listimage-smac', 'delete-smac', 'mountiso-smac',
+            'livemigrate-smac', 'backup-smac',
+            'vnc-start-smac', 'vnc-stop-smac'
+        ];
+        selects.forEach(function(id) {
+            var el = document.getElementById(id);
+            if (!el) return;
+            var current = el.value;
+            el.innerHTML = '<option value="">-- select VM --</option>';
+            vms.forEach(function(vm) {
+                var opt = document.createElement('option');
+                opt.value = vm.smac;
+                opt.textContent = vm.smac + ' (' + vm.disk_size + ')';
+                el.appendChild(opt);
+            });
+            if (current) el.value = current;
+        });
+    } catch (err) {
+        console.error('Failed to load VM list:', err);
+    }
+}
+
 // Init with one adapter and one disk row
 window.addEventListener('DOMContentLoaded', function() {
     addNetworkAdapter();
     addDisk();
+    loadVmList();
 });

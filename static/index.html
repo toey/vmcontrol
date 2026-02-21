@@ -70,21 +70,21 @@
         <!-- Stop -->
         <div id="tab-stop" class="tab-panel">
             <h2>Stop VM</h2>
-            <label>SMAC <input type="text" id="stop-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="stop-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('stop')">Stop VM</button>
         </div>
 
         <!-- Reset -->
         <div id="tab-reset" class="tab-panel">
             <h2>Reset VM</h2>
-            <label>SMAC <input type="text" id="reset-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="reset-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('reset')">Reset VM</button>
         </div>
 
         <!-- Powerdown -->
         <div id="tab-powerdown" class="tab-panel">
             <h2>Powerdown VM</h2>
-            <label>SMAC <input type="text" id="powerdown-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="powerdown-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('powerdown')">Powerdown VM</button>
         </div>
 
@@ -108,21 +108,21 @@
         <!-- List Image -->
         <div id="tab-listimage" class="tab-panel">
             <h2>List Images</h2>
-            <label>SMAC <input type="text" id="listimage-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="listimage-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('listimage')">List Images</button>
         </div>
 
         <!-- Delete -->
         <div id="tab-delete" class="tab-panel">
             <h2>Delete VM</h2>
-            <label>SMAC <input type="text" id="delete-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="delete-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('delete')">Delete VM</button>
         </div>
 
         <!-- Mount ISO -->
         <div id="tab-mountiso" class="tab-panel">
             <h2>Mount ISO</h2>
-            <label>SMAC <input type="text" id="mountiso-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="mountiso-smac"><option value="">-- select VM --</option></select></label>
             <label>ISO Name <input type="text" id="mountiso-isoname" placeholder="CentOS-7-x86_64-Minimal-1810.iso"></label>
             <div class="btn-group">
                 <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
@@ -133,7 +133,7 @@
         <!-- Live Migrate -->
         <div id="tab-livemigrate" class="tab-panel">
             <h2>Live Migrate</h2>
-            <label>SMAC <input type="text" id="livemigrate-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="livemigrate-smac"><option value="">-- select VM --</option></select></label>
             <label>To Node IP <input type="text" id="livemigrate-to-node-ip" placeholder="10.40.1.32"></label>
             <button class="execute-btn" onclick="executeLiveMigrate()">Live Migrate</button>
         </div>
@@ -141,14 +141,14 @@
         <!-- Backup -->
         <div id="tab-backup" class="tab-panel">
             <h2>Backup VM</h2>
-            <label>SMAC <input type="text" id="backup-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="backup-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('backup')">Backup VM</button>
         </div>
         <!-- VNC Start -->
         <div id="tab-vnc-start" class="tab-panel">
             <h2>VNC Start</h2>
             <p class="form-desc">Start noVNC websockify proxy for VM console access</p>
-            <label>SMAC <input type="text" id="vnc-start-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="vnc-start-smac"><option value="">-- select VM --</option></select></label>
             <label>noVNC Port <input type="text" id="vnc-start-novncport" placeholder="12001"></label>
             <div class="btn-group">
                 <button class="execute-btn" onclick="executeVnc('start')">Start VNC Proxy</button>
@@ -163,7 +163,7 @@
         <div id="tab-vnc-stop" class="tab-panel">
             <h2>VNC Stop</h2>
             <p class="form-desc">Stop noVNC websockify proxy</p>
-            <label>SMAC <input type="text" id="vnc-stop-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>SMAC <select id="vnc-stop-smac"><option value="">-- select VM --</option></select></label>
             <label>noVNC Port <input type="text" id="vnc-stop-novncport" placeholder="12001"></label>
             <button class="execute-btn" onclick="executeVnc('stop')">Stop VNC Proxy</button>
         </div>
