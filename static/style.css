@@ -331,6 +331,121 @@ textarea:focus {
     line-height: 1.5;
 }
 
+/* VM List Table */
+#vm-list-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+}
+
+#vm-list-table th {
+    background: #161b22;
+    color: #58a6ff;
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 2px solid #30363d;
+    font-weight: 600;
+    font-size: 0.85rem;
+}
+
+#vm-list-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #21262d;
+    vertical-align: middle;
+}
+
+#vm-list-table tr:hover {
+    background: #161b22;
+}
+
+.status-running {
+    color: #3fb950;
+    font-weight: 600;
+}
+
+.status-stopped {
+    color: #8b949e;
+}
+
+.btn-vm-action {
+    padding: 4px 12px;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-right: 4px;
+    transition: opacity 0.15s;
+}
+
+.btn-vm-action:hover {
+    opacity: 0.85;
+}
+
+.btn-vm-start {
+    background: #238636;
+    color: #fff;
+}
+
+.btn-vm-stop {
+    background: #da3633;
+    color: #fff;
+}
+
+.btn-vm-edit {
+    background: #1f6feb;
+    color: #fff;
+}
+
+.btn-vm-reset {
+    background: #d29922;
+    color: #fff;
+}
+
+.btn-vm-powerdown {
+    background: #8b5cf6;
+    color: #fff;
+}
+
+.btn-vm-delete {
+    background: #484f58;
+    color: #fff;
+}
+
+.btn-vm-vnc {
+    background: #1f6feb;
+    color: #fff;
+}
+
+.btn-vm-vncstop {
+    background: #6e40c9;
+    color: #fff;
+}
+
+.disk-row select {
+    max-width: 160px;
+    flex: 1;
+    min-width: 100px;
+}
+
+/* Template row */
+.template-row {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin-bottom: 0.4rem;
+}
+
+.template-row label {
+    flex: 1;
+    min-width: 180px;
+}
+
+.template-row select {
+    max-width: 100%;
+}
+
 /* Responsive */
 @media (max-width: 640px) {
     .form-grid {

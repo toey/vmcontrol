@@ -192,7 +192,7 @@
             var params = new URLSearchParams(window.location.search);
             var smac = params.get('smac');
             if (!smac) {
-                smac = prompt('Enter VM name (smac):');
+                smac = prompt('Enter VM-NAME:');
                 if (!smac) return;
             }
             if (!confirm('Reset VM "' + smac + '"?')) return;

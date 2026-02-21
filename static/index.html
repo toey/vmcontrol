@@ -13,26 +13,64 @@
     </header>
 
     <nav id="tabs">
-        <button class="tab active" data-tab="start">Start</button>
-        <button class="tab" data-tab="stop">Stop</button>
-        <button class="tab" data-tab="reset">Reset</button>
-        <button class="tab" data-tab="powerdown">Powerdown</button>
-        <button class="tab" data-tab="create">Create</button>
-        <button class="tab" data-tab="copyimage">Copy Image</button>
+        <button class="tab active" data-tab="vmlist">VM List</button>
+        <button class="tab" data-tab="create">Create VM</button>
+        <button class="tab" data-tab="createdisk">Create Disk</button>
         <button class="tab" data-tab="listimage">List Image</button>
-        <button class="tab" data-tab="delete">Delete</button>
         <button class="tab" data-tab="mountiso">Mount ISO</button>
         <button class="tab" data-tab="livemigrate">Live Migrate</button>
         <button class="tab" data-tab="backup">Backup</button>
-        <button class="tab" data-tab="vnc-start">VNC Start</button>
-        <button class="tab" data-tab="vnc-stop">VNC Stop</button>
         <button class="tab" data-tab="metadata">Metadata</button>
     </nav>
 
     <main>
-        <!-- Start VM -->
-        <div id="tab-start" class="tab-panel active">
-            <h2>Start VM</h2>
+        <!-- VM List -->
+        <div id="tab-vmlist" class="tab-panel active">
+            <h2>VM List</h2>
+            <div id="vm-list-table-wrap">
+                <table id="vm-list-table">
+                    <thead>
+                        <tr>
+                            <th>VM-NAME</th>
+                            <th>CPU</th>
+                            <th>Memory</th>
+                            <th>Disk</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="vm-list-body">
+                        <tr><td colspan="6"><em>Loading...</em></td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Create VM -->
+        <div id="tab-create" class="tab-panel">
+            <h2 id="create-title">Create VM</h2>
+            <label>VM-NAME <input type="text" id="create-vm-name" placeholder="my-vm-01"></label>
+            <div class="template-row">
+                <label>OS Template
+                    <select id="create-os-template" onchange="applyOsTemplate()">
+                        <option value="custom">Custom</option>
+                        <option value="ubuntu-server">Ubuntu Server</option>
+                        <option value="ubuntu-desktop">Ubuntu Desktop</option>
+                        <option value="debian">Debian</option>
+                        <option value="centos-rocky">CentOS / Rocky</option>
+                        <option value="windows-desktop">Windows 10/11</option>
+                        <option value="windows-server">Windows Server</option>
+                        <option value="macos">macOS</option>
+                        <option value="minimal-linux">Minimal Linux</option>
+                    </select>
+                </label>
+                <label>Base Image
+                    <select id="create-base-image" onchange="onBaseImageChange()">
+                        <option value="">-- no image --</option>
+                    </select>
+                </label>
+            </div>
+            <div id="template-info" style="font-size:0.85rem;margin-bottom:0.8rem;"></div>
             <div class="form-grid">
                 <fieldset>
                     <legend>CPU</legend>
@@ -64,76 +102,72 @@
                 <div id="start-disks"></div>
                 <button type="button" class="btn-add" onclick="addDisk()">+ Add Disk</button>
             </fieldset>
-            <button class="execute-btn" onclick="executeStart()">Start VM</button>
+            <div class="btn-group">
+                <button class="execute-btn" id="create-submit-btn" onclick="executeCreateVm()">Create VM</button>
+            </div>
         </div>
 
-        <!-- Stop -->
-        <div id="tab-stop" class="tab-panel">
-            <h2>Stop VM</h2>
-            <label>SMAC <select id="stop-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeSimple('stop')">Stop VM</button>
-        </div>
-
-        <!-- Reset -->
-        <div id="tab-reset" class="tab-panel">
-            <h2>Reset VM</h2>
-            <label>SMAC <select id="reset-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeSimple('reset')">Reset VM</button>
-        </div>
-
-        <!-- Powerdown -->
-        <div id="tab-powerdown" class="tab-panel">
-            <h2>Powerdown VM</h2>
-            <label>SMAC <select id="powerdown-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeSimple('powerdown')">Powerdown VM</button>
-        </div>
-
-        <!-- Create -->
-        <div id="tab-create" class="tab-panel">
+        <!-- Create Disk -->
+        <div id="tab-createdisk" class="tab-panel">
             <h2>Create Disk</h2>
-            <label>SMAC <input type="text" id="create-smac" placeholder="52-54-c4-ca-42-38"></label>
-            <label>Size <input type="text" id="create-size" placeholder="40G"></label>
-            <button class="execute-btn" onclick="executeCreate()">Create Disk</button>
-        </div>
-
-        <!-- Copy Image -->
-        <div id="tab-copyimage" class="tab-panel">
-            <h2>Copy Image</h2>
-            <label>Template <input type="text" id="copyimage-itemplate" placeholder="CentOS-7-x86_64-GenericCloud-1907"></label>
-            <label>SMAC <input type="text" id="copyimage-smac" placeholder="52-54-c4-ca-42-38"></label>
-            <label>Size <input type="text" id="copyimage-size" placeholder="40G"></label>
-            <button class="execute-btn" onclick="executeCopyImage()">Copy Image</button>
+            <label>Disk Name <input type="text" id="createdisk-name" placeholder="my-disk-01"></label>
+            <label>Size <input type="text" id="createdisk-size" value="40G"></label>
+            <button class="execute-btn" onclick="executeCreateDisk()">Create Disk</button>
+            <fieldset style="margin-top:16px;">
+                <legend>Disk Files</legend>
+                <div id="disk-file-list" style="font-size:0.9em;"></div>
+            </fieldset>
         </div>
 
         <!-- List Image -->
         <div id="tab-listimage" class="tab-panel">
             <h2>List Images</h2>
-            <label>SMAC <select id="listimage-smac"><option value="">-- select VM --</option></select></label>
+            <label>VM-NAME <select id="listimage-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('listimage')">List Images</button>
-        </div>
-
-        <!-- Delete -->
-        <div id="tab-delete" class="tab-panel">
-            <h2>Delete VM</h2>
-            <label>SMAC <select id="delete-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeSimple('delete')">Delete VM</button>
+            <fieldset style="margin-top:16px;">
+                <legend>Upload &amp; Convert Image</legend>
+                <p class="form-desc">Supports: qcow2, vmdk (VMware), vdi (VirtualBox), vhdx (Hyper-V), raw, img</p>
+                <input type="file" id="image-file-input" accept=".qcow2,.img,.raw,.vmdk,.vdi,.vhdx">
+                <div id="image-upload-progress" style="display:none; margin-top:8px;">
+                    <progress id="image-progress-bar" value="0" max="100" style="width:100%;"></progress>
+                    <span id="image-progress-text"></span>
+                </div>
+                <button class="execute-btn" onclick="uploadImage()" style="margin-top:8px;">Upload &amp; Convert</button>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>Image Files</legend>
+                <div id="image-file-list" style="font-size:0.9em;"></div>
+            </fieldset>
         </div>
 
         <!-- Mount ISO -->
         <div id="tab-mountiso" class="tab-panel">
             <h2>Mount ISO</h2>
-            <label>SMAC <select id="mountiso-smac"><option value="">-- select VM --</option></select></label>
-            <label>ISO Name <input type="text" id="mountiso-isoname" placeholder="CentOS-7-x86_64-Minimal-1810.iso"></label>
+            <label>VM-NAME <select id="mountiso-smac"><option value="">-- select VM --</option></select></label>
+            <label>ISO <select id="mountiso-isoname"><option value="">-- select ISO --</option></select></label>
             <div class="btn-group">
                 <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
                 <button class="execute-btn btn-unmount" onclick="executeUnmountIso()">Unmount ISO</button>
             </div>
+            <fieldset style="margin-top:16px;">
+                <legend>Upload ISO</legend>
+                <input type="file" id="iso-file-input" accept=".iso">
+                <div id="iso-upload-progress" style="display:none; margin-top:8px;">
+                    <progress id="iso-progress-bar" value="0" max="100" style="width:100%;"></progress>
+                    <span id="iso-progress-text"></span>
+                </div>
+                <button class="execute-btn" onclick="uploadIso()" style="margin-top:8px;">Upload</button>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>ISO Files</legend>
+                <div id="iso-file-list" style="font-size:0.9em;"></div>
+            </fieldset>
         </div>
 
         <!-- Live Migrate -->
         <div id="tab-livemigrate" class="tab-panel">
             <h2>Live Migrate</h2>
-            <label>SMAC <select id="livemigrate-smac"><option value="">-- select VM --</option></select></label>
+            <label>VM-NAME <select id="livemigrate-smac"><option value="">-- select VM --</option></select></label>
             <label>To Node IP <input type="text" id="livemigrate-to-node-ip" placeholder="10.40.1.32"></label>
             <button class="execute-btn" onclick="executeLiveMigrate()">Live Migrate</button>
         </div>
@@ -141,37 +175,14 @@
         <!-- Backup -->
         <div id="tab-backup" class="tab-panel">
             <h2>Backup VM</h2>
-            <label>SMAC <select id="backup-smac"><option value="">-- select VM --</option></select></label>
+            <label>VM-NAME <select id="backup-smac"><option value="">-- select VM --</option></select></label>
             <button class="execute-btn" onclick="executeSimple('backup')">Backup VM</button>
         </div>
-        <!-- VNC Start -->
-        <div id="tab-vnc-start" class="tab-panel">
-            <h2>VNC Start</h2>
-            <p class="form-desc">Start noVNC websockify proxy for VM console access</p>
-            <label>SMAC <select id="vnc-start-smac"><option value="">-- select VM --</option></select></label>
-            <label>noVNC Port <input type="text" id="vnc-start-novncport" placeholder="12001"></label>
-            <div class="btn-group">
-                <button class="execute-btn" onclick="executeVnc('start')">Start VNC Proxy</button>
-                <button class="execute-btn btn-console" onclick="openConsole()">Open Console</button>
-            </div>
-            <div id="vnc-console-link" style="display:none; margin-top:12px;">
-                <a id="vnc-console-url" href="#" target="_blank" class="console-link">🖥 Open VM Console in new tab</a>
-            </div>
-        </div>
-
-        <!-- VNC Stop -->
-        <div id="tab-vnc-stop" class="tab-panel">
-            <h2>VNC Stop</h2>
-            <p class="form-desc">Stop noVNC websockify proxy</p>
-            <label>SMAC <select id="vnc-stop-smac"><option value="">-- select VM --</option></select></label>
-            <label>noVNC Port <input type="text" id="vnc-stop-novncport" placeholder="12001"></label>
-            <button class="execute-btn" onclick="executeVnc('stop')">Stop VNC Proxy</button>
-        </div>
-
-        <!-- Metadata Service -->
+        <!-- Metadata Service (per-VM) -->
         <div id="tab-metadata" class="tab-panel">
             <h2>Metadata Service (MDS)</h2>
-            <p class="form-desc">EC2-compatible instance metadata configuration</p>
+            <p class="form-desc">Per-VM cloud-init configuration (used for seed ISO generation)</p>
+            <label>VM-NAME <select id="metadata-smac" onchange="loadMdsConfig()"><option value="">-- select VM --</option></select></label>
             <fieldset>
                 <legend>Instance Identity</legend>
                 <label>Instance ID <input type="text" id="mds-instance-id" placeholder="i-0000000000000001"></label>
@@ -193,7 +204,6 @@
             </fieldset>
             <div class="btn-group">
                 <button class="execute-btn" onclick="saveMdsConfig()">Save Config</button>
-                <button class="execute-btn btn-console" onclick="loadMdsConfig()">Load Config</button>
             </div>
         </div>
     </main>

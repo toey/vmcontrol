@@ -1,6 +1,8 @@
 use actix_files as fs;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use actix_web::web::Bytes;
 
+use crate::config::get_conf;
 use crate::mds;
 use crate::models::ApiResponse;
 use crate::operations;
@@ -50,12 +52,77 @@ async fn powerdown_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "powerdown", operations::powerdown).await
 }
 
-async fn create_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
-    handle_operation(body, "create", operations::create).await
+async fn create_config_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "create-config", operations::create_config).await
 }
 
-async fn copyimage_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
-    handle_operation(body, "copyimage", operations::copyimage).await
+async fn update_config_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "update-config", operations::update_config).await
+}
+
+async fn get_vm_handler(path: web::Path<String>) -> HttpResponse {
+    let smac = path.into_inner();
+    match crate::db::get_vm(&smac) {
+        Ok(vm) => HttpResponse::Ok().json(vm),
+        Err(e) => HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+// Per-VM MDS config
+async fn get_vm_mds_handler(path: web::Path<String>) -> HttpResponse {
+    let smac = path.into_inner();
+    match crate::db::get_vm(&smac) {
+        Ok(vm) => {
+            let config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+            let mds = config.get("mds").cloned().unwrap_or_else(|| {
+                // Return global defaults if VM has no MDS config
+                let global = mds::load_mds_config();
+                serde_json::to_value(&global).unwrap_or_default()
+            });
+            HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                message: "MDS config loaded".into(),
+                output: Some(serde_json::to_string_pretty(&mds).unwrap_or_default()),
+            })
+        }
+        Err(e) => HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
+    let smac = path.into_inner();
+    match crate::db::get_vm(&smac) {
+        Ok(vm) => {
+            let mut config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+            config["mds"] = body.into_inner();
+            let config_str = serde_json::to_string(&config).unwrap_or_default();
+            match crate::db::update_vm(&smac, &config_str) {
+                Ok(_) => HttpResponse::Ok().json(ApiResponse {
+                    success: true,
+                    message: format!("MDS config saved for VM '{}'", smac),
+                    output: None,
+                }),
+                Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to save: {}", e),
+                    output: None,
+                }),
+            }
+        }
+        Err(e) => HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
 }
 
 async fn listimage_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
@@ -101,6 +168,428 @@ async fn list_vms_handler() -> HttpResponse {
     }
 }
 
+async fn list_isos_handler() -> HttpResponse {
+    let iso_path = get_conf("iso_path");
+    let _ = std::fs::create_dir_all(&iso_path);
+    match std::fs::read_dir(&iso_path) {
+        Ok(entries) => {
+            let mut isos: Vec<serde_json::Value> = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "iso" {
+                        let name = entry.file_name().to_string_lossy().to_string();
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        isos.push(serde_json::json!({
+                            "name": name,
+                            "size": size,
+                        }));
+                    }
+                }
+            }
+            isos.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            HttpResponse::Ok().json(isos)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list ISOs: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn upload_iso_handler(
+    req: actix_web::HttpRequest,
+    body: Bytes,
+) -> HttpResponse {
+    // Get filename from X-Filename header
+    let filename = match req.headers().get("X-Filename") {
+        Some(v) => v.to_str().unwrap_or("upload.iso").to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing X-Filename header".into(),
+                output: None,
+            });
+        }
+    };
+
+    // Sanitize filename - only allow alphanumeric, dash, underscore, dot
+    let safe_name: String = filename
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    if safe_name.is_empty() || !safe_name.ends_with(".iso") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid filename (must end with .iso)".into(),
+            output: None,
+        });
+    }
+
+    let iso_path = get_conf("iso_path");
+    let _ = std::fs::create_dir_all(&iso_path);
+    let dest = format!("{}/{}", iso_path, safe_name);
+
+    match std::fs::write(&dest, &body) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Uploaded {} ({} bytes)", safe_name, body.len()),
+            output: Some(dest),
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to save ISO: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn list_disks_handler() -> HttpResponse {
+    let disk_path = get_conf("disk_path");
+
+    // Auto-sync: register any .qcow2 files on disk that are not in DB
+    if let Ok(entries) = std::fs::read_dir(&disk_path) {
+        if let Ok(db_disks) = crate::db::list_disks() {
+            let db_names: std::collections::HashSet<String> = db_disks.iter().map(|d| d.name.clone()).collect();
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".qcow2") {
+                    let base = fname.trim_end_matches(".qcow2");
+                    if !base.is_empty() && !db_names.contains(base) {
+                        let _ = crate::db::insert_disk(base, "");
+                    }
+                }
+            }
+        }
+    }
+
+    match crate::db::list_disks() {
+        Ok(disks) => {
+            let result: Vec<serde_json::Value> = disks.iter().map(|d| {
+                // Get actual file size from filesystem
+                let file_path = format!("{}/{}.qcow2", disk_path, d.name);
+                let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+                serde_json::json!({
+                    "name": d.name,
+                    "filename": format!("{}.qcow2", d.name),
+                    "disk_size": d.size,
+                    "size": file_size,
+                    "owner": d.owner,
+                })
+            }).collect();
+            HttpResponse::Ok().json(result)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list disks: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn create_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "create-disk", operations::create_disk).await
+}
+
+async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+
+    // Sanitize
+    if name.contains('/') || name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid disk name".into(),
+            output: None,
+        });
+    }
+
+    // Check if disk is assigned to any VM (via DB owner field)
+    if let Ok(disks) = crate::db::list_disks() {
+        for d in &disks {
+            if d.name == name && !d.owner.is_empty() {
+                return HttpResponse::BadRequest().json(ApiResponse {
+                    success: false,
+                    message: format!("Disk '{}' is assigned to VM '{}'. Remove it from the VM first.", name, d.owner),
+                    output: None,
+                });
+            }
+        }
+    }
+
+    let disk_path = get_conf("disk_path");
+    let path = format!("{}/{}.qcow2", disk_path, name);
+
+    // Delete file
+    let _ = std::fs::remove_file(&path);
+    // Delete from DB
+    let _ = crate::db::delete_disk(name);
+
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        message: format!("Deleted disk '{}'", name),
+        output: None,
+    })
+}
+
+async fn delete_iso_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+
+    // Sanitize
+    if name.contains('/') || name.contains("..") || !name.ends_with(".iso") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid filename".into(),
+            output: None,
+        });
+    }
+
+    let iso_path = get_conf("iso_path");
+    let path = format!("{}/{}", iso_path, name);
+
+    match std::fs::remove_file(&path) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Deleted {}", name),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to delete ISO: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn list_images_handler() -> HttpResponse {
+    let disk_path = get_conf("disk_path");
+    let _ = std::fs::create_dir_all(&disk_path);
+    match std::fs::read_dir(&disk_path) {
+        Ok(entries) => {
+            let mut images: Vec<serde_json::Value> = Vec::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if ["qcow2", "img", "raw", "vmdk"].contains(&ext_str.as_str()) {
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        images.push(serde_json::json!({
+                            "name": name,
+                            "size": size,
+                        }));
+                    }
+                }
+            }
+            images.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            HttpResponse::Ok().json(images)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list images: {}", e),
+            output: None,
+        }),
+    }
+}
+
+/// Detect qemu-img input format from file extension
+fn detect_image_format(filename: &str) -> Option<&'static str> {
+    let lower = filename.to_lowercase();
+    if lower.ends_with(".vmdk") { Some("vmdk") }
+    else if lower.ends_with(".vdi") { Some("vdi") }
+    else if lower.ends_with(".vhdx") { Some("vhdx") }
+    else if lower.ends_with(".raw") || lower.ends_with(".img") { Some("raw") }
+    else if lower.ends_with(".qcow2") { Some("qcow2") }
+    else { None }
+}
+
+async fn upload_image_handler(
+    req: actix_web::HttpRequest,
+    body: Bytes,
+) -> HttpResponse {
+    let filename = match req.headers().get("X-Filename") {
+        Some(v) => v.to_str().unwrap_or("upload.qcow2").to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing X-Filename header".into(),
+                output: None,
+            });
+        }
+    };
+
+    let safe_name: String = filename
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+        .collect();
+    if safe_name.is_empty() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid filename".into(),
+            output: None,
+        });
+    }
+
+    let src_format = match detect_image_format(&safe_name) {
+        Some(f) => f,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Unsupported format. Use: qcow2, vmdk, vdi, vhdx, raw, img".into(),
+                output: None,
+            });
+        }
+    };
+
+    let disk_path = get_conf("disk_path");
+    let _ = std::fs::create_dir_all(&disk_path);
+    let upload_path = format!("{}/{}", disk_path, safe_name);
+
+    // Save uploaded file
+    if let Err(e) = std::fs::write(&upload_path, &body) {
+        return HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to save file: {}", e),
+            output: None,
+        });
+    }
+
+    let file_size = body.len();
+
+    // If already qcow2, register in DB and done
+    if src_format == "qcow2" {
+        let base = safe_name.trim_end_matches(".qcow2");
+        let _ = crate::db::insert_disk(base, "");
+        return HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Uploaded {} ({} bytes)", safe_name, file_size),
+            output: Some(upload_path),
+        });
+    }
+
+    // Convert to qcow2
+    let qcow2_name = safe_name.rsplit_once('.')
+        .map(|(base, _)| format!("{}.qcow2", base))
+        .unwrap_or_else(|| format!("{}.qcow2", safe_name));
+    let qcow2_path = format!("{}/{}", disk_path, qcow2_name);
+    let qemu_img = get_conf("qemu_img_path");
+    let src_fmt = src_format.to_string();
+    let up_path = upload_path.clone();
+    let out_path = qcow2_path.clone();
+    let out_name = qcow2_name.clone();
+
+    let convert_result = web::block(move || {
+        use std::process::Command;
+        let output = Command::new(&qemu_img)
+            .args(["convert", "-f", &src_fmt, "-O", "qcow2", &up_path, &out_path])
+            .output()
+            .map_err(|e| format!("Failed to run qemu-img: {}", e))?;
+        if output.status.success() {
+            // Remove original uploaded file after successful conversion
+            let _ = std::fs::remove_file(&up_path);
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            // Cleanup on failure
+            let _ = std::fs::remove_file(&up_path);
+            let _ = std::fs::remove_file(&out_path);
+            Err(format!("Conversion failed: {}", stderr))
+        }
+    }).await;
+
+    match convert_result {
+        Ok(Ok(out)) => {
+            // Register converted qcow2 in DB
+            let base = out_name.trim_end_matches(".qcow2");
+            let _ = crate::db::insert_disk(base, "");
+            HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                message: format!("Uploaded & converted {} -> {} ({} bytes)", safe_name, out_name, file_size),
+                output: Some(out),
+            })
+        },
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Internal error: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn delete_image_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+
+    if name.contains('/') || name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid filename".into(),
+            output: None,
+        });
+    }
+
+    // Check if this image is a disk owned by a VM
+    if let Ok(disks) = crate::db::list_disks() {
+        let base_name = name.rsplit('.').skip(1).collect::<Vec<&str>>().into_iter().rev().collect::<Vec<&str>>().join(".");
+        for d in &disks {
+            if d.name == base_name && !d.owner.is_empty() {
+                return HttpResponse::BadRequest().json(ApiResponse {
+                    success: false,
+                    message: format!("Image '{}' is assigned to VM '{}'. Remove it from the VM first.", name, d.owner),
+                    output: None,
+                });
+            }
+        }
+    }
+
+    let disk_path = get_conf("disk_path");
+    let path = format!("{}/{}", disk_path, name);
+
+    match std::fs::remove_file(&path) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Deleted {}", name),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to delete image: {}", e),
+            output: None,
+        }),
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -134,13 +623,18 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     HttpServer::new(|| {
         App::new()
             .wrap(middleware::Logger::default())
+            // Allow up to 4GB uploads for ISO files
+            .app_data(web::PayloadConfig::new(4_294_967_296))
             // API routes
             .route("/api/vm/start", web::post().to(start_vm))
             .route("/api/vm/stop", web::post().to(stop_vm))
             .route("/api/vm/reset", web::post().to(reset_vm))
             .route("/api/vm/powerdown", web::post().to(powerdown_vm))
-            .route("/api/vm/create", web::post().to(create_vm))
-            .route("/api/vm/copyimage", web::post().to(copyimage_vm))
+            .route("/api/vm/create-config", web::post().to(create_config_vm))
+            .route("/api/vm/update-config", web::post().to(update_config_vm))
+            .route("/api/vm/get/{smac}", web::get().to(get_vm_handler))
+            .route("/api/vm/{smac}/mds", web::get().to(get_vm_mds_handler))
+            .route("/api/vm/{smac}/mds", web::post().to(save_vm_mds_handler))
             .route("/api/vm/listimage", web::post().to(listimage_vm))
             .route("/api/vm/delete", web::post().to(delete_vm_handler))
             .route("/api/vm/mountiso", web::post().to(mountiso_vm))
@@ -148,6 +642,18 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/livemigrate", web::post().to(livemigrate_vm))
             .route("/api/vm/backup", web::post().to(backup_vm))
             .route("/api/vm/list", web::get().to(list_vms_handler))
+            // Disk routes
+            .route("/api/disk/list", web::get().to(list_disks_handler))
+            .route("/api/disk/create", web::post().to(create_disk_handler))
+            .route("/api/disk/delete", web::post().to(delete_disk_handler))
+            // Image routes
+            .route("/api/image/list", web::get().to(list_images_handler))
+            .route("/api/image/upload", web::post().to(upload_image_handler))
+            .route("/api/image/delete", web::post().to(delete_image_handler))
+            // ISO routes
+            .route("/api/iso/list", web::get().to(list_isos_handler))
+            .route("/api/iso/upload", web::post().to(upload_iso_handler))
+            .route("/api/iso/delete", web::post().to(delete_iso_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

@@ -5,7 +5,7 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::send_cmd;
 
-/// Generate a cloud-init NoCloud seed ISO from MDS config
+/// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
 fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     let pctl_path = get_conf("pctl_path");
     let seed_dir = format!("{}/seed_{}", pctl_path, vm_name);
@@ -14,8 +14,18 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     // Create seed directory
     let _ = std::fs::create_dir_all(&seed_dir);
 
-    // Load MDS config
-    let config = mds::load_mds_config();
+    // Load per-VM MDS config from DB, fall back to global
+    let config = if let Ok(vm) = db::get_vm(vm_name) {
+        let vm_config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+        if let Some(mds_val) = vm_config.get("mds") {
+            serde_json::from_value::<mds::MdsConfig>(mds_val.clone())
+                .unwrap_or_else(|_| mds::load_mds_config())
+        } else {
+            mds::load_mds_config()
+        }
+    } else {
+        mds::load_mds_config()
+    };
 
     // Generate meta-data (NoCloud format with full MDS fields)
     let hostname = format!("{}-{}", config.hostname_prefix, vm_name);
@@ -51,10 +61,8 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     Ok(iso_path)
 }
 
-pub fn start(json_str: &str) -> Result<String, String> {
-    let cfg: VmStartConfig =
-        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
-
+/// Start a QEMU VM from config stored in the database
+fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, String> {
     let qemu_path = get_conf("qemu_path");
     let pctl_path = get_conf("pctl_path");
     let disk_path = get_conf("disk_path");
@@ -68,13 +76,12 @@ pub fn start(json_str: &str) -> Result<String, String> {
     let livemode = "0";
     let mut output_log = String::new();
 
+    // Use smac as the VM identifier
+    let ismac = smac.to_string();
+
     // gen disk
-    let mut ismac = String::new();
     let mut xdisk_cmd = String::new();
-    for (ix, disk) in cfg.disks.iter().enumerate() {
-        if ix == 0 {
-            ismac = disk.diskname.clone();
-        }
+    for disk in &cfg.disks {
         output_log.push_str(&format!("diskid : {}\n", disk.diskid));
         output_log.push_str(&format!("diskname : {}\n", disk.diskname));
         output_log.push_str(&format!("iops-total : {}\n", disk.iops_total));
@@ -98,13 +105,19 @@ pub fn start(json_str: &str) -> Result<String, String> {
         ));
     }
 
-    if ismac.is_empty() {
-        return Err("disk name is required (first disk's diskname is used as VM identifier)".into());
-    }
-
     // gen network adapter (user-mode networking for local)
-    // Derive SLIRP network from MDS local_ipv4 so VM gets the configured IP
-    let mds_config = mds::load_mds_config();
+    // Load per-VM MDS config for SLIRP IP settings
+    let mds_config = if let Ok(vm_rec) = db::get_vm(smac) {
+        let vm_cfg: serde_json::Value = serde_json::from_str(&vm_rec.config).unwrap_or_default();
+        if let Some(mds_val) = vm_cfg.get("mds") {
+            serde_json::from_value::<mds::MdsConfig>(mds_val.clone())
+                .unwrap_or_else(|_| mds::load_mds_config())
+        } else {
+            mds::load_mds_config()
+        }
+    } else {
+        mds::load_mds_config()
+    };
     let slirp_opts = if !mds_config.local_ipv4.is_empty() {
         let parts: Vec<&str> = mds_config.local_ipv4.split('.').collect();
         if parts.len() == 4 {
@@ -160,7 +173,6 @@ pub fn start(json_str: &str) -> Result<String, String> {
         }
     };
     let machinetype = " -machine type=pc-i440fx-9.2,accel=tcg ";
-    // SMBIOS hint to force cloud-init to use NoCloud datasource
     let smbios_cmd = " -smbios type=11,value=cloud-init:ds=nocloud ";
 
     // check live
@@ -203,7 +215,25 @@ pub fn start(json_str: &str) -> Result<String, String> {
     let cmd_output = send_cmd(&full_cmd).map_err(|e| format!("send cmd error: {}", e))?;
     output_log.push_str(&cmd_output);
 
+    // Set status to running
+    if let Err(e) = db::set_vm_status(smac, "running") {
+        output_log.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+    }
+
     Ok(output_log)
+}
+
+/// Start VM by smac — loads config from DB
+pub fn start(json_str: &str) -> Result<String, String> {
+    let cmd: SimpleCmd =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+
+    // Load VM config from database
+    let vm = db::get_vm(&cmd.smac)?;
+    let cfg: VmStartConfig =
+        serde_json::from_str(&vm.config).map_err(|e| format!("Config parse error: {}", e))?;
+
+    start_vm_with_config(&cmd.smac, &cfg)
 }
 
 pub fn stop(json_str: &str) -> Result<String, String> {
@@ -211,6 +241,10 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
     output.push_str(&send_cmd_pctl("stop", &cmd.smac));
+    // Set status to stopped
+    if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
+        output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+    }
     Ok(output)
 }
 
@@ -225,24 +259,25 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let output = send_cmd_pctl("powerdown", &cmd.smac);
+    // Set status to stopped
+    let _ = db::set_vm_status(&cmd.smac, "stopped");
     Ok(output)
 }
 
 pub fn delete_vm(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
-    let disk_path = get_conf("disk_path");
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);
-    if let Ok(out) = send_cmd(&format!("rm -f {}/{}.qcow2", disk_path, cmd.smac)) {
-        output.push_str(&out);
-    }
+    // Clear disk owners for this VM (disks remain, just unassigned)
+    let _ = db::clear_disk_owner_by_vm(&cmd.smac);
     // Remove VM from database
     if let Err(e) = db::delete_vm(&cmd.smac) {
         output.push_str(&format!("WARNING: DB delete failed: {}\n", e));
     }
     set_update_status("2", &cmd.smac);
     set_ma_mode("0", &cmd.smac);
+    output.push_str(&format!("VM '{}' deleted\n", cmd.smac));
     Ok(output)
 }
 
@@ -260,56 +295,71 @@ pub fn listimage(json_str: &str) -> Result<String, String> {
     Ok(output)
 }
 
-pub fn create(json_str: &str) -> Result<String, String> {
-    let cmd: CreateCmd =
+/// Create VM config — save to DB + assign disk owners
+pub fn create_config(json_str: &str) -> Result<String, String> {
+    let val: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
-    let disk_path = get_conf("disk_path");
-    let qemu_img = get_conf("qemu_img_path");
-    let _ = std::fs::create_dir_all(&disk_path);
+
+    let smac = val.get("smac").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if smac.is_empty() {
+        return Err("VM-NAME is required".into());
+    }
+
+    // Extract the VM config
+    let empty_obj = serde_json::Value::Object(serde_json::Map::new());
+    let config = val.get("config").unwrap_or(&empty_obj);
+    let config_str = serde_json::to_string(config).unwrap_or_default();
+
     let mut output = String::new();
-    if let Ok(out) = send_cmd(&format!(
-        "{} create -f qcow2 {}/{}.qcow2 {}",
-        qemu_img, disk_path, cmd.smac, cmd.size
-    )) {
-        output.push_str(&out);
+
+    // Save to database
+    db::insert_vm(&smac, "", "", &config_str)?;
+
+    // Set disk owners
+    if let Some(disks) = config.get("disks").and_then(|d| d.as_array()) {
+        for disk in disks {
+            if let Some(dname) = disk.get("diskname").and_then(|v| v.as_str()) {
+                if !dname.is_empty() {
+                    let _ = db::set_disk_owner(dname, &smac);
+                    output.push_str(&format!("Disk '{}' assigned to VM '{}'\n", dname, smac));
+                }
+            }
+        }
     }
-    if let Ok(out) = send_cmd(&format!("{} info {}/{}.qcow2", qemu_img, disk_path, cmd.smac)) {
-        output.push_str(&out);
-    }
-    // Save VM to database
-    if let Err(e) = db::insert_vm(&cmd.smac, "", &cmd.size) {
-        output.push_str(&format!("WARNING: DB insert failed: {}\n", e));
-    }
+
+    output.push_str(&format!("VM '{}' created successfully\n", smac));
     Ok(output)
 }
 
-pub fn copyimage(json_str: &str) -> Result<String, String> {
-    let cmd: CopyImageCmd =
+/// Update VM config in DB + reassign disk owners
+pub fn update_config(json_str: &str) -> Result<String, String> {
+    let val: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
-    let disk_path = get_conf("disk_path");
-    let qemu_img = get_conf("qemu_img_path");
-    let _ = std::fs::create_dir_all(&disk_path);
-    let mut output = String::new();
-    if let Ok(out) = send_cmd(&format!(
-        "cp {}/{}.qcow2 {}/{}.qcow2",
-        disk_path, cmd.itemplate, disk_path, cmd.smac
-    )) {
-        output.push_str(&out);
+
+    let smac = val.get("smac").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if smac.is_empty() {
+        return Err("VM-NAME is required".into());
     }
-    if let Ok(out) = send_cmd(&format!(
-        "{} resize {}/{}.qcow2 {}",
-        qemu_img, disk_path, cmd.smac, cmd.size
-    )) {
-        output.push_str(&out);
+
+    let empty_obj = serde_json::Value::Object(serde_json::Map::new());
+    let config = val.get("config").unwrap_or(&empty_obj);
+    let config_str = serde_json::to_string(config).unwrap_or_default();
+
+    db::update_vm(&smac, &config_str)?;
+
+    // Clear old disk owners for this VM, then set new ones
+    let _ = db::clear_disk_owner_by_vm(&smac);
+    if let Some(disks) = config.get("disks").and_then(|d| d.as_array()) {
+        for disk in disks {
+            if let Some(dname) = disk.get("diskname").and_then(|v| v.as_str()) {
+                if !dname.is_empty() {
+                    let _ = db::set_disk_owner(dname, &smac);
+                }
+            }
+        }
     }
-    if let Ok(out) = send_cmd(&format!("{} info {}/{}.qcow2", qemu_img, disk_path, cmd.smac)) {
-        output.push_str(&out);
-    }
-    // Save VM to database
-    if let Err(e) = db::insert_vm(&cmd.smac, "", &cmd.size) {
-        output.push_str(&format!("WARNING: DB insert failed: {}\n", e));
-    }
-    Ok(output)
+
+    Ok(format!("VM '{}' config updated\n", smac))
 }
 
 pub fn mountiso(json_str: &str) -> Result<String, String> {
@@ -340,6 +390,44 @@ pub fn backup(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let output = send_cmd_pctl("backup", &cmd.smac);
+    Ok(output)
+}
+
+/// Create a standalone disk — creates .qcow2 file + saves to SQLite
+pub fn create_disk(json_str: &str) -> Result<String, String> {
+    let val: serde_json::Value =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+
+    let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if name.is_empty() {
+        return Err("Disk name is required".into());
+    }
+    // sanitize name: only allow alphanumeric, dash, underscore, dot
+    if name.chars().any(|c| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.') {
+        return Err("Invalid disk name (alphanumeric, dash, underscore, dot only)".into());
+    }
+
+    let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("40G").to_string();
+
+    let disk_path = get_conf("disk_path");
+    let qemu_img = get_conf("qemu_img_path");
+    let _ = std::fs::create_dir_all(&disk_path);
+
+    let disk_file = format!("{}/{}.qcow2", disk_path, name);
+    if std::path::Path::new(&disk_file).exists() {
+        return Err(format!("Disk '{}' already exists", name));
+    }
+
+    let mut output = format!("Creating disk: {}\n", disk_file);
+    match send_cmd(&format!("{} create -f qcow2 {} {}", qemu_img, disk_file, size)) {
+        Ok(out) => output.push_str(&out),
+        Err(e) => return Err(format!("Failed to create disk: {}", e)),
+    }
+
+    // Save to SQLite
+    db::insert_disk(&name, &size)?;
+
+    output.push_str(&format!("Disk '{}' ({}) created successfully\n", name, size));
     Ok(output)
 }
 
