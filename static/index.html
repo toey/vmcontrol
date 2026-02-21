@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VM Control Panel</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <header>
+        <h1>VM Control Panel</h1>
+        <p class="subtitle">QEMU / KVM Management</p>
+    </header>
+
+    <nav id="tabs">
+        <button class="tab active" data-tab="start">Start</button>
+        <button class="tab" data-tab="stop">Stop</button>
+        <button class="tab" data-tab="reset">Reset</button>
+        <button class="tab" data-tab="powerdown">Powerdown</button>
+        <button class="tab" data-tab="create">Create</button>
+        <button class="tab" data-tab="copyimage">Copy Image</button>
+        <button class="tab" data-tab="listimage">List Image</button>
+        <button class="tab" data-tab="delete">Delete</button>
+        <button class="tab" data-tab="mountiso">Mount ISO</button>
+        <button class="tab" data-tab="livemigrate">Live Migrate</button>
+        <button class="tab" data-tab="backup">Backup</button>
+    </nav>
+
+    <main>
+        <!-- Start VM -->
+        <div id="tab-start" class="tab-panel active">
+            <h2>Start VM</h2>
+            <div class="form-grid">
+                <fieldset>
+                    <legend>Node</legend>
+                    <label>Node IP <input type="text" id="start-node-ip" placeholder="10.40.1.31"></label>
+                </fieldset>
+                <fieldset>
+                    <legend>CPU</legend>
+                    <label>Sockets <input type="text" id="start-cpu-sockets" value="1"></label>
+                    <label>Cores <input type="text" id="start-cpu-cores" value="2"></label>
+                    <label>Threads <input type="text" id="start-cpu-threads" value="1"></label>
+                </fieldset>
+                <fieldset>
+                    <legend>Memory</legend>
+                    <label>Size (MB) <input type="text" id="start-memory-size" value="2048"></label>
+                </fieldset>
+                <fieldset>
+                    <legend>Features</legend>
+                    <label>Is Windows
+                        <select id="start-is-windows">
+                            <option value="0">No</option>
+                            <option value="1">Yes</option>
+                        </select>
+                    </label>
+                </fieldset>
+            </div>
+            <fieldset>
+                <legend>Network Adapters</legend>
+                <div id="start-network-adapters"></div>
+                <button type="button" class="btn-add" onclick="addNetworkAdapter()">+ Add Adapter</button>
+            </fieldset>
+            <fieldset>
+                <legend>Disks</legend>
+                <div id="start-disks"></div>
+                <button type="button" class="btn-add" onclick="addDisk()">+ Add Disk</button>
+            </fieldset>
+            <button class="execute-btn" onclick="executeStart()">Start VM</button>
+        </div>
+
+        <!-- Stop -->
+        <div id="tab-stop" class="tab-panel">
+            <h2>Stop VM</h2>
+            <label>Node IP <input type="text" id="stop-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="stop-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <button class="execute-btn" onclick="executeSimple('stop')">Stop VM</button>
+        </div>
+
+        <!-- Reset -->
+        <div id="tab-reset" class="tab-panel">
+            <h2>Reset VM</h2>
+            <label>Node IP <input type="text" id="reset-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="reset-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <button class="execute-btn" onclick="executeSimple('reset')">Reset VM</button>
+        </div>
+
+        <!-- Powerdown -->
+        <div id="tab-powerdown" class="tab-panel">
+            <h2>Powerdown VM</h2>
+            <label>Node IP <input type="text" id="powerdown-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="powerdown-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <button class="execute-btn" onclick="executeSimple('powerdown')">Powerdown VM</button>
+        </div>
+
+        <!-- Create -->
+        <div id="tab-create" class="tab-panel">
+            <h2>Create Disk</h2>
+            <label>Node IP <input type="text" id="create-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="create-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>Size <input type="text" id="create-size" placeholder="40G"></label>
+            <button class="execute-btn" onclick="executeCreate()">Create Disk</button>
+        </div>
+
+        <!-- Copy Image -->
+        <div id="tab-copyimage" class="tab-panel">
+            <h2>Copy Image</h2>
+            <label>Node IP <input type="text" id="copyimage-node-ip" placeholder="10.40.1.31"></label>
+            <label>Template <input type="text" id="copyimage-itemplate" placeholder="CentOS-7-x86_64-GenericCloud-1907"></label>
+            <label>SMAC <input type="text" id="copyimage-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>Size <input type="text" id="copyimage-size" placeholder="40G"></label>
+            <button class="execute-btn" onclick="executeCopyImage()">Copy Image</button>
+        </div>
+
+        <!-- List Image -->
+        <div id="tab-listimage" class="tab-panel">
+            <h2>List Images</h2>
+            <label>Node IP <input type="text" id="listimage-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="listimage-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <button class="execute-btn" onclick="executeSimple('listimage')">List Images</button>
+        </div>
+
+        <!-- Delete -->
+        <div id="tab-delete" class="tab-panel">
+            <h2>Delete VM</h2>
+            <label>Node IP <input type="text" id="delete-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="delete-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <button class="execute-btn" onclick="executeSimple('delete')">Delete VM</button>
+        </div>
+
+        <!-- Mount ISO -->
+        <div id="tab-mountiso" class="tab-panel">
+            <h2>Mount ISO</h2>
+            <label>Node IP <input type="text" id="mountiso-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="mountiso-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>ISO Name <input type="text" id="mountiso-isoname" placeholder="CentOS-7-x86_64-Minimal-1810.iso"></label>
+            <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
+        </div>
+
+        <!-- Live Migrate -->
+        <div id="tab-livemigrate" class="tab-panel">
+            <h2>Live Migrate</h2>
+            <label>Node IP <input type="text" id="livemigrate-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="livemigrate-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>To Node IP <input type="text" id="livemigrate-to-node-ip" placeholder="10.40.1.32"></label>
+            <button class="execute-btn" onclick="executeLiveMigrate()">Live Migrate</button>
+        </div>
+
+        <!-- Backup -->
+        <div id="tab-backup" class="tab-panel">
+            <h2>Backup VM</h2>
+            <label>Node IP <input type="text" id="backup-node-ip" placeholder="10.40.1.31"></label>
+            <label>SMAC <input type="text" id="backup-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <button class="execute-btn" onclick="executeSimple('backup')">Backup VM</button>
+        </div>
+    </main>
+
+    <section id="output-section">
+        <h3>Output</h3>
+        <div id="status-indicator"></div>
+        <pre id="output">Ready.</pre>
+    </section>
+
+    <script src="/app.js"></script>
+</body>
+</html>
