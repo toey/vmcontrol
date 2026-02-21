@@ -26,6 +26,7 @@
         <button class="tab" data-tab="backup">Backup</button>
         <button class="tab" data-tab="vnc-start">VNC Start</button>
         <button class="tab" data-tab="vnc-stop">VNC Stop</button>
+        <button class="tab" data-tab="metadata">Metadata</button>
     </nav>
 
     <main>
@@ -123,7 +124,10 @@
             <h2>Mount ISO</h2>
             <label>SMAC <input type="text" id="mountiso-smac" placeholder="52-54-c4-ca-42-38"></label>
             <label>ISO Name <input type="text" id="mountiso-isoname" placeholder="CentOS-7-x86_64-Minimal-1810.iso"></label>
-            <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
+            <div class="btn-group">
+                <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
+                <button class="execute-btn btn-unmount" onclick="executeUnmountIso()">Unmount ISO</button>
+            </div>
         </div>
 
         <!-- Live Migrate -->
@@ -162,6 +166,36 @@
             <label>SMAC <input type="text" id="vnc-stop-smac" placeholder="52-54-c4-ca-42-38"></label>
             <label>noVNC Port <input type="text" id="vnc-stop-novncport" placeholder="12001"></label>
             <button class="execute-btn" onclick="executeVnc('stop')">Stop VNC Proxy</button>
+        </div>
+
+        <!-- Metadata Service -->
+        <div id="tab-metadata" class="tab-panel">
+            <h2>Metadata Service (MDS)</h2>
+            <p class="form-desc">EC2-compatible instance metadata configuration</p>
+            <fieldset>
+                <legend>Instance Identity</legend>
+                <label>Instance ID <input type="text" id="mds-instance-id" placeholder="i-0000000000000001"></label>
+                <label>AMI ID <input type="text" id="mds-ami-id" placeholder="ami-00000001"></label>
+                <label>Hostname Prefix <input type="text" id="mds-hostname-prefix" placeholder="vm"></label>
+            </fieldset>
+            <fieldset>
+                <legend>Network</legend>
+                <label>Public IPv4 <input type="text" id="mds-public-ipv4" placeholder="10.0.0.1"></label>
+                <label>Local IPv4 <input type="text" id="mds-local-ipv4" placeholder="10.0.0.1"></label>
+                <label>Default MAC <input type="text" id="mds-default-mac" placeholder="52:54:00:00:00:01"></label>
+            </fieldset>
+            <fieldset>
+                <legend>Cloud-Init</legend>
+                <label>SSH Public Key <input type="text" id="mds-ssh-pubkey" placeholder="ssh-rsa AAAA..."></label>
+                <label>Root Password <input type="text" id="mds-root-password" placeholder="changeme"></label>
+                <label>Extra Userdata (YAML)
+                    <textarea id="mds-userdata-extra" rows="5" placeholder="# Additional cloud-init YAML"></textarea>
+                </label>
+            </fieldset>
+            <div class="btn-group">
+                <button class="execute-btn" onclick="saveMdsConfig()">Save Config</button>
+                <button class="execute-btn btn-console" onclick="loadMdsConfig()">Load Config</button>
+            </div>
         </div>
     </main>
 

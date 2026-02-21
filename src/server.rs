@@ -1,6 +1,7 @@
 use actix_files as fs;
 use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 
+use crate::mds;
 use crate::models::ApiResponse;
 use crate::operations;
 
@@ -69,6 +70,10 @@ async fn mountiso_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "mountiso", operations::mountiso).await
 }
 
+async fn unmountiso_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "unmountiso", operations::unmountiso).await
+}
+
 async fn livemigrate_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "livemigrate", operations::livemigrate).await
 }
@@ -88,8 +93,33 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
-    println!("VM Control API server starting on http://{}", bind_addr);
+    let mds_bind = "169.254.169.254:80";
 
+    println!("VM Control API server starting on http://{}", bind_addr);
+    println!("MDS metadata server starting on http://{}", mds_bind);
+
+    // MDS-only server on 169.254.169.254:80
+    let mds_server = HttpServer::new(|| {
+        App::new()
+            .wrap(middleware::Logger::default())
+            .configure(mds::configure_mds_routes)
+    })
+    .bind(mds_bind);
+
+    match mds_server {
+        Ok(srv) => {
+            println!("MDS bound to {} OK", mds_bind);
+            tokio::spawn(srv.run());
+        }
+        Err(e) => {
+            eprintln!(
+                "WARNING: Cannot bind MDS to {} ({}). MDS still available on {}",
+                mds_bind, e, bind_addr
+            );
+        }
+    }
+
+    // Main control panel + MDS on main port
     HttpServer::new(|| {
         App::new()
             .wrap(middleware::Logger::default())
@@ -103,12 +133,15 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/listimage", web::post().to(listimage_vm))
             .route("/api/vm/delete", web::post().to(delete_vm_handler))
             .route("/api/vm/mountiso", web::post().to(mountiso_vm))
+            .route("/api/vm/unmountiso", web::post().to(unmountiso_vm))
             .route("/api/vm/livemigrate", web::post().to(livemigrate_vm))
             .route("/api/vm/backup", web::post().to(backup_vm))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))
-            // Static files
+            // MDS routes
+            .configure(mds::configure_mds_routes)
+            // Static files (must be last - catch-all)
             .service(fs::Files::new("/", "./static").index_file("index.html"))
     })
     .bind(bind_addr)?

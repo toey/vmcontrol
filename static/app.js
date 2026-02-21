@@ -5,6 +5,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        // Auto-load MDS config when switching to metadata tab
+        if (tab.dataset.tab === 'metadata') { loadMdsConfig(); }
     });
 });
 
@@ -156,6 +158,13 @@ function executeMountIso() {
     });
 }
 
+// Unmount ISO
+function executeUnmountIso() {
+    apiCall('unmountiso', {
+        smac: val('mountiso-smac'),
+    });
+}
+
 // Live migrate
 function executeLiveMigrate() {
     apiCall('livemigrate', {
@@ -194,6 +203,78 @@ function openConsole() {
         return;
     }
     window.open('/vnc.html?port=' + port, '_blank');
+}
+
+// MDS Config - Load
+async function loadMdsConfig() {
+    var statusEl = document.getElementById('status-indicator');
+    var outputEl = document.getElementById('output');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Loading MDS config...';
+    try {
+        var response = await fetch('/api/mds/config');
+        var data = await response.json();
+        if (data.success && data.output) {
+            var config = JSON.parse(data.output);
+            document.getElementById('mds-instance-id').value = config.instance_id || '';
+            document.getElementById('mds-ami-id').value = config.ami_id || '';
+            document.getElementById('mds-hostname-prefix').value = config.hostname_prefix || '';
+            document.getElementById('mds-public-ipv4').value = config.public_ipv4 || '';
+            document.getElementById('mds-local-ipv4').value = config.local_ipv4 || '';
+            document.getElementById('mds-default-mac').value = config.default_mac || '';
+            document.getElementById('mds-ssh-pubkey').value = config.ssh_pubkey || '';
+            document.getElementById('mds-root-password').value = config.root_password || '';
+            document.getElementById('mds-userdata-extra').value = config.userdata_extra || '';
+            statusEl.className = 'success';
+            statusEl.textContent = 'MDS config loaded';
+            outputEl.textContent = data.output;
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// MDS Config - Save
+async function saveMdsConfig() {
+    var statusEl = document.getElementById('status-indicator');
+    var outputEl = document.getElementById('output');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Saving MDS config...';
+    var payload = {
+        instance_id: val('mds-instance-id'),
+        ami_id: val('mds-ami-id'),
+        hostname_prefix: val('mds-hostname-prefix'),
+        public_ipv4: val('mds-public-ipv4'),
+        local_ipv4: val('mds-local-ipv4'),
+        ssh_pubkey: val('mds-ssh-pubkey'),
+        root_password: val('mds-root-password'),
+        userdata_extra: document.getElementById('mds-userdata-extra').value,
+        default_mac: val('mds-default-mac'),
+        kea_socket_path: '',
+    };
+    try {
+        var response = await fetch('/api/mds/config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        var data = await response.json();
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            outputEl.textContent = JSON.stringify(payload, null, 2);
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
 }
 
 // Init with one adapter and one disk row

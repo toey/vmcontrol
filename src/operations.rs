@@ -225,6 +225,13 @@ pub fn mountiso(json_str: &str) -> Result<String, String> {
     Ok(output)
 }
 
+pub fn unmountiso(json_str: &str) -> Result<String, String> {
+    let cmd: SimpleCmd =
+        serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+    let output = send_cmd_pctl("unmountiso", &cmd.smac);
+    Ok(output)
+}
+
 pub fn livemigrate(json_str: &str) -> Result<String, String> {
     let cmd: LiveMigrateCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
