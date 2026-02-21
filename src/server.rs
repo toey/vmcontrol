@@ -104,8 +104,17 @@ async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json
             let mut config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
             let mut new_mds = body.into_inner();
 
-            // If root_password is empty, preserve existing password from DB
+            // Validate root_password minimum length (if provided)
             let new_pw = new_mds.get("root_password").and_then(|v| v.as_str()).unwrap_or("");
+            if !new_pw.is_empty() && new_pw.len() < 6 {
+                return HttpResponse::BadRequest().json(ApiResponse {
+                    success: false,
+                    message: "Root password must be at least 6 characters".into(),
+                    output: None,
+                });
+            }
+
+            // If root_password is empty, preserve existing password from DB
             if new_pw.is_empty() {
                 if let Some(existing_pw) = config.get("mds")
                     .and_then(|m| m.get("root_password"))

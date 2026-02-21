@@ -1006,6 +1006,12 @@ async function saveMdsConfig() {
         alert('Please select a VM first');
         return;
     }
+    // Validate root password minimum length (if provided)
+    var pw = val('mds-root-password');
+    if (pw && pw.length < 6) {
+        alert('Root Password must be at least 6 characters.');
+        return;
+    }
     // Validate unique IPv4
     var newIp = val('mds-local-ipv4');
     var usedIps = getUsedIpv4s(smac);
