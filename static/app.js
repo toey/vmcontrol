@@ -473,11 +473,12 @@ async function loadDiskList() {
         } else {
             listDiv.innerHTML = disks.map(function(d) {
                 var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + d.owner + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
+                var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">Clone</button>';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                     '<span>' + d.name + '.qcow2 <small>(' + sizeInfo + ')</small>' + ownerText + '</span>' +
-                    deleteBtn +
+                    '<span>' + cloneBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -548,6 +549,36 @@ async function deleteDisk(name) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: name }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            loadDiskList();
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// Clone a disk image
+async function cloneDisk(source) {
+    var newName = prompt('Clone "' + source + '" to new name:', source + '-clone');
+    if (!newName) return;
+    newName = newName.trim();
+    if (!newName) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Cloning ' + source + ' -> ' + newName + '...';
+    try {
+        var response = await fetch('/api/disk/clone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: source, name: newName }),
         });
         var data = await safeJson(response);
         if (data.success) {
@@ -885,6 +916,34 @@ function genAmiId() {
     return 'ami-' + hex;
 }
 
+// Collect all used Local IPv4 addresses from all VMs
+function getUsedIpv4s(excludeSmac) {
+    var used = [];
+    var vms = window._vmList || [];
+    vms.forEach(function(vm) {
+        if (vm.smac === excludeSmac) return;
+        try {
+            var cfg = typeof vm.config === 'string' ? JSON.parse(vm.config) : vm.config;
+            if (cfg && cfg.mds && cfg.mds.local_ipv4) {
+                used.push(cfg.mds.local_ipv4);
+            }
+        } catch (e) {}
+    });
+    return used;
+}
+
+// Generate a unique Local IPv4: 10.0.{N}.10 where N starts from 1
+function genUniqueIpv4(excludeSmac) {
+    var used = getUsedIpv4s(excludeSmac);
+    var n = 1;
+    while (n < 255) {
+        var ip = '10.0.' + n + '.10';
+        if (used.indexOf(ip) === -1) return ip;
+        n++;
+    }
+    return '10.0.1.10';
+}
+
 async function loadMdsConfig() {
     var smac = val('metadata-smac');
     if (!smac) return;
@@ -904,10 +963,28 @@ async function loadMdsConfig() {
             document.getElementById('mds-ami-id').value = (!aid || aid === 'ami-00000001') ? genAmiId() : aid;
             var hp = config.hostname_prefix;
             document.getElementById('mds-hostname-prefix').value = (!hp || hp === 'vm') ? smac : hp;
-            document.getElementById('mds-local-ipv4').value = config.local_ipv4 || '';
-            document.getElementById('mds-default-mac').value = config.default_mac || '';
+            // Auto-generate unique IPv4 if empty or default
+            var ipv4 = config.local_ipv4;
+            document.getElementById('mds-local-ipv4').value = (!ipv4 || ipv4 === '10.0.0.1') ? genUniqueIpv4(smac) : ipv4;
+            document.getElementById('mds-vlan').value = config.vlan || '0';
+            // Default MAC: pull from VM's Network Adapter 0
+            var vmMac = '';
+            var vms = window._vmList || [];
+            for (var i = 0; i < vms.length; i++) {
+                if (vms[i].smac === smac) {
+                    try {
+                        var vmCfg = typeof vms[i].config === 'string' ? JSON.parse(vms[i].config) : vms[i].config;
+                        var adapters = vmCfg.network_adapters || [];
+                        if (adapters.length > 0) vmMac = adapters[0].mac || '';
+                    } catch (e) {}
+                    break;
+                }
+            }
+            var defMac = config.default_mac;
+            document.getElementById('mds-default-mac').value = vmMac || defMac || '';
             document.getElementById('mds-ssh-pubkey').value = config.ssh_pubkey || '';
-            document.getElementById('mds-root-password').value = config.root_password || '';
+            // Don't show saved password — leave field empty (enter new to change)
+            document.getElementById('mds-root-password').value = '';
             document.getElementById('mds-userdata-extra').value = config.userdata_extra || '';
             statusEl.className = 'success';
             statusEl.textContent = 'MDS config loaded for ' + smac;
@@ -929,6 +1006,13 @@ async function saveMdsConfig() {
         alert('Please select a VM first');
         return;
     }
+    // Validate unique IPv4
+    var newIp = val('mds-local-ipv4');
+    var usedIps = getUsedIpv4s(smac);
+    if (newIp && usedIps.indexOf(newIp) !== -1) {
+        alert('Local IPv4 "' + newIp + '" is already used by another VM. Please choose a different IP.');
+        return;
+    }
     var statusEl = document.getElementById('status-indicator');
     var outputEl = document.getElementById('output');
     statusEl.className = 'loading';
@@ -938,6 +1022,7 @@ async function saveMdsConfig() {
         ami_id: val('mds-ami-id'),
         hostname_prefix: val('mds-hostname-prefix'),
         local_ipv4: val('mds-local-ipv4'),
+        vlan: val('mds-vlan') || '0',
         ssh_pubkey: val('mds-ssh-pubkey'),
         root_password: val('mds-root-password'),
         userdata_extra: document.getElementById('mds-userdata-extra').value,
@@ -954,6 +1039,8 @@ async function saveMdsConfig() {
         if (data.success) {
             statusEl.className = 'success';
             statusEl.textContent = data.message;
+            // Clear root password after save (use-once)
+            document.getElementById('mds-root-password').value = '';
             outputEl.textContent = JSON.stringify(payload, null, 2);
         } else {
             statusEl.className = 'error';

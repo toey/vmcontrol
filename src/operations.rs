@@ -311,6 +311,36 @@ fn used_vnc_ports() -> Vec<u16> {
     ports
 }
 
+/// Collect all Local IPv4 addresses used by VMs in DB
+fn used_ipv4s() -> Vec<String> {
+    let mut ips = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(ip) = cfg.get("mds").and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()) {
+                    ips.push(ip.to_string());
+                }
+            }
+        }
+    }
+    ips
+}
+
+/// Find next available Local IPv4: 10.0.{N}.10, N starts from 1
+fn next_ipv4() -> String {
+    let used = used_ipv4s();
+    let mut n: u8 = 1;
+    loop {
+        let ip = format!("10.0.{}.10", n);
+        if !used.contains(&ip) {
+            return ip;
+        }
+        if n == 254 { break; }
+        n += 1;
+    }
+    "10.0.1.10".to_string()
+}
+
 /// Find next available VNC port starting from 12001, step by 2
 fn next_vnc_port() -> u16 {
     let used = used_vnc_ports();
@@ -336,6 +366,20 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
     if config.get("vnc_port").is_none() {
         let port = next_vnc_port();
         config["vnc_port"] = serde_json::json!(port);
+    }
+    // Auto-assign unique Local IPv4 if MDS not set or default
+    {
+        let needs_ip = match config.get("mds").and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()) {
+            Some(ip) if !ip.is_empty() && ip != "10.0.0.1" => false,
+            _ => true,
+        };
+        if needs_ip {
+            let ip = next_ipv4();
+            if config.get("mds").is_none() {
+                config["mds"] = serde_json::json!({});
+            }
+            config["mds"]["local_ipv4"] = serde_json::json!(ip);
+        }
     }
     let config_str = serde_json::to_string(&config).unwrap_or_default();
 

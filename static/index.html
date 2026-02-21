@@ -195,13 +195,14 @@
             </fieldset>
             <fieldset>
                 <legend>Network</legend>
-                <label>Local IPv4 <input type="text" id="mds-local-ipv4" placeholder="10.0.0.1"></label>
+                <label>Local IPv4 <input type="text" id="mds-local-ipv4" placeholder="10.0.1.10"></label>
+                <label>VLAN <input type="text" id="mds-vlan" placeholder="0"></label>
                 <label>Default MAC <input type="text" id="mds-default-mac" placeholder="52:54:00:00:00:01"></label>
             </fieldset>
             <fieldset>
                 <legend>Cloud-Init</legend>
                 <label>SSH Public Key <input type="text" id="mds-ssh-pubkey" placeholder="ssh-rsa AAAA..."></label>
-                <label>Root Password <input type="text" id="mds-root-password" placeholder="changeme"></label>
+                <label>Root Password <input type="password" id="mds-root-password" placeholder="leave empty to keep current" autocomplete="off"></label>
                 <label>Extra Userdata (YAML)
                     <textarea id="mds-userdata-extra" rows="5" placeholder="# Additional cloud-init YAML"></textarea>
                 </label>

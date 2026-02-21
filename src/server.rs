@@ -102,7 +102,22 @@ async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json
     match crate::db::get_vm(&smac) {
         Ok(vm) => {
             let mut config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-            config["mds"] = body.into_inner();
+            let mut new_mds = body.into_inner();
+
+            // If root_password is empty, preserve existing password from DB
+            let new_pw = new_mds.get("root_password").and_then(|v| v.as_str()).unwrap_or("");
+            if new_pw.is_empty() {
+                if let Some(existing_pw) = config.get("mds")
+                    .and_then(|m| m.get("root_password"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !existing_pw.is_empty() {
+                        new_mds["root_password"] = serde_json::json!(existing_pw);
+                    }
+                }
+            }
+
+            config["mds"] = new_mds;
             let config_str = serde_json::to_string(&config).unwrap_or_default();
             match crate::db::update_vm(&smac, &config_str) {
                 Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -370,6 +385,102 @@ async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse
         message: format!("Deleted disk '{}'", name),
         output: None,
     })
+}
+
+async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let source = match body.get("source").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'source' field".into(),
+                output: None,
+            });
+        }
+    };
+    let new_name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+
+    // Sanitize
+    if source.contains('/') || source.contains("..") || new_name.contains('/') || new_name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid disk name".into(),
+            output: None,
+        });
+    }
+    if new_name.chars().any(|c| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.') {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid name (alphanumeric, dash, underscore, dot only)".into(),
+            output: None,
+        });
+    }
+
+    let disk_path = get_conf("disk_path");
+    let src_file = format!("{}/{}.qcow2", disk_path, source);
+    let dst_file = format!("{}/{}.qcow2", disk_path, new_name);
+
+    if !std::path::Path::new(&src_file).exists() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Source disk '{}' not found", source),
+            output: None,
+        });
+    }
+    if std::path::Path::new(&dst_file).exists() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Disk '{}' already exists", new_name),
+            output: None,
+        });
+    }
+
+    // Copy file (blocking)
+    let src = src_file.clone();
+    let dst = dst_file.clone();
+    let nn = new_name.clone();
+    let result = web::block(move || {
+        std::fs::copy(&src, &dst)
+            .map_err(|e| format!("Copy failed: {}", e))?;
+        // Get file size for DB
+        let size = std::fs::metadata(&dst)
+            .map(|m| {
+                let mb = m.len() / 1024 / 1024;
+                if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) }
+            })
+            .unwrap_or_else(|_| "0".into());
+        crate::db::insert_disk(&nn, &size)
+            .map_err(|e| format!("DB insert error: {}", e))?;
+        Ok::<String, String>(format!("Cloned '{}' -> '{}'", src, dst))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Disk '{}' cloned to '{}'", source, new_name),
+            output: Some(msg),
+        }),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e.to_string(),
+            output: None,
+        }),
+    }
 }
 
 async fn delete_iso_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
@@ -757,6 +868,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/disk/list", web::get().to(list_disks_handler))
             .route("/api/disk/create", web::post().to(create_disk_handler))
             .route("/api/disk/delete", web::post().to(delete_disk_handler))
+            .route("/api/disk/clone", web::post().to(clone_disk_handler))
             // Image routes
             .route("/api/image/list", web::get().to(list_images_handler))
             .route("/api/image/upload", web::post().to(upload_image_handler))

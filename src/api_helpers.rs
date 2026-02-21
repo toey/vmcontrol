@@ -1,5 +1,4 @@
 use crate::config::get_conf;
-use crate::ssh::send_cmd;
 
 pub fn curl_request(url: &str) {
     match reqwest::blocking::get(url) {
@@ -30,21 +29,56 @@ pub fn set_update_status(mode: &str, smac: &str) {
     ));
 }
 
-/// Send a command to QEMU monitor via unix socket using shell pipe
-/// Strips ANSI escape sequences from output for clean results
+/// Send a command to QEMU monitor via Unix socket (native Rust)
 pub fn qemu_monitor_cmd(smac: &str, command: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
     let pctl_path = get_conf("pctl_path");
     let sock_path = format!("{}/{}", pctl_path, smac);
 
-    // Use printf + nc -U, then strip ANSI codes and filter prompts
-    // nc -U exits with code 1 when connection closes, so use || true to ignore
-    let shell_cmd = format!(
-        "((sleep 0.2; printf '{}\\n'; sleep 0.5) | nc -U {} 2>/dev/null || true) | perl -pe \"s/\\e\\[[0-9;]*[a-zA-Z]//g\" | tr -d '\\r' | grep -v '(qemu)' | grep -v 'QEMU.*monitor' | grep -v '^$' || true",
-        command.replace("'", "'\\''"),
-        sock_path
-    );
+    let mut stream = UnixStream::connect(&sock_path)
+        .map_err(|e| format!("Monitor socket connect failed ({}): {}", sock_path, e))?;
 
-    send_cmd(&shell_cmd)
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("Set timeout error: {}", e))?;
+
+    // Read and discard the initial QEMU prompt
+    let mut buf = [0u8; 4096];
+    let _ = stream.read(&mut buf);
+
+    // Send the command
+    stream
+        .write_all(format!("{}\n", command).as_bytes())
+        .map_err(|e| format!("Write error: {}", e))?;
+
+    // Wait for QEMU to process, then read response
+    std::thread::sleep(Duration::from_millis(500));
+    let mut response = String::new();
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break
+            }
+            Err(e) => return Err(format!("Read error: {}", e)),
+        }
+    }
+
+    // Clean up: remove ANSI codes, prompts, empty lines
+    let clean: Vec<&str> = response
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.contains("(qemu)") && !l.contains("QEMU") && !l.is_empty())
+        .collect();
+
+    Ok(clean.join("\n"))
 }
 
 /// Map pctl mode to QEMU monitor command and execute

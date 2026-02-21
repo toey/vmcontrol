@@ -15,6 +15,8 @@ pub struct MdsConfig {
     pub ami_id: String,
     pub hostname_prefix: String,
     pub local_ipv4: String,
+    #[serde(default)]
+    pub vlan: String,
     pub ssh_pubkey: String,
     pub root_password: String,
     pub userdata_extra: String,
@@ -29,6 +31,7 @@ impl Default for MdsConfig {
             ami_id: "ami-00000001".into(),
             hostname_prefix: "vm".into(),
             local_ipv4: "10.0.0.1".into(),
+            vlan: "0".into(),
             ssh_pubkey: "".into(),
             root_password: "changeme".into(),
             userdata_extra: "".into(),

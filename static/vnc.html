@@ -84,6 +84,19 @@
             color: #000;
         }
         .btn-reset:hover { background: #e3b341; }
+        .btn-mount {
+            background: #1f6feb;
+            color: #fff;
+        }
+        .btn-mount:hover { background: #388bfd; }
+        .btn-unmount {
+            background: #6e7681;
+            color: #fff;
+        }
+        .btn-unmount:hover { background: #848d97; }
+        .toolbar select {
+            min-width: 120px;
+        }
         #status {
             font-size: 13px;
             padding: 2px 8px;
@@ -118,12 +131,15 @@
     <div class="toolbar">
         <a href="/" class="btn-back">&larr; Back</a>
         <h1>VM Console</h1>
-        <label>Host <span id="vnc-host" class="info-text">localhost</span></label>
+        <span id="vnc-host" style="display:none">localhost</span>
         <label>Port <span id="vnc-port" class="info-text">12001</span></label>
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
         <button class="btn-reset" onclick="doReset()">Reset VM</button>
+        <select id="iso-select"><option value="">-- ISO --</option></select>
+        <button class="btn-mount" onclick="doMountIso()">Mount</button>
+        <button class="btn-unmount" onclick="doUnmountIso()">Unmount</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
     <div id="vnc-container">
@@ -218,6 +234,71 @@
                 setStatus('Reset error: ' + e.message, 'status-disconnected');
             }
         };
+
+        // ISO mount/unmount
+        window.loadIsoList = async function() {
+            try {
+                var res = await fetch('/api/iso/list');
+                var isos = await res.json();
+                var sel = document.getElementById('iso-select');
+                sel.innerHTML = '<option value="">-- ISO --</option>';
+                isos.forEach(function(iso) {
+                    var opt = document.createElement('option');
+                    opt.value = iso.name;
+                    opt.textContent = iso.name;
+                    sel.appendChild(opt);
+                });
+            } catch (e) {}
+        };
+
+        window.doMountIso = async function() {
+            var params = new URLSearchParams(window.location.search);
+            var smac = params.get('smac');
+            if (!smac) { alert('No VM-NAME'); return; }
+            var iso = document.getElementById('iso-select').value;
+            if (!iso) { alert('Select an ISO first'); return; }
+            setStatus('Mounting ' + iso + '...', 'status-connecting');
+            try {
+                var res = await fetch('/api/vm/mountiso', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ smac: smac, isoname: iso }),
+                });
+                var data = await res.json();
+                if (data.success) {
+                    setStatus('Mounted: ' + iso, 'status-connected');
+                } else {
+                    setStatus('Mount failed: ' + data.message, 'status-disconnected');
+                }
+            } catch (e) {
+                setStatus('Mount error: ' + e.message, 'status-disconnected');
+            }
+        };
+
+        window.doUnmountIso = async function() {
+            var params = new URLSearchParams(window.location.search);
+            var smac = params.get('smac');
+            if (!smac) { alert('No VM-NAME'); return; }
+            setStatus('Unmounting...', 'status-connecting');
+            try {
+                var res = await fetch('/api/vm/unmountiso', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ smac: smac }),
+                });
+                var data = await res.json();
+                if (data.success) {
+                    setStatus('ISO unmounted', 'status-connected');
+                } else {
+                    setStatus('Unmount failed: ' + data.message, 'status-disconnected');
+                }
+            } catch (e) {
+                setStatus('Unmount error: ' + e.message, 'status-disconnected');
+            }
+        };
+
+        // Load ISO list on page load
+        loadIsoList();
 
         // auto-connect if port in URL params
         var params = new URLSearchParams(window.location.search);
