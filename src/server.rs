@@ -77,6 +77,14 @@ async fn backup_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "backup", operations::backup).await
 }
 
+async fn vnc_start_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "vnc_start", operations::vnc_start).await
+}
+
+async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "vnc_stop", operations::vnc_stop).await
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -97,6 +105,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/mountiso", web::post().to(mountiso_vm))
             .route("/api/vm/livemigrate", web::post().to(livemigrate_vm))
             .route("/api/vm/backup", web::post().to(backup_vm))
+            // VNC routes
+            .route("/api/vnc/start", web::post().to(vnc_start_handler))
+            .route("/api/vnc/stop", web::post().to(vnc_stop_handler))
             // Static files
             .service(fs::Files::new("/", "./static").index_file("index.html"))
     })

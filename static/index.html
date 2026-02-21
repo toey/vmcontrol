@@ -24,6 +24,8 @@
         <button class="tab" data-tab="mountiso">Mount ISO</button>
         <button class="tab" data-tab="livemigrate">Live Migrate</button>
         <button class="tab" data-tab="backup">Backup</button>
+        <button class="tab" data-tab="vnc-start">VNC Start</button>
+        <button class="tab" data-tab="vnc-stop">VNC Stop</button>
     </nav>
 
     <main>
@@ -31,10 +33,6 @@
         <div id="tab-start" class="tab-panel active">
             <h2>Start VM</h2>
             <div class="form-grid">
-                <fieldset>
-                    <legend>Node</legend>
-                    <label>Node IP <input type="text" id="start-node-ip" placeholder="10.40.1.31"></label>
-                </fieldset>
                 <fieldset>
                     <legend>CPU</legend>
                     <label>Sockets <input type="text" id="start-cpu-sockets" value="1"></label>
@@ -71,7 +69,6 @@
         <!-- Stop -->
         <div id="tab-stop" class="tab-panel">
             <h2>Stop VM</h2>
-            <label>Node IP <input type="text" id="stop-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="stop-smac" placeholder="52-54-c4-ca-42-38"></label>
             <button class="execute-btn" onclick="executeSimple('stop')">Stop VM</button>
         </div>
@@ -79,7 +76,6 @@
         <!-- Reset -->
         <div id="tab-reset" class="tab-panel">
             <h2>Reset VM</h2>
-            <label>Node IP <input type="text" id="reset-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="reset-smac" placeholder="52-54-c4-ca-42-38"></label>
             <button class="execute-btn" onclick="executeSimple('reset')">Reset VM</button>
         </div>
@@ -87,7 +83,6 @@
         <!-- Powerdown -->
         <div id="tab-powerdown" class="tab-panel">
             <h2>Powerdown VM</h2>
-            <label>Node IP <input type="text" id="powerdown-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="powerdown-smac" placeholder="52-54-c4-ca-42-38"></label>
             <button class="execute-btn" onclick="executeSimple('powerdown')">Powerdown VM</button>
         </div>
@@ -95,7 +90,6 @@
         <!-- Create -->
         <div id="tab-create" class="tab-panel">
             <h2>Create Disk</h2>
-            <label>Node IP <input type="text" id="create-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="create-smac" placeholder="52-54-c4-ca-42-38"></label>
             <label>Size <input type="text" id="create-size" placeholder="40G"></label>
             <button class="execute-btn" onclick="executeCreate()">Create Disk</button>
@@ -104,7 +98,6 @@
         <!-- Copy Image -->
         <div id="tab-copyimage" class="tab-panel">
             <h2>Copy Image</h2>
-            <label>Node IP <input type="text" id="copyimage-node-ip" placeholder="10.40.1.31"></label>
             <label>Template <input type="text" id="copyimage-itemplate" placeholder="CentOS-7-x86_64-GenericCloud-1907"></label>
             <label>SMAC <input type="text" id="copyimage-smac" placeholder="52-54-c4-ca-42-38"></label>
             <label>Size <input type="text" id="copyimage-size" placeholder="40G"></label>
@@ -114,7 +107,6 @@
         <!-- List Image -->
         <div id="tab-listimage" class="tab-panel">
             <h2>List Images</h2>
-            <label>Node IP <input type="text" id="listimage-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="listimage-smac" placeholder="52-54-c4-ca-42-38"></label>
             <button class="execute-btn" onclick="executeSimple('listimage')">List Images</button>
         </div>
@@ -122,7 +114,6 @@
         <!-- Delete -->
         <div id="tab-delete" class="tab-panel">
             <h2>Delete VM</h2>
-            <label>Node IP <input type="text" id="delete-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="delete-smac" placeholder="52-54-c4-ca-42-38"></label>
             <button class="execute-btn" onclick="executeSimple('delete')">Delete VM</button>
         </div>
@@ -130,7 +121,6 @@
         <!-- Mount ISO -->
         <div id="tab-mountiso" class="tab-panel">
             <h2>Mount ISO</h2>
-            <label>Node IP <input type="text" id="mountiso-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="mountiso-smac" placeholder="52-54-c4-ca-42-38"></label>
             <label>ISO Name <input type="text" id="mountiso-isoname" placeholder="CentOS-7-x86_64-Minimal-1810.iso"></label>
             <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
@@ -139,7 +129,6 @@
         <!-- Live Migrate -->
         <div id="tab-livemigrate" class="tab-panel">
             <h2>Live Migrate</h2>
-            <label>Node IP <input type="text" id="livemigrate-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="livemigrate-smac" placeholder="52-54-c4-ca-42-38"></label>
             <label>To Node IP <input type="text" id="livemigrate-to-node-ip" placeholder="10.40.1.32"></label>
             <button class="execute-btn" onclick="executeLiveMigrate()">Live Migrate</button>
@@ -148,9 +137,31 @@
         <!-- Backup -->
         <div id="tab-backup" class="tab-panel">
             <h2>Backup VM</h2>
-            <label>Node IP <input type="text" id="backup-node-ip" placeholder="10.40.1.31"></label>
             <label>SMAC <input type="text" id="backup-smac" placeholder="52-54-c4-ca-42-38"></label>
             <button class="execute-btn" onclick="executeSimple('backup')">Backup VM</button>
+        </div>
+        <!-- VNC Start -->
+        <div id="tab-vnc-start" class="tab-panel">
+            <h2>VNC Start</h2>
+            <p class="form-desc">Start noVNC websockify proxy for VM console access</p>
+            <label>SMAC <input type="text" id="vnc-start-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>noVNC Port <input type="text" id="vnc-start-novncport" placeholder="12001"></label>
+            <div class="btn-group">
+                <button class="execute-btn" onclick="executeVnc('start')">Start VNC Proxy</button>
+                <button class="execute-btn btn-console" onclick="openConsole()">Open Console</button>
+            </div>
+            <div id="vnc-console-link" style="display:none; margin-top:12px;">
+                <a id="vnc-console-url" href="#" target="_blank" class="console-link">🖥 Open VM Console in new tab</a>
+            </div>
+        </div>
+
+        <!-- VNC Stop -->
+        <div id="tab-vnc-stop" class="tab-panel">
+            <h2>VNC Stop</h2>
+            <p class="form-desc">Stop noVNC websockify proxy</p>
+            <label>SMAC <input type="text" id="vnc-stop-smac" placeholder="52-54-c4-ca-42-38"></label>
+            <label>noVNC Port <input type="text" id="vnc-stop-novncport" placeholder="12001"></label>
+            <button class="execute-btn" onclick="executeVnc('stop')">Stop VNC Proxy</button>
         </div>
     </main>
 

@@ -2,17 +2,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct VmStartConfig {
-    pub node: NodeInfo,
     pub cpu: CpuInfo,
     pub memory: MemoryInfo,
     pub features: Features,
     pub network_adapters: Vec<NetworkAdapter>,
     pub disks: Vec<DiskInfo>,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct NodeInfo {
-    pub ip: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -53,20 +47,17 @@ pub struct DiskInfo {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SimpleCmd {
-    pub node_ip: String,
     pub smac: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CreateCmd {
-    pub node_ip: String,
     pub smac: String,
     pub size: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CopyImageCmd {
-    pub node_ip: String,
     pub itemplate: String,
     pub smac: String,
     pub size: String,
@@ -74,16 +65,20 @@ pub struct CopyImageCmd {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MountIsoCmd {
-    pub node_ip: String,
     pub smac: String,
     pub isoname: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct LiveMigrateCmd {
-    pub node_ip: String,
     pub smac: String,
     pub to_node_ip: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct VncCmd {
+    pub smac: String,
+    pub novncport: String,
 }
 
 #[derive(Debug, Serialize)]

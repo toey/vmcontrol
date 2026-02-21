@@ -1,36 +1,25 @@
-use ssh2::Session;
-use std::io::Read;
-use std::net::TcpStream;
-use std::path::Path;
+use std::process::Command;
 
-pub fn send_cmd(address: &str, command: &str) -> Result<String, String> {
-    let port = "22";
-    let key_path = "/root/.ssh/id_rsa";
+pub fn send_cmd(command: &str) -> Result<String, String> {
+    let result = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .map_err(|e| format!("unable to execute command: {}", e))?;
 
-    let tcp = TcpStream::connect(format!("{}:{}", address, port))
-        .map_err(|e| format!("unable to connect: {}", e))?;
+    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&result.stderr).to_string();
 
-    let mut sess = Session::new().map_err(|e| format!("unable to create session: {}", e))?;
-    sess.set_tcp_stream(tcp);
-    sess.handshake()
-        .map_err(|e| format!("SSH handshake failed: {}", e))?;
+    if !result.status.success() {
+        if stderr.is_empty() {
+            return Err(format!("command failed with exit code: {}", result.status));
+        }
+        return Err(format!("command failed: {}", stderr));
+    }
 
-    sess.userauth_pubkey_file("root", None, Path::new(key_path), None)
-        .map_err(|e| format!("unable to authenticate: {}", e))?;
-
-    let mut channel = sess
-        .channel_session()
-        .map_err(|e| format!("unable to create channel: {}", e))?;
-
-    channel
-        .exec(command)
-        .map_err(|e| format!("unable to exec command: {}", e))?;
-
-    let mut output = String::new();
-    channel
-        .read_to_string(&mut output)
-        .map_err(|e| format!("unable to read output: {}", e))?;
-
-    channel.wait_close().ok();
+    let mut output = stdout;
+    if !stderr.is_empty() {
+        output.push_str(&stderr);
+    }
     Ok(output)
 }

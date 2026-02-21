@@ -104,6 +104,12 @@ legend {
     font-weight: 600;
 }
 
+.form-desc {
+    color: #8b949e;
+    font-size: 0.85rem;
+    margin-bottom: 1rem;
+}
+
 label {
     display: block;
     margin-bottom: 0.6rem;
@@ -200,6 +206,40 @@ input::placeholder {
     background: #21262d;
     color: #484f58;
     cursor: not-allowed;
+}
+
+/* Button group */
+.btn-group {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+.btn-console {
+    background: #1f6feb;
+}
+
+.btn-console:hover {
+    background: #388bfd;
+}
+
+/* Console link */
+.console-link {
+    display: inline-block;
+    padding: 8px 16px;
+    background: #161b22;
+    color: #58a6ff;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    text-decoration: none;
+    font-size: 0.9rem;
+    font-weight: 600;
+    transition: all 0.15s;
+}
+
+.console-link:hover {
+    background: #21262d;
+    border-color: #58a6ff;
 }
 
 /* Output section */

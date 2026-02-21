@@ -20,7 +20,8 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var response = await fetch('/api/vm/' + operation, {
+        var apiPath = operation.startsWith('vnc/') ? '/api/' + operation : '/api/vm/' + operation;
+        var response = await fetch(apiPath, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -49,10 +50,9 @@ function val(id) {
     return document.getElementById(id).value;
 }
 
-// SimpleCmd operations
+// SimpleCmd operations (smac only)
 function executeSimple(operation) {
     apiCall(operation, {
-        node_ip: val(operation + '-node-ip'),
         smac: val(operation + '-smac'),
     });
 }
@@ -80,7 +80,6 @@ function executeStart() {
     });
 
     apiCall('start', {
-        node: { ip: val('start-node-ip') },
         cpu: {
             sockets: val('start-cpu-sockets'),
             cores: val('start-cpu-cores'),
@@ -93,14 +92,25 @@ function executeStart() {
     });
 }
 
+// Generate random MAC address (52:54:00:xx:xx:xx)
+function genMac() {
+    var hex = '0123456789abcdef';
+    var mac = '52:54:00';
+    for (var i = 0; i < 3; i++) {
+        mac += ':' + hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+    }
+    return mac;
+}
+
 // Dynamic rows - Network Adapter
 function addNetworkAdapter() {
     var container = document.getElementById('start-network-adapters');
+    var count = container.querySelectorAll('.adapter-row').length;
     var row = document.createElement('div');
     row.className = 'adapter-row';
     row.innerHTML =
-        '<input class="adapter-netid" placeholder="Net ID" value="0">' +
-        '<input class="adapter-mac" placeholder="MAC (52:54:c4:ca:42:38)">' +
+        '<input class="adapter-netid" placeholder="Net ID" value="' + count + '">' +
+        '<input class="adapter-mac" placeholder="MAC" value="' + genMac() + '">' +
         '<input class="adapter-vlan" placeholder="VLAN" value="0">' +
         '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
     container.appendChild(row);
@@ -124,7 +134,6 @@ function addDisk() {
 // Create disk
 function executeCreate() {
     apiCall('create', {
-        node_ip: val('create-node-ip'),
         smac: val('create-smac'),
         size: val('create-size'),
     });
@@ -133,7 +142,6 @@ function executeCreate() {
 // Copy image
 function executeCopyImage() {
     apiCall('copyimage', {
-        node_ip: val('copyimage-node-ip'),
         itemplate: val('copyimage-itemplate'),
         smac: val('copyimage-smac'),
         size: val('copyimage-size'),
@@ -143,7 +151,6 @@ function executeCopyImage() {
 // Mount ISO
 function executeMountIso() {
     apiCall('mountiso', {
-        node_ip: val('mountiso-node-ip'),
         smac: val('mountiso-smac'),
         isoname: val('mountiso-isoname'),
     });
@@ -152,10 +159,41 @@ function executeMountIso() {
 // Live migrate
 function executeLiveMigrate() {
     apiCall('livemigrate', {
-        node_ip: val('livemigrate-node-ip'),
         smac: val('livemigrate-smac'),
         to_node_ip: val('livemigrate-to-node-ip'),
     });
+}
+
+// VNC operations
+async function executeVnc(mode) {
+    var prefix = 'vnc-' + mode;
+    var payload = {
+        smac: val(prefix + '-smac'),
+        novncport: val(prefix + '-novncport'),
+    };
+    await apiCall('vnc/' + mode, payload);
+
+    // Show console link after successful VNC start
+    if (mode === 'start') {
+        var statusEl = document.getElementById('status-indicator');
+        if (statusEl.className === 'success') {
+            var port = val('vnc-start-novncport');
+            var linkDiv = document.getElementById('vnc-console-link');
+            var linkEl = document.getElementById('vnc-console-url');
+            linkEl.href = '/vnc.html?port=' + port;
+            linkDiv.style.display = 'block';
+        }
+    }
+}
+
+// Open VNC console in new tab
+function openConsole() {
+    var port = val('vnc-start-novncport');
+    if (!port) {
+        alert('Please enter the noVNC port first');
+        return;
+    }
+    window.open('/vnc.html?port=' + port, '_blank');
 }
 
 // Init with one adapter and one disk row
