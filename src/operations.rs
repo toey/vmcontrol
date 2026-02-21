@@ -1,7 +1,54 @@
 use crate::api_helpers::{send_cmd_pctl, set_ma_mode, set_update_status};
 use crate::config::get_conf;
+use crate::mds;
 use crate::models::*;
 use crate::ssh::send_cmd;
+
+/// Generate a cloud-init NoCloud seed ISO from MDS config
+fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
+    let pctl_path = get_conf("pctl_path");
+    let seed_dir = format!("{}/seed_{}", pctl_path, vm_name);
+    let iso_path = format!("{}/seed_{}.iso", pctl_path, vm_name);
+
+    // Create seed directory
+    let _ = std::fs::create_dir_all(&seed_dir);
+
+    // Load MDS config
+    let config = mds::load_mds_config();
+
+    // Generate meta-data (NoCloud format with full MDS fields)
+    let hostname = format!("{}-{}", config.hostname_prefix, vm_name);
+    let mut meta_data = String::new();
+    meta_data.push_str(&format!("instance-id: {}\n", config.instance_id));
+    meta_data.push_str(&format!("local-hostname: {}\n", hostname));
+    meta_data.push_str(&format!("ami-id: {}\n", config.ami_id));
+    meta_data.push_str(&format!("local-ipv4: {}\n", config.local_ipv4));
+    if !config.ssh_pubkey.is_empty() {
+        meta_data.push_str("public-keys:\n");
+        meta_data.push_str(&format!("  - {}\n", config.ssh_pubkey));
+    }
+
+    // Generate user-data (cloud-config for NoCloud)
+    let user_data = mds::generate_userdata_nocloud(&config);
+
+    // Write files (no network-config — let SLIRP DHCP handle networking)
+    std::fs::write(format!("{}/meta-data", seed_dir), &meta_data)
+        .map_err(|e| format!("Failed to write meta-data: {}", e))?;
+    std::fs::write(format!("{}/user-data", seed_dir), &user_data)
+        .map_err(|e| format!("Failed to write user-data: {}", e))?;
+
+    // Create ISO using hdiutil (macOS)
+    let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
+    send_cmd(&format!(
+        "hdiutil makehybrid -iso -joliet -default-volume-name cidata -o '{}' '{}'",
+        iso_path, seed_dir
+    )).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+
+    // Cleanup seed directory
+    let _ = std::fs::remove_dir_all(&seed_dir);
+
+    Ok(iso_path)
+}
 
 pub fn start(json_str: &str) -> Result<String, String> {
     let cfg: VmStartConfig =
@@ -55,6 +102,23 @@ pub fn start(json_str: &str) -> Result<String, String> {
     }
 
     // gen network adapter (user-mode networking for local)
+    // Derive SLIRP network from MDS local_ipv4 so VM gets the configured IP
+    let mds_config = mds::load_mds_config();
+    let slirp_opts = if !mds_config.local_ipv4.is_empty() {
+        let parts: Vec<&str> = mds_config.local_ipv4.split('.').collect();
+        if parts.len() == 4 {
+            let net = format!("{}.{}.{}.0/24", parts[0], parts[1], parts[2]);
+            let host = format!("{}.{}.{}.1", parts[0], parts[1], parts[2]);
+            let dns = format!("{}.{}.{}.2", parts[0], parts[1], parts[2]);
+            format!(",net={},host={},dns={},dhcpstart={}",
+                net, host, dns, mds_config.local_ipv4)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
     let mut xnic_cmd = String::new();
     for adapter in &cfg.network_adapters {
         output_log.push_str(&format!("netid : {}\n", adapter.netid));
@@ -62,8 +126,9 @@ pub fn start(json_str: &str) -> Result<String, String> {
         output_log.push_str(&format!("vlanid : {}\n", adapter.vlan));
 
         xnic_cmd.push_str(&format!(
-            " -netdev user,id=net{netid} -device virtio-net-pci,netdev=net{netid},mac={mac}",
+            " -netdev user,id=net{netid}{slirp} -device virtio-net-pci,netdev=net{netid},mac={mac}",
             netid = adapter.netid,
+            slirp = slirp_opts,
             mac = adapter.mac,
         ));
     }
@@ -81,7 +146,21 @@ pub fn start(json_str: &str) -> Result<String, String> {
     );
     let cdromdevice = " -drive if=ide,index=0,media=cdrom ";
     let usbdevice = " -usb -device usb-tablet,bus=usb-bus.0,port=1 ";
+
+    // Generate cloud-init seed ISO from MDS config
+    let seed_iso_cmd = match generate_seed_iso(&ismac) {
+        Ok(iso_path) => {
+            output_log.push_str(&format!("seed ISO : {}\n", iso_path));
+            format!(" -drive file={},if=ide,index=1,media=cdrom,readonly=on ", iso_path)
+        }
+        Err(e) => {
+            output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
+            String::new()
+        }
+    };
     let machinetype = " -machine type=pc-i440fx-9.2,accel=tcg ";
+    // SMBIOS hint to force cloud-init to use NoCloud datasource
+    let smbios_cmd = " -smbios type=11,value=cloud-init:ds=nocloud ";
 
     // check live
     let live_mode_cmd = if livemode == "1" {
@@ -101,7 +180,7 @@ pub fn start(json_str: &str) -> Result<String, String> {
     };
 
     let full_cmd = format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         qemu_path,
         defaultboot,
         windows_cmd,
@@ -112,6 +191,8 @@ pub fn start(json_str: &str) -> Result<String, String> {
         machinetype,
         smp_cmd,
         cdromdevice,
+        seed_iso_cmd,
+        smbios_cmd,
         usbdevice,
         monitorunix,
         live_mode_cmd,

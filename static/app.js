@@ -219,7 +219,6 @@ async function loadMdsConfig() {
             document.getElementById('mds-instance-id').value = config.instance_id || '';
             document.getElementById('mds-ami-id').value = config.ami_id || '';
             document.getElementById('mds-hostname-prefix').value = config.hostname_prefix || '';
-            document.getElementById('mds-public-ipv4').value = config.public_ipv4 || '';
             document.getElementById('mds-local-ipv4').value = config.local_ipv4 || '';
             document.getElementById('mds-default-mac').value = config.default_mac || '';
             document.getElementById('mds-ssh-pubkey').value = config.ssh_pubkey || '';
@@ -248,7 +247,7 @@ async function saveMdsConfig() {
         instance_id: val('mds-instance-id'),
         ami_id: val('mds-ami-id'),
         hostname_prefix: val('mds-hostname-prefix'),
-        public_ipv4: val('mds-public-ipv4'),
+        public_ipv4: '',
         local_ipv4: val('mds-local-ipv4'),
         ssh_pubkey: val('mds-ssh-pubkey'),
         root_password: val('mds-root-password'),

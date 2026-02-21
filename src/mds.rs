@@ -14,7 +14,6 @@ pub struct MdsConfig {
     pub instance_id: String,
     pub ami_id: String,
     pub hostname_prefix: String,
-    pub public_ipv4: String,
     pub local_ipv4: String,
     pub ssh_pubkey: String,
     pub root_password: String,
@@ -29,7 +28,6 @@ impl Default for MdsConfig {
             instance_id: "i-0000000000000001".into(),
             ami_id: "ami-00000001".into(),
             hostname_prefix: "vm".into(),
-            public_ipv4: "10.0.0.1".into(),
             local_ipv4: "10.0.0.1".into(),
             ssh_pubkey: "".into(),
             root_password: "changeme".into(),
@@ -64,7 +62,7 @@ pub fn save_mds_config(config: &MdsConfig) -> Result<(), String> {
 // Cloud-init userdata generation
 // ──────────────────────────────────────────
 
-fn generate_userdata(config: &MdsConfig) -> String {
+pub fn generate_userdata(config: &MdsConfig) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("ssh_pwauth: true\n");
     ud.push_str("users:\n");
@@ -91,6 +89,40 @@ fn generate_userdata(config: &MdsConfig) -> String {
     ud.push_str("    timeout: 30\n");
     ud.push_str("warnings:\n");
     ud.push_str("  dsid_missing_source: off\n");
+
+    if !config.userdata_extra.is_empty() {
+        ud.push_str(&config.userdata_extra);
+        if !config.userdata_extra.ends_with('\n') {
+            ud.push('\n');
+        }
+    }
+
+    ud
+}
+
+/// Generate user-data for NoCloud seed ISO (no Ec2 datasource block)
+pub fn generate_userdata_nocloud(config: &MdsConfig) -> String {
+    let mut ud = String::from("#cloud-config\n");
+    ud.push_str("datasource_list: [ NoCloud, None ]\n");
+    ud.push_str("ssh_pwauth: true\n");
+    ud.push_str("users:\n");
+    ud.push_str("  - name: root\n");
+    ud.push_str("    primary_group: root\n");
+    ud.push_str("    groups: root\n");
+    ud.push_str("    lock_passwd: false\n");
+    ud.push_str("    shell: /bin/bash\n");
+    ud.push_str("resize_rootfs: True\n");
+    ud.push_str("chpasswd:\n");
+    ud.push_str("  list: |\n");
+    ud.push_str(&format!("    root:{}\n", config.root_password));
+    ud.push_str("  expire: False\n");
+
+    if !config.ssh_pubkey.is_empty() {
+        ud.push_str("ssh_authorized_keys:\n");
+        ud.push_str(&format!("  - {}\n", config.ssh_pubkey));
+    }
+
+    ud.push_str("manage_etc_hosts: true\n");
 
     if !config.userdata_extra.is_empty() {
         ud.push_str(&config.userdata_extra);
@@ -159,7 +191,7 @@ async fn userdata_handler() -> HttpResponse {
 async fn metadata_index() -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/plain")
-        .body("ami-id\nhostname\nlocal-hostname\npublic-hostname\nnetwork/\ninstance-id\nlocal-ipv4\npublic-ipv4\npublic-keys/")
+        .body("ami-id\nhostname\nlocal-hostname\npublic-hostname\nnetwork/\ninstance-id\nlocal-ipv4\npublic-keys/")
 }
 
 async fn instance_id_handler() -> HttpResponse {
@@ -193,13 +225,6 @@ async fn local_ipv4_handler(req: HttpRequest) -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/plain")
         .body(ip)
-}
-
-async fn public_ipv4_handler() -> HttpResponse {
-    let config = load_mds_config();
-    HttpResponse::Ok()
-        .content_type("text/plain")
-        .body(config.public_ipv4)
 }
 
 async fn pubkeys_index() -> HttpResponse {
@@ -320,7 +345,6 @@ pub fn configure_mds_routes(cfg: &mut web::ServiceConfig) {
         .route("/2009-04-04/meta-data/local-hostname", web::get().to(hostname_handler))
         .route("/2009-04-04/meta-data/public-hostname", web::get().to(hostname_handler))
         .route("/2009-04-04/meta-data/local-ipv4", web::get().to(local_ipv4_handler))
-        .route("/2009-04-04/meta-data/public-ipv4", web::get().to(public_ipv4_handler))
         .route("/2009-04-04/meta-data/public-keys/", web::get().to(pubkeys_index))
         .route("/2009-04-04/meta-data/public-keys/0", web::get().to(pubkeys_0))
         .route("/2009-04-04/meta-data/public-keys/0/openssh-key", web::get().to(pubkeys_openssh))
