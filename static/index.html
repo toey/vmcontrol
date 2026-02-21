@@ -176,7 +176,11 @@
         <div id="tab-backup" class="tab-panel">
             <h2>Backup VM</h2>
             <label>VM-NAME <select id="backup-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeSimple('backup')">Backup VM</button>
+            <button class="execute-btn" onclick="executeBackup()">Backup VM</button>
+            <fieldset style="margin-top:16px;">
+                <legend>Backup History</legend>
+                <div id="backup-list" style="font-size:0.9em;"></div>
+            </fieldset>
         </div>
         <!-- Metadata Service (per-VM) -->
         <div id="tab-metadata" class="tab-panel">

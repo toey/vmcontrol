@@ -158,6 +158,37 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
 }
 
 async fn list_vms_handler() -> HttpResponse {
+    // Auto-backfill VNC ports for VMs that don't have one
+    if let Ok(vms) = crate::db::list_vms() {
+        let mut used_ports: Vec<u16> = Vec::new();
+        let mut need_port: Vec<String> = Vec::new();
+        for vm in &vms {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
+                    used_ports.push(p as u16);
+                } else {
+                    need_port.push(vm.smac.clone());
+                }
+            } else {
+                need_port.push(vm.smac.clone());
+            }
+        }
+        let mut next_port: u16 = 12001;
+        for smac in &need_port {
+            while used_ports.contains(&next_port) {
+                next_port += 1;
+            }
+            // Update config with new vnc_port
+            if let Ok(vm) = crate::db::get_vm(smac) {
+                let mut cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+                cfg["vnc_port"] = serde_json::json!(next_port);
+                let _ = crate::db::update_vm(smac, &serde_json::to_string(&cfg).unwrap_or_default());
+            }
+            used_ports.push(next_port);
+            next_port += 1;
+        }
+    }
+
     match crate::db::list_vms() {
         Ok(vms) => HttpResponse::Ok().json(vms),
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
@@ -590,6 +621,86 @@ async fn delete_image_handler(body: web::Json<serde_json::Value>) -> HttpRespons
     }
 }
 
+async fn list_backups_handler() -> HttpResponse {
+    let live_path = get_conf("live_path");
+    let _ = std::fs::create_dir_all(&live_path);
+    match std::fs::read_dir(&live_path) {
+        Ok(entries) => {
+            let mut backups: Vec<serde_json::Value> = Vec::new();
+            for entry in entries.flatten() {
+                let fname = entry.file_name().to_string_lossy().to_string();
+                if fname.ends_with(".gz") {
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    // Parse VM name and timestamp from filename: vmname_YYYYMMDD_HHMMSS.gz
+                    let base = fname.trim_end_matches(".gz");
+                    // Find the timestamp part (last 2 underscore-separated segments)
+                    let parts: Vec<&str> = base.rsplitn(3, '_').collect();
+                    let (vm_name, datetime) = if parts.len() >= 3 {
+                        // parts[0]=HHMMSS, parts[1]=YYYYMMDD, parts[2]=vmname
+                        let dt = format!("{}-{}-{} {}:{}:{}",
+                            &parts[1][0..4], &parts[1][4..6], &parts[1][6..8],
+                            &parts[0][0..2], &parts[0][2..4], &parts[0][4..6]);
+                        (parts[2].to_string(), dt)
+                    } else {
+                        // Old format: vmname.gz (no timestamp)
+                        (base.to_string(), String::new())
+                    };
+                    backups.push(serde_json::json!({
+                        "filename": fname,
+                        "vm_name": vm_name,
+                        "datetime": datetime,
+                        "size": size,
+                    }));
+                }
+            }
+            backups.sort_by(|a, b| b["filename"].as_str().cmp(&a["filename"].as_str()));
+            HttpResponse::Ok().json(backups)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list backups: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let filename = match body.get("filename").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'filename' field".into(),
+                output: None,
+            });
+        }
+    };
+
+    if filename.contains('/') || filename.contains("..") || !filename.ends_with(".gz") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid filename".into(),
+            output: None,
+        });
+    }
+
+    let live_path = get_conf("live_path");
+    let path = format!("{}/{}", live_path, filename);
+
+    match std::fs::remove_file(&path) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Deleted backup '{}'", filename),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to delete backup: {}", e),
+            output: None,
+        }),
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -654,6 +765,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/iso/list", web::get().to(list_isos_handler))
             .route("/api/iso/upload", web::post().to(upload_iso_handler))
             .route("/api/iso/delete", web::post().to(delete_iso_handler))
+            // Backup routes
+            .route("/api/backup/list", web::get().to(list_backups_handler))
+            .route("/api/backup/delete", web::post().to(delete_backup_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

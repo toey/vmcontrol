@@ -186,6 +186,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'listimage') { loadImageList(); }
         // Auto-load disk list when switching to createdisk tab
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
+        // Auto-load backup list when switching to backup tab
+        if (tab.dataset.tab === 'backup') { loadBackupList(); }
     });
 });
 
@@ -221,7 +223,7 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/')) ? '/api/' + operation : '/api/vm/' + operation;
+        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
         var response = await fetch(apiPath, {
             method: 'POST',
@@ -263,6 +265,58 @@ async function executeSimple(operation) {
     if (ok) {
         loadVmList();
         loadVmListTable();
+    }
+}
+
+// ======== Backup Management ========
+
+async function executeBackup() {
+    var ok = await apiCall('backup', {
+        smac: val('backup-smac'),
+    });
+    if (ok) {
+        loadBackupList();
+    }
+}
+
+async function loadBackupList() {
+    try {
+        var response = await fetch('/api/backup/list');
+        var backups = await safeJson(response);
+        var listDiv = document.getElementById('backup-list');
+        if (!listDiv) return;
+        if (backups.length === 0) {
+            listDiv.innerHTML = '<em>No backups</em>';
+            return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">' +
+            '<tr style="border-bottom:2px solid #30363d;">' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">VM</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Date & Time</th>' +
+            '<th style="text-align:right;padding:6px 8px;color:#58a6ff;">Size</th>' +
+            '<th style="text-align:right;padding:6px 8px;color:#58a6ff;"></th>' +
+            '</tr>';
+        backups.forEach(function(b) {
+            html += '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:6px 8px;">' + b.vm_name + '</td>' +
+                '<td style="padding:6px 8px;">' + (b.datetime || '<em>unknown</em>') + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;">' + formatSize(b.size) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;">' +
+                '<button class="btn-remove" onclick="deleteBackup(\'' + b.filename.replace(/'/g, "\\'") + '\')">X</button>' +
+                '</td></tr>';
+        });
+        html += '</table>';
+        listDiv.innerHTML = html;
+    } catch (err) {
+        console.error('Failed to load backup list:', err);
+    }
+}
+
+async function deleteBackup(filename) {
+    if (!confirm('Delete backup "' + filename + '"?')) return;
+    var ok = await apiCall('backup/delete', { filename: filename });
+    if (ok) {
+        loadBackupList();
     }
 }
 
@@ -777,19 +831,33 @@ function executeLiveMigrate() {
 }
 
 // VNC operations (from VM List actions)
+// Get VNC port from VM config cache
+function getVmVncPort(smac) {
+    var vms = window._vmListData || [];
+    for (var i = 0; i < vms.length; i++) {
+        if (vms[i].smac === smac) {
+            try {
+                var cfg = JSON.parse(vms[i].config);
+                return cfg.vnc_port || null;
+            } catch(e) {}
+        }
+    }
+    return null;
+}
+
 async function vmVncStart(smac) {
-    var port = prompt('noVNC Port:', '12001');
-    if (!port) return;
-    var ok = await apiCall('vnc/start', { smac: smac, novncport: port });
+    var port = getVmVncPort(smac);
+    if (!port) { alert('No VNC port assigned for ' + smac); return; }
+    var ok = await apiCall('vnc/start', { smac: smac, novncport: String(port) });
     if (ok) {
         window.open('/vnc.html?port=' + port + '&smac=' + smac, '_blank');
     }
 }
 
 async function vmVncStop(smac) {
-    var port = prompt('noVNC Port to stop:', '12001');
-    if (!port) return;
-    await apiCall('vnc/stop', { smac: smac, novncport: port });
+    var port = getVmVncPort(smac);
+    if (!port) { alert('No VNC port assigned for ' + smac); return; }
+    await apiCall('vnc/stop', { smac: smac, novncport: String(port) });
 }
 
 // MDS Config - Load (per-VM)
@@ -926,6 +994,7 @@ async function loadVmListTable() {
         var response = await fetch('/api/vm/list');
         var vms = await safeJson(response);
         window._vmList = vms;
+        window._vmListData = vms; // Cache for VNC port lookup
 
         if (vms.length === 0) {
             tbody.innerHTML = '<tr><td colspan="6"><em>No VMs created yet. Go to Create VM tab to add one.</em></td></tr>';
@@ -938,6 +1007,7 @@ async function loadVmListTable() {
             var cpuText = config.cpu ? config.cpu.cores + 'c/' + config.cpu.threads + 't' : '-';
             var memText = config.memory ? config.memory.size + 'MB' : '-';
             var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) { return d.diskname || '-'; }).join(', ') : '-';
+            var vncPort = config.vnc_port || '-';
             var statusClass = vm.status === 'running' ? 'status-running' : 'status-stopped';
             var statusText = vm.status || 'stopped';
 
@@ -959,7 +1029,7 @@ async function loadVmListTable() {
                 '<td>' + cpuText + '</td>' +
                 '<td>' + memText + '</td>' +
                 '<td>' + diskText + '</td>' +
-                '<td><span class="' + statusClass + '">' + statusText + '</span></td>' +
+                '<td><small style="color:#58a6ff;">:' + vncPort + '</small> <span class="' + statusClass + '">' + statusText + '</span></td>' +
                 '<td>' + actions + '</td>' +
                 '</tr>';
         }).join('');

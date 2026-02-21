@@ -296,6 +296,31 @@ pub fn listimage(json_str: &str) -> Result<String, String> {
 }
 
 /// Create VM config — save to DB + assign disk owners
+/// Collect all VNC ports currently used by VMs in DB
+fn used_vnc_ports() -> Vec<u16> {
+    let mut ports = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
+                    ports.push(p as u16);
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Find next available VNC port starting from 12001
+fn next_vnc_port() -> u16 {
+    let used = used_vnc_ports();
+    let mut port: u16 = 12001;
+    while used.contains(&port) {
+        port += 1;
+    }
+    port
+}
+
 pub fn create_config(json_str: &str) -> Result<String, String> {
     let val: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
@@ -305,10 +330,14 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
         return Err("VM-NAME is required".into());
     }
 
-    // Extract the VM config
+    // Extract the VM config + auto-assign VNC port
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
-    let config = val.get("config").unwrap_or(&empty_obj);
-    let config_str = serde_json::to_string(config).unwrap_or_default();
+    let mut config = val.get("config").unwrap_or(&empty_obj).clone();
+    if config.get("vnc_port").is_none() {
+        let port = next_vnc_port();
+        config["vnc_port"] = serde_json::json!(port);
+    }
+    let config_str = serde_json::to_string(&config).unwrap_or_default();
 
     let mut output = String::new();
 

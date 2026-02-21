@@ -4,7 +4,7 @@ fn defaults() -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("qemu_path".into(), "/opt/homebrew/bin/qemu-system-x86_64".into());
     m.insert("ctl_bin_path".into(), "/opt/ctl/bin".into());
-    m.insert("live_path".into(), "/opt/ctl/live".into());
+    m.insert("live_path".into(), "/tmp/vmcontrol/backups".into());
     m.insert("gzip_path".into(), "/usr/bin/gzip".into());
     m.insert("vs_up_script".into(), "vs-up.sh".into());
     m.insert("vs_down_script".into(), "vs-down.sh".into());

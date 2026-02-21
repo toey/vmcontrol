@@ -82,9 +82,13 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
         "backup" => {
             let live_path = get_conf("live_path");
             let gzip_path = get_conf("gzip_path");
+            let _ = std::fs::create_dir_all(&live_path);
+            // Timestamp-based backup filename: vmname_YYYYMMDD_HHMMSS.gz
+            let now = chrono::Local::now();
+            let ts = now.format("%Y%m%d_%H%M%S");
             let cmd = format!(
-                "migrate \"exec: {} -c > {}/{}.gz\"",
-                gzip_path, live_path, smac
+                "migrate \"exec: {} -c > {}/{}_{}.gz\"",
+                gzip_path, live_path, smac, ts
             );
             (smac.to_string(), cmd)
         }
