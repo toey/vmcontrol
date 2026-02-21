@@ -412,6 +412,18 @@ textarea:focus {
     color: #fff;
 }
 
+.vm-name-link {
+    color: #58a6ff;
+    text-decoration: none;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.vm-name-link:hover {
+    text-decoration: underline;
+    color: #79c0ff;
+}
+
 .btn-vm-vnc {
     background: #1f6feb;
     color: #fff;

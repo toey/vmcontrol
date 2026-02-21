@@ -176,7 +176,7 @@ async fn list_vms_handler() -> HttpResponse {
         let mut next_port: u16 = 12001;
         for smac in &need_port {
             while used_ports.contains(&next_port) {
-                next_port += 1;
+                next_port += 2;
             }
             // Update config with new vnc_port
             if let Ok(vm) = crate::db::get_vm(smac) {
@@ -185,7 +185,7 @@ async fn list_vms_handler() -> HttpResponse {
                 let _ = crate::db::update_vm(smac, &serde_json::to_string(&cfg).unwrap_or_default());
             }
             used_ports.push(next_port);
-            next_port += 1;
+            next_port += 2;
         }
     }
 

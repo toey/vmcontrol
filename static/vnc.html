@@ -41,6 +41,11 @@
             font-size: 13px;
         }
         .toolbar input { width: 80px; }
+        .toolbar .info-text {
+            color: #58a6ff;
+            font-size: 13px;
+            font-weight: 600;
+        }
         .toolbar button {
             padding: 5px 14px;
             border: none;
@@ -113,8 +118,8 @@
     <div class="toolbar">
         <a href="/" class="btn-back">&larr; Back</a>
         <h1>VM Console</h1>
-        <label>Host <input type="text" id="vnc-host" value="localhost"></label>
-        <label>Port <input type="text" id="vnc-port" value="12001"></label>
+        <label>Host <span id="vnc-host" class="info-text">localhost</span></label>
+        <label>Port <span id="vnc-port" class="info-text">12001</span></label>
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
@@ -124,7 +129,7 @@
     <div id="vnc-container">
         <div class="placeholder" id="placeholder">
             <h2>noVNC Console</h2>
-            <p>Enter the websockify port and click Connect</p>
+            <p>Click Connect to open the VNC console</p>
         </div>
     </div>
 
@@ -142,8 +147,8 @@
         window.doConnect = function() {
             if (rfb) { rfb.disconnect(); rfb = null; }
 
-            var host = document.getElementById('vnc-host').value;
-            var port = document.getElementById('vnc-port').value;
+            var host = document.getElementById('vnc-host').textContent;
+            var port = document.getElementById('vnc-port').textContent;
             var url = 'ws://' + host + ':' + port;
 
             document.getElementById('placeholder').style.display = 'none';
@@ -217,9 +222,9 @@
         // auto-connect if port in URL params
         var params = new URLSearchParams(window.location.search);
         if (params.get('port')) {
-            document.getElementById('vnc-port').value = params.get('port');
+            document.getElementById('vnc-port').textContent = params.get('port');
             if (params.get('host')) {
-                document.getElementById('vnc-host').value = params.get('host');
+                document.getElementById('vnc-host').textContent = params.get('host');
             }
             window.addEventListener('DOMContentLoaded', function() {
                 setTimeout(doConnect, 500);

@@ -311,12 +311,12 @@ fn used_vnc_ports() -> Vec<u16> {
     ports
 }
 
-/// Find next available VNC port starting from 12001
+/// Find next available VNC port starting from 12001, step by 2
 fn next_vnc_port() -> u16 {
     let used = used_vnc_ports();
     let mut port: u16 = 12001;
     while used.contains(&port) {
-        port += 1;
+        port += 2;
     }
     port
 }

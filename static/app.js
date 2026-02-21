@@ -831,6 +831,9 @@ function executeLiveMigrate() {
 }
 
 // VNC operations (from VM List actions)
+// VNC active tracking
+if (!window._vncActive) window._vncActive = {};
+
 // Get VNC port from VM config cache
 function getVmVncPort(smac) {
     var vms = window._vmListData || [];
@@ -850,6 +853,8 @@ async function vmVncStart(smac) {
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
     var ok = await apiCall('vnc/start', { smac: smac, novncport: String(port) });
     if (ok) {
+        window._vncActive[smac] = true;
+        loadVmListTable();
         window.open('/vnc.html?port=' + port + '&smac=' + smac, '_blank');
     }
 }
@@ -857,7 +862,11 @@ async function vmVncStart(smac) {
 async function vmVncStop(smac) {
     var port = getVmVncPort(smac);
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
-    await apiCall('vnc/stop', { smac: smac, novncport: String(port) });
+    var ok = await apiCall('vnc/stop', { smac: smac, novncport: String(port) });
+    if (ok) {
+        delete window._vncActive[smac];
+        loadVmListTable();
+    }
 }
 
 // MDS Config - Load (per-VM)
@@ -1016,16 +1025,25 @@ async function loadVmListTable() {
                 actions += '<button class="btn-vm-action btn-vm-stop" onclick="vmAction(\'stop\',\'' + vm.smac + '\')">Stop</button> ';
                 actions += '<button class="btn-vm-action btn-vm-reset" onclick="vmAction(\'reset\',\'' + vm.smac + '\')">Reset</button> ';
                 actions += '<button class="btn-vm-action btn-vm-powerdown" onclick="vmAction(\'powerdown\',\'' + vm.smac + '\')">Powerdown</button> ';
-                actions += '<button class="btn-vm-action btn-vm-vnc" onclick="vmVncStart(\'' + vm.smac + '\')">VNC</button> ';
-                actions += '<button class="btn-vm-action btn-vm-vncstop" onclick="vmVncStop(\'' + vm.smac + '\')">VNC Stop</button> ';
+                if (window._vncActive[vm.smac]) {
+                    actions += '<button class="btn-vm-action btn-vm-vncstop" onclick="vmVncStop(\'' + vm.smac + '\')">VNC Stop</button> ';
+                } else {
+                    actions += '<button class="btn-vm-action btn-vm-vnc" onclick="vmVncStart(\'' + vm.smac + '\')">VNC</button> ';
+                }
             } else {
+                // VM stopped → clear VNC active state
+                delete window._vncActive[vm.smac];
                 actions += '<button class="btn-vm-action btn-vm-start" onclick="vmAction(\'start\',\'' + vm.smac + '\')">Start</button> ';
             }
             actions += '<button class="btn-vm-action btn-vm-edit" onclick="editVm(\'' + vm.smac + '\')">Edit</button> ';
             actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
 
+            var nameCell = vm.status === 'running'
+                ? '<a href="/vnc.html?port=' + vncPort + '&smac=' + vm.smac + '" class="vm-name-link" target="_blank">' + vm.smac + '</a>'
+                : vm.smac;
+
             return '<tr>' +
-                '<td>' + vm.smac + '</td>' +
+                '<td>' + nameCell + '</td>' +
                 '<td>' + cpuText + '</td>' +
                 '<td>' + memText + '</td>' +
                 '<td>' + diskText + '</td>' +
