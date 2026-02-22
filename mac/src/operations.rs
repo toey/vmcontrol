@@ -3,7 +3,7 @@ use crate::config::get_conf;
 use crate::db;
 use crate::mds;
 use crate::models::*;
-use crate::ssh::send_cmd;
+use crate::ssh::{send_cmd, spawn_cmd_with_log};
 
 /// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
 fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
@@ -154,7 +154,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         ));
     }
 
-    let defaultboot = " -nodefaults -vga std -boot d -daemonize ";
+    let defaultboot = " -nodefaults -vga std -boot d ";
     let vm_memory = format!(" -m {}M ", cfg.memory.size);
     let smp_cmd = format!(
         " -smp {},sockets={},cores={},threads={} ",
@@ -199,9 +199,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         ""
     };
 
-    let full_cmd = format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-        qemu_path,
+    // Build QEMU argument list
+    let args_str = format!(
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         defaultboot,
         windows_cmd,
         displayvncsock,
@@ -217,10 +217,41 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         monitorunix,
         live_mode_cmd,
     );
+    // Split into individual arguments, filtering out empty strings
+    let args: Vec<&str> = args_str.split_whitespace().collect();
 
-    // start vm
-    let cmd_output = send_cmd(&full_cmd).map_err(|e| format!("send cmd error: {}", e))?;
-    output_log.push_str(&cmd_output);
+    // start vm as background process with stderr logging
+    let log_path = format!("{}/logs/qemu_{}.log", pctl_path, ismac);
+    let mut child = spawn_cmd_with_log(&qemu_path, &args, &log_path)
+        .map_err(|e| format!("send cmd error: {}", e))?;
+
+    let pid = child.id();
+    output_log.push_str(&format!("Process started (PID: {})\n", pid));
+    output_log.push_str(&format!("QEMU log: {}\n", log_path));
+
+    // Wait briefly then check if QEMU is still alive
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    match child.try_wait() {
+        Ok(Some(exit_status)) => {
+            // QEMU exited already — read the log to find out why
+            let stderr_content = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let err_msg = if stderr_content.trim().is_empty() {
+                format!("QEMU exited immediately with {}", exit_status)
+            } else {
+                format!("QEMU exited with {}: {}", exit_status, stderr_content.trim())
+            };
+            let _ = db::set_vm_status(smac, "stopped");
+            return Err(err_msg);
+        }
+        Ok(None) => {
+            // Process still running — good
+            output_log.push_str("QEMU process verified alive after 2s\n");
+        }
+        Err(e) => {
+            output_log.push_str(&format!("WARNING: could not check process status: {}\n", e));
+        }
+    }
 
     // Set status to running
     if let Err(e) = db::set_vm_status(smac, "running") {
@@ -247,7 +278,14 @@ pub fn stop(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
-    output.push_str(&send_cmd_pctl("stop", &cmd.smac));
+    let pctl_result = send_cmd_pctl("stop", &cmd.smac);
+    output.push_str(&pctl_result);
+    // Fallback if monitor socket failed
+    if pctl_result.contains("Error") || pctl_result.contains("error") {
+        output.push_str("Monitor unavailable, trying pkill...\n");
+        let _ = send_cmd(&format!("pkill -f 'qemu.*vncsock_{}'", cmd.smac));
+        output.push_str("Sent pkill for QEMU processes\n");
+    }
     // Set status to stopped
     if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
         output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
@@ -522,27 +560,70 @@ pub fn vnc_start(json_str: &str) -> Result<String, String> {
         "Starting VNC proxy 0.0.0.0:{} -> vncsock_{}\n",
         cmd.novncport, cmd.smac
     ));
+
     let websockify = get_conf("websockify_path");
-    let run_cmd = format!(
+    let ws_cmd = format!(
         "{} --unix-target={}/vncsock_{} -D 0.0.0.0:{}",
         websockify, pctl_path, cmd.smac, cmd.novncport
     );
-    match send_cmd(&run_cmd) {
-        Ok(out) => output.push_str(&out),
-        Err(e) => return Err(format!("VNC start error: {}", e)),
+
+    // Try websockify first, then fallback to python3 -m websockify
+    let started = match send_cmd(&ws_cmd) {
+        Ok(out) => {
+            output.push_str(&out);
+            true
+        }
+        Err(_) => {
+            // Fallback: python3 -m websockify
+            let python = get_conf("python_path");
+            let py_cmd = format!(
+                "{} -m websockify --unix-target={}/vncsock_{} -D 0.0.0.0:{}",
+                python, pctl_path, cmd.smac, cmd.novncport
+            );
+            match send_cmd(&py_cmd) {
+                Ok(out) => {
+                    output.push_str(&format!("Using python fallback: {}\n", python));
+                    output.push_str(&out);
+                    true
+                }
+                Err(e) => return Err(format!(
+                    "VNC start error: websockify not found. Install: pip install websockify. Error: {}", e
+                )),
+            }
+        }
+    };
+
+    // Save websockify PID so vnc_stop can kill it
+    if started {
+        if let Ok(pid_out) = send_cmd(&format!("pgrep -f '0.0.0.0:{}'", cmd.novncport)) {
+            let pid_file = format!("{}/{}.ws_pid", pctl_path, cmd.smac);
+            let _ = std::fs::write(&pid_file, pid_out.trim());
+            output.push_str(&format!("websockify PID: {}\n", pid_out.trim()));
+        }
     }
+
     Ok(output)
 }
 
 pub fn vnc_stop(json_str: &str) -> Result<String, String> {
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
+    let pctl_path = get_conf("pctl_path");
     let mut output = String::new();
     output.push_str(&format!("Stopping VNC proxy port {}\n", cmd.novncport));
-    let run_cmd = format!("pkill -f \"0.0.0.0:{}\"", cmd.novncport);
-    match send_cmd(&run_cmd) {
-        Ok(out) => output.push_str(&out),
-        Err(e) => return Err(format!("VNC stop error: {}", e)),
+
+    // Try PID-based kill first, then fallback to pkill
+    let pid_file = format!("{}/{}.ws_pid", pctl_path, cmd.smac);
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        let pid = pid_str.trim();
+        let _ = send_cmd(&format!("kill {}", pid));
+        let _ = std::fs::remove_file(&pid_file);
+        output.push_str(&format!("Killed websockify PID {}\n", pid));
+    } else {
+        // Fallback to pkill by port
+        let _ = send_cmd(&format!("pkill -f '0.0.0.0:{}'", cmd.novncport));
+        output.push_str("Killed websockify via pkill\n");
     }
+
     Ok(output)
 }

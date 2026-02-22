@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub fn send_cmd(command: &str) -> Result<String, String> {
     let result = Command::new("sh")
@@ -22,4 +22,75 @@ pub fn send_cmd(command: &str) -> Result<String, String> {
         output.push_str(&stderr);
     }
     Ok(output)
+}
+
+/// Run an executable directly with separate arguments (handles paths with spaces)
+pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
+    let result = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("unable to execute {}: {}", program, e))?;
+
+    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&result.stderr).to_string();
+
+    if !result.status.success() {
+        if stderr.is_empty() {
+            return Err(format!("command failed with exit code: {}", result.status));
+        }
+        return Err(format!("command failed: {}", stderr));
+    }
+
+    let mut output = stdout;
+    if !stderr.is_empty() {
+        output.push_str(&stderr);
+    }
+    Ok(output)
+}
+
+/// Spawn a long-running process with stderr redirected to a log file.
+/// Returns the Child handle so the caller can check if the process is still alive.
+pub fn spawn_cmd_with_log(program: &str, args: &[&str], log_path: &str) -> Result<std::process::Child, String> {
+    // Ensure the log directory exists
+    if let Some(parent) = std::path::Path::new(log_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let log_file = std::fs::File::create(log_path)
+        .map_err(|e| format!("unable to create log file {}: {}", log_path, e))?;
+
+    let log_file2 = log_file.try_clone()
+        .map_err(|e| format!("unable to clone log file handle: {}", e))?;
+
+    let child = Command::new(program)
+        .args(args)
+        .stdout(log_file2)
+        .stderr(log_file)
+        .spawn()
+        .map_err(|e| format!("unable to start {}: {}", program, e))?;
+
+    // Spawn background thread to monitor process exit and log the result
+    let log_path_owned = log_path.to_string();
+    let pid = child.id();
+    std::thread::spawn(move || {
+        // Wait a bit then check if process still exists
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        // Check if process is still alive using kill -0
+        let status = Command::new("kill")
+            .args(&["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if let Ok(s) = status {
+            if !s.success() {
+                // Process died - append info to log
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path_owned) {
+                    let _ = writeln!(f, "\n[MONITOR] Process PID {} exited within 10 seconds", pid);
+                }
+            }
+        }
+    });
+
+    Ok(child)
 }
