@@ -607,6 +607,8 @@ pub fn vnc_start(json_str: &str) -> Result<String, String> {
     let websockify = get_conf("websockify_path");
     let has_websockify = run_cmd("where", &[&websockify]).is_ok();
 
+    let mut child_pid: u32 = 0;
+
     if has_websockify {
         use std::process::{Command, Stdio};
         let child = Command::new(&websockify)
@@ -615,30 +617,26 @@ pub fn vnc_start(json_str: &str) -> Result<String, String> {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("VNC start error: unable to start {}: {}", websockify, e))?;
-        output.push_str(&format!("websockify started (PID: {})\n", child.id()));
+        child_pid = child.id();
+        output.push_str(&format!("websockify started (PID: {})\n", child_pid));
     } else {
-        // Fall back to python -m websockify via cmd /C (needed for Windows App Execution Aliases)
+        // Fall back to python3 -m websockify via PowerShell
+        // (python3 on Windows is an App Execution Alias that only works from PowerShell, not cmd.exe)
         use std::process::{Command, Stdio};
-        let python_cmds = ["python3", "py", "python"];
-        let mut started = false;
-        for py in &python_cmds {
-            let cmd_str = format!("{} -m websockify {} {}", py, listen, target);
-            if let Ok(child) = Command::new("cmd")
-                .arg("/C")
-                .arg(&cmd_str)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-            {
-                output.push_str(&format!("websockify (via {}) started (PID: {})\n", py, child.id()));
-                started = true;
-                break;
-            }
-        }
-        if !started {
-            return Err("VNC start error: websockify not found. Install: pip install websockify".into());
-        }
+        let ps_cmd = format!("python3 -m websockify {} {}", listen, target);
+        let child = Command::new("powershell")
+            .args(&["-NoProfile", "-Command", &ps_cmd])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("VNC start error: failed to launch websockify via powershell: {}", e))?;
+        child_pid = child.id();
+        output.push_str(&format!("websockify (via powershell) started (PID: {})\n", child_pid));
     }
+
+    // Save websockify PID so vnc_stop can kill it
+    let ws_pid_file = format!(r"{}\{}.ws_pid", pctl_path, cmd.smac);
+    let _ = std::fs::write(&ws_pid_file, child_pid.to_string());
 
     Ok(output)
 }
@@ -648,11 +646,21 @@ pub fn vnc_stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let mut output = String::new();
     output.push_str(&format!("Stopping VNC proxy port {}\n", cmd.novncport));
-    // Windows: use taskkill instead of pkill
-    let run_cmd = format!("taskkill /F /FI \"WINDOWTITLE eq *{}*\"", cmd.novncport);
-    match send_cmd(&run_cmd) {
-        Ok(out) => output.push_str(&out),
-        Err(e) => return Err(format!("VNC stop error: {}", e)),
+
+    // Kill websockify by saved PID
+    let pctl_path = get_conf("pctl_path");
+    let ws_pid_file = format!(r"{}\{}.ws_pid", pctl_path, cmd.smac);
+    if let Ok(pid_str) = std::fs::read_to_string(&ws_pid_file) {
+        let pid = pid_str.trim();
+        // Kill the process tree (cmd.exe + python3)
+        match send_cmd(&format!("taskkill /F /T /PID {}", pid)) {
+            Ok(out) => output.push_str(&out),
+            Err(e) => output.push_str(&format!("taskkill warning: {}\n", e)),
+        }
+        let _ = std::fs::remove_file(&ws_pid_file);
+    } else {
+        output.push_str("No websockify PID file found, process may already be stopped\n");
     }
+
     Ok(output)
 }
