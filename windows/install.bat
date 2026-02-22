@@ -99,17 +99,69 @@ if not exist "%QEMU_IMG_PATH%" (
     echo [WARN] qemu-img not found at %QEMU_IMG_PATH%
 )
 
-where websockify >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [INFO] websockify not found. Installing via pip...
-    python3 -m pip install websockify >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo [WARN] Failed to install websockify. Install manually: python3 -m pip install websockify
-    ) else (
-        echo [OK]   websockify installed
+:: --- Detect real Python path ---
+echo [INFO] Searching for Python installation...
+set "PYTHON_EXE="
+set "WEBSOCKIFY_EXE="
+
+:: Search %LOCALAPPDATA%\Python\*\python.exe (e.g. pythoncore-3.14-64)
+for /d %%D in ("%LOCALAPPDATA%\Python\*") do (
+    if exist "%%D\python.exe" (
+        if not defined PYTHON_EXE (
+            set "PYTHON_EXE=%%D\python.exe"
+        )
     )
+    if exist "%%D\Scripts\websockify.exe" (
+        if not defined WEBSOCKIFY_EXE (
+            set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
+        )
+    )
+)
+:: Search %LOCALAPPDATA%\Programs\Python\*\python.exe
+for /d %%D in ("%LOCALAPPDATA%\Programs\Python\*") do (
+    if exist "%%D\python.exe" (
+        if not defined PYTHON_EXE (
+            set "PYTHON_EXE=%%D\python.exe"
+        )
+    )
+    if exist "%%D\Scripts\websockify.exe" (
+        if not defined WEBSOCKIFY_EXE (
+            set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
+        )
+    )
+)
+
+if defined PYTHON_EXE (
+    echo [OK]   Python found: %PYTHON_EXE%
 ) else (
-    echo [OK]   websockify found
+    echo [WARN] Python not found. VNC proxy will not work.
+    echo        Install Python from: https://www.python.org/downloads/
+)
+
+:: Install websockify if python found but websockify missing
+if defined PYTHON_EXE (
+    if not defined WEBSOCKIFY_EXE (
+        echo [INFO] websockify not found. Installing via pip...
+        "%PYTHON_EXE%" -m pip install websockify >nul 2>&1
+        if !errorlevel! neq 0 (
+            echo [WARN] Failed to install websockify. Install manually: pip install websockify
+        ) else (
+            echo [OK]   websockify installed
+            :: Re-search for websockify.exe after install
+            for /d %%D in ("%LOCALAPPDATA%\Python\*") do (
+                if exist "%%D\Scripts\websockify.exe" (
+                    if not defined WEBSOCKIFY_EXE set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
+                )
+            )
+            for /d %%D in ("%LOCALAPPDATA%\Programs\Python\*") do (
+                if exist "%%D\Scripts\websockify.exe" (
+                    if not defined WEBSOCKIFY_EXE set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
+                )
+            )
+        )
+    ) else (
+        echo [OK]   websockify found: %WEBSOCKIFY_EXE%
+    )
 )
 
 echo.
@@ -184,26 +236,38 @@ echo [OK]   Binary installed to %CTL_BIN%\vm_ctl.exe
 echo [OK]   Static files installed to %STATIC_DIR%\
 
 :: --- Step 7: Generate config.yaml ---
+:: Set detected paths for config
+set "CONF_PYTHON=python3"
+if defined PYTHON_EXE set "CONF_PYTHON=%PYTHON_EXE%"
+set "CONF_WEBSOCKIFY=websockify"
+if defined WEBSOCKIFY_EXE set "CONF_WEBSOCKIFY=%WEBSOCKIFY_EXE%"
+
 if not exist "%CONFIG_YAML%" (
-    echo [INFO] Generating default config.yaml...
+    echo [INFO] Generating config.yaml with detected paths...
     (
-        echo qemu_path: C:\Program Files\qemu\qemu-system-x86_64.exe
-        echo qemu_img_path: C:\Program Files\qemu\qemu-img.exe
+        echo qemu_path: %QEMU_PATH%
+        echo qemu_img_path: %QEMU_IMG_PATH%
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
         echo iso_path: C:\vmcontrol\iso
         echo live_path: C:\vmcontrol\backups
         echo gzip_path: gzip
-        echo websockify_path: websockify
+        echo python_path: %CONF_PYTHON%
+        echo websockify_path: %CONF_WEBSOCKIFY%
         echo vs_up_script: vs-up.bat
         echo vs_down_script: vs-down.bat
         echo pctl_script: pctl.bat
         echo domain: localhost
     ) > "%CONFIG_YAML%"
     echo [OK]   config.yaml created
+    echo [OK]   python_path: %CONF_PYTHON%
+    echo [OK]   websockify_path: %CONF_WEBSOCKIFY%
 ) else (
     echo [WARN] config.yaml already exists -- skipping ^(preserving your customizations^)
+    echo [INFO] To update python/websockify paths, edit %CONFIG_YAML%
+    echo [INFO]   python_path: %CONF_PYTHON%
+    echo [INFO]   websockify_path: %CONF_WEBSOCKIFY%
 )
 
 echo.

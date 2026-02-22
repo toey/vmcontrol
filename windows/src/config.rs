@@ -14,6 +14,7 @@ fn defaults() -> HashMap<String, String> {
     m.insert("iso_path".into(), r"C:\vmcontrol\iso".into());
     m.insert("qemu_img_path".into(), r"C:\Program Files\qemu\qemu-img.exe".into());
     m.insert("websockify_path".into(), "websockify".into());
+    m.insert("python_path".into(), "python3".into());
     m.insert("domain".into(), "localhost".into());
     m
 }

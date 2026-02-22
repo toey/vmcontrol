@@ -72,9 +72,13 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     Ok(iso_path)
 }
 
-/// Find a free TCP port starting from `start`, checking up to 100 ports
-fn find_free_port(start: u16) -> u16 {
+/// Find a free TCP port starting from `start`, checking up to 100 ports.
+/// Ports in `skip` are excluded (e.g. already allocated to running VMs in DB).
+fn find_free_port(start: u16, skip: &[u16]) -> u16 {
     for port in start..start.saturating_add(100) {
+        if skip.contains(&port) {
+            continue;
+        }
         if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return port;
         }
@@ -182,17 +186,21 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         cfg.cpu.cores, cfg.cpu.sockets, cfg.cpu.cores, cfg.cpu.threads
     );
     // Windows: QEMU uses TCP for VNC and monitor (no Unix sockets)
-    // Find a free VNC port and calculate display number (port 5900 = display :0)
-    let vnc_port = find_free_port(5900);
+    // Find a free VNC port, skipping ports already used by running VMs (from DB)
+    let db_used_ports = used_qemu_vnc_ports();
+    let vnc_port = find_free_port(5900, &db_used_ports);
     let vnc_display = vnc_port - 5900;
     let displayvncsock = format!(" -display vnc=0.0.0.0:{} ", vnc_display);
     output_log.push_str(&format!("VNC port: {} (display :{})\n", vnc_port, vnc_display));
-    // Save VNC port so websockify knows where to connect
-    let vnc_port_file = format!(r"{}\{}.vnc_port", pctl_path, ismac);
-    let _ = std::fs::write(&vnc_port_file, vnc_port.to_string());
+    // Save qemu_vnc_port to DB config so websockify knows where to connect
+    if let Ok(vm) = db::get_vm(&ismac) {
+        let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+        dbcfg["qemu_vnc_port"] = serde_json::json!(vnc_port);
+        let _ = db::update_vm(&ismac, &serde_json::to_string(&dbcfg).unwrap_or_default());
+    }
 
     let monitor_port_file = format!(r"{}\{}.port", pctl_path, ismac);
-    let monitor_port = find_free_port(55555);
+    let monitor_port = find_free_port(55555, &[]);
     let monitorunix = format!(
         " -monitor tcp:127.0.0.1:{},server,nowait ",
         monitor_port
@@ -276,6 +284,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 format!("QEMU exited with {}: {}", exit_status, stderr_content.trim())
             };
             let _ = db::set_vm_status(smac, "stopped");
+            // Clear qemu_vnc_port from config since QEMU is not running
+            if let Ok(vm) = db::get_vm(smac) {
+                let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+                dbcfg.as_object_mut().map(|m| m.remove("qemu_vnc_port"));
+                let _ = db::update_vm(smac, &serde_json::to_string(&dbcfg).unwrap_or_default());
+            }
             return Err(err_msg);
         }
         Ok(None) => {
@@ -320,9 +334,14 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         let _ = send_cmd("taskkill /F /IM qemu-system-x86_64.exe");
         output.push_str("Sent taskkill for QEMU processes\n");
     }
-    // Set status to stopped
+    // Set status to stopped + clear qemu_vnc_port
     if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
         output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+    }
+    if let Ok(vm) = db::get_vm(&cmd.smac) {
+        let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+        dbcfg.as_object_mut().map(|m| m.remove("qemu_vnc_port"));
+        let _ = db::update_vm(&cmd.smac, &serde_json::to_string(&dbcfg).unwrap_or_default());
     }
     Ok(output)
 }
@@ -338,8 +357,13 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let output = send_cmd_pctl("powerdown", &cmd.smac);
-    // Set status to stopped
+    // Set status to stopped + clear qemu_vnc_port
     let _ = db::set_vm_status(&cmd.smac, "stopped");
+    if let Ok(vm) = db::get_vm(&cmd.smac) {
+        let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+        dbcfg.as_object_mut().map(|m| m.remove("qemu_vnc_port"));
+        let _ = db::update_vm(&cmd.smac, &serde_json::to_string(&dbcfg).unwrap_or_default());
+    }
     Ok(output)
 }
 
@@ -372,6 +396,24 @@ pub fn listimage(json_str: &str) -> Result<String, String> {
     set_update_status("2", &cmd.smac);
     set_ma_mode("0", &cmd.smac);
     Ok(output)
+}
+
+/// Collect all QEMU VNC display ports (5900+) from running VMs in DB
+fn used_qemu_vnc_ports() -> Vec<u16> {
+    let mut ports = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if vm.status != "running" {
+                continue;
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(p) = cfg.get("qemu_vnc_port").and_then(|v| v.as_u64()) {
+                    ports.push(p as u16);
+                }
+            }
+        }
+    }
+    ports
 }
 
 /// Create VM config — save to DB + assign disk owners
@@ -597,41 +639,128 @@ pub fn vnc_start(json_str: &str) -> Result<String, String> {
     // Windows: websockify is a long-running proxy — must be spawned, not blocked on.
     // Try direct 'websockify' first, then fall back to 'python -m websockify'.
     let listen = format!("0.0.0.0:{}", cmd.novncport);
-    // Read VNC port saved by QEMU start, default to 5900
+    // Read QEMU VNC port from DB config, default to 5900
+    let vnc_port = match db::get_vm(&cmd.smac) {
+        Ok(vm) => {
+            let cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+            cfg.get("qemu_vnc_port")
+                .and_then(|v| v.as_u64())
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "5900".to_string())
+        }
+        Err(_) => "5900".to_string(),
+    };
+    let target = format!("127.0.0.1:{}", vnc_port);
     let pctl_path = get_conf("pctl_path");
-    let vnc_port_file = format!(r"{}\{}.vnc_port", pctl_path, cmd.smac);
-    let vnc_port = std::fs::read_to_string(&vnc_port_file)
-        .unwrap_or_else(|_| "5900".to_string());
-    let target = format!("127.0.0.1:{}", vnc_port.trim());
 
-    let websockify = get_conf("websockify_path");
-    let has_websockify = run_cmd("where", &[&websockify]).is_ok();
+    let mut websockify = get_conf("websockify_path");
 
+    // Auto-detect websockify.exe if not a real path
+    if !std::path::Path::new(&websockify).exists() {
+        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        let search_dirs = vec![
+            format!(r"{}\Python", localappdata),
+            format!(r"{}\Programs\Python", localappdata),
+        ];
+        for base in &search_dirs {
+            if let Ok(entries) = std::fs::read_dir(base) {
+                for entry in entries.flatten() {
+                    let ws = entry.path().join("Scripts").join("websockify.exe");
+                    if ws.exists() {
+                        websockify = ws.to_string_lossy().to_string();
+                        break;
+                    }
+                }
+            }
+            if std::path::Path::new(&websockify).exists() { break; }
+        }
+    }
+
+    let has_websockify = std::path::Path::new(&websockify).exists();
     let mut child_pid: u32 = 0;
 
     if has_websockify {
         use std::process::{Command, Stdio};
+        output.push_str(&format!("Using websockify: {}\n", websockify));
+
+        #[cfg(target_os = "windows")]
+        let child = {
+            use std::os::windows::process::CommandExt;
+            const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000;
+            Command::new(&websockify)
+                .args(&[listen.as_str(), target.as_str()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(DETACH_FLAGS)
+                .spawn()
+                .map_err(|e| format!("VNC start error: {}: {}", websockify, e))?
+        };
+        #[cfg(not(target_os = "windows"))]
         let child = Command::new(&websockify)
             .args(&[listen.as_str(), target.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("VNC start error: unable to start {}: {}", websockify, e))?;
+            .map_err(|e| format!("VNC start error: {}: {}", websockify, e))?;
+
         child_pid = child.id();
         output.push_str(&format!("websockify started (PID: {})\n", child_pid));
     } else {
-        // Fall back to python3 -m websockify via PowerShell
-        // (python3 on Windows is an App Execution Alias that only works from PowerShell, not cmd.exe)
         use std::process::{Command, Stdio};
-        let ps_cmd = format!("python3 -m websockify {} {}", listen, target);
-        let child = Command::new("powershell")
-            .args(&["-NoProfile", "-Command", &ps_cmd])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("VNC start error: failed to launch websockify via powershell: {}", e))?;
-        child_pid = child.id();
-        output.push_str(&format!("websockify (via powershell) started (PID: {})\n", child_pid));
+
+        // Get python_path from config, auto-detect if default or not a real path
+        let mut python_path = get_conf("python_path");
+        if !std::path::Path::new(&python_path).exists() {
+            // Auto-detect: search common Windows Python installation paths
+            let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
+            let search_dirs = vec![
+                format!(r"{}\Python", localappdata),
+                format!(r"{}\Programs\Python", localappdata),
+            ];
+            let mut found = String::new();
+            'search: for base in &search_dirs {
+                if let Ok(entries) = std::fs::read_dir(base) {
+                    for entry in entries.flatten() {
+                        let p = entry.path().join("python.exe");
+                        if p.exists() {
+                            found = p.to_string_lossy().to_string();
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            if !found.is_empty() {
+                output.push_str(&format!("Auto-detected python: {}\n", found));
+                python_path = found;
+            } else {
+                return Err("VNC start error: python not found. Set python_path in config.yaml".into());
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000;
+            let child = Command::new(&python_path)
+                .args(&["-m", "websockify", listen.as_str(), target.as_str()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(DETACH_FLAGS)
+                .spawn()
+                .map_err(|e| format!("VNC start error: python_path='{}' err={}", python_path, e))?;
+            child_pid = child.id();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let child = Command::new(&python_path)
+                .args(&["-m", "websockify", listen.as_str(), target.as_str()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| format!("VNC start error: python_path='{}' err={}", python_path, e))?;
+            child_pid = child.id();
+        }
+        output.push_str(&format!("websockify started (PID: {})\n", child_pid));
     }
 
     // Save websockify PID so vnc_stop can kill it
