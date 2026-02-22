@@ -48,12 +48,15 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     std::fs::write(format!("{}/user-data", seed_dir), &user_data)
         .map_err(|e| format!("Failed to write user-data: {}", e))?;
 
-    // Create ISO using hdiutil (macOS)
+    // Create ISO using oscdimg (Windows ADK) or mkisofs
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
     send_cmd(&format!(
-        "hdiutil makehybrid -iso -joliet -default-volume-name cidata -o '{}' '{}'",
+        "oscdimg -j1 -lcidata \"{}\" \"{}\"",
+        seed_dir, iso_path
+    )).or_else(|_| send_cmd(&format!(
+        "mkisofs -o \"{}\" -V cidata -J -R \"{}\"",
         iso_path, seed_dir
-    )).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    ))).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
@@ -154,17 +157,22 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         ));
     }
 
-    let defaultboot = " -nodefaults -vga std -boot d -daemonize ";
+    let defaultboot = " -nodefaults -vga std -boot d ";
     let vm_memory = format!(" -m {}M ", cfg.memory.size);
     let smp_cmd = format!(
         " -smp {},sockets={},cores={},threads={} ",
         cfg.cpu.cores, cfg.cpu.sockets, cfg.cpu.cores, cfg.cpu.threads
     );
-    let displayvncsock = format!(" -display vnc=unix:{}/vncsock_{} ", pctl_path, ismac);
+    // Windows: QEMU uses TCP for VNC and monitor (no Unix sockets)
+    let displayvncsock = format!(" -display vnc=0.0.0.0:0 ");
+    let monitor_port_file = format!(r"{}\{}.port", pctl_path, ismac);
+    let monitor_port = 55555; // default monitor TCP port
     let monitorunix = format!(
-        " -monitor unix:{}/{},server,nowait ",
-        pctl_path, ismac
+        " -monitor tcp:127.0.0.1:{},server,nowait ",
+        monitor_port
     );
+    // Save monitor port to file so api_helpers can read it
+    let _ = std::fs::write(&monitor_port_file, monitor_port.to_string());
     let cdromdevice = " -drive if=ide,index=0,media=cdrom ";
     let usbdevice = " -usb -device usb-tablet,bus=usb-bus.0,port=1 ";
 
@@ -179,7 +187,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             String::new()
         }
     };
-    let machinetype = " -machine type=pc-i440fx-9.2,accel=tcg ";
+    let machinetype = " -machine type=pc-i440fx-9.2,accel=whpx:tcg ";
     let smbios_cmd = " -smbios type=11,value=cloud-init:ds=nocloud ";
 
     // check live
@@ -294,7 +302,7 @@ pub fn listimage(json_str: &str) -> Result<String, String> {
     let disk_path = get_conf("disk_path");
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);
-    if let Ok(out) = send_cmd(&format!("ls -lh {}/{}*", disk_path, cmd.smac)) {
+    if let Ok(out) = send_cmd(&format!("dir \"{}\\{}*\"", disk_path, cmd.smac)) {
         output.push_str(&out);
     }
     set_update_status("2", &cmd.smac);
@@ -516,16 +524,16 @@ pub fn create_disk(json_str: &str) -> Result<String, String> {
 pub fn vnc_start(json_str: &str) -> Result<String, String> {
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
-    let pctl_path = get_conf("pctl_path");
     let mut output = String::new();
     output.push_str(&format!(
-        "Starting VNC proxy 0.0.0.0:{} -> vncsock_{}\n",
+        "Starting VNC proxy 0.0.0.0:{} -> {}\n",
         cmd.novncport, cmd.smac
     ));
+    // Windows: websockify connects to TCP VNC port instead of Unix socket
     let websockify = get_conf("websockify_path");
     let run_cmd = format!(
-        "{} --unix-target={}/vncsock_{} -D 0.0.0.0:{}",
-        websockify, pctl_path, cmd.smac, cmd.novncport
+        "{} 0.0.0.0:{} 127.0.0.1:5900",
+        websockify, cmd.novncport
     );
     match send_cmd(&run_cmd) {
         Ok(out) => output.push_str(&out),
@@ -539,7 +547,8 @@ pub fn vnc_stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     let mut output = String::new();
     output.push_str(&format!("Stopping VNC proxy port {}\n", cmd.novncport));
-    let run_cmd = format!("pkill -f \"0.0.0.0:{}\"", cmd.novncport);
+    // Windows: use taskkill instead of pkill
+    let run_cmd = format!("taskkill /F /FI \"WINDOWTITLE eq *{}*\"", cmd.novncport);
     match send_cmd(&run_cmd) {
         Ok(out) => output.push_str(&out),
         Err(e) => return Err(format!("VNC stop error: {}", e)),

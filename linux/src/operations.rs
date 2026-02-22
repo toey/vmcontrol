@@ -48,12 +48,15 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     std::fs::write(format!("{}/user-data", seed_dir), &user_data)
         .map_err(|e| format!("Failed to write user-data: {}", e))?;
 
-    // Create ISO using hdiutil (macOS)
+    // Create ISO using genisoimage / mkisofs (Linux)
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
     send_cmd(&format!(
-        "hdiutil makehybrid -iso -joliet -default-volume-name cidata -o '{}' '{}'",
+        "genisoimage -o '{}' -V cidata -J -R '{}'",
         iso_path, seed_dir
-    )).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    )).or_else(|_| send_cmd(&format!(
+        "mkisofs -o '{}' -V cidata -J -R '{}'",
+        iso_path, seed_dir
+    ))).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
@@ -179,7 +182,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             String::new()
         }
     };
-    let machinetype = " -machine type=pc-i440fx-9.2,accel=tcg ";
+    let machinetype = " -machine type=pc-i440fx-9.2,accel=kvm:tcg ";
     let smbios_cmd = " -smbios type=11,value=cloud-init:ds=nocloud ";
 
     // check live
