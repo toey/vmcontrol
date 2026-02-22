@@ -617,15 +617,27 @@ pub fn vnc_start(json_str: &str) -> Result<String, String> {
             .map_err(|e| format!("VNC start error: unable to start {}: {}", websockify, e))?;
         output.push_str(&format!("websockify started (PID: {})\n", child.id()));
     } else {
-        // Fall back to python -m websockify
+        // Fall back to python -m websockify via cmd /C (needed for Windows App Execution Aliases)
         use std::process::{Command, Stdio};
-        let child = Command::new("python3")
-            .args(&["-m", "websockify", listen.as_str(), target.as_str()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("VNC start error: websockify not found and python fallback failed: {}", e))?;
-        output.push_str(&format!("websockify (via python) started (PID: {})\n", child.id()));
+        let python_cmds = ["python3", "py", "python"];
+        let mut started = false;
+        for py in &python_cmds {
+            let cmd_str = format!("{} -m websockify {} {}", py, listen, target);
+            if let Ok(child) = Command::new("cmd")
+                .arg("/C")
+                .arg(&cmd_str)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                output.push_str(&format!("websockify (via {}) started (PID: {})\n", py, child.id()));
+                started = true;
+                break;
+            }
+        }
+        if !started {
+            return Err("VNC start error: websockify not found. Install: pip install websockify".into());
+        }
     }
 
     Ok(output)
