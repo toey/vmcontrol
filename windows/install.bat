@@ -36,6 +36,21 @@ if %errorlevel% neq 0 (
 )
 echo [OK]   Running as Administrator
 
+:: --- Step 1b: Architecture detection ---
+echo.
+echo [INFO] Detecting CPU architecture...
+set "ARCH=%PROCESSOR_ARCHITECTURE%"
+echo [OK]   Architecture: %ARCH%
+
+if /I "%ARCH%"=="ARM64" (
+    set "QEMU_DOWNLOAD_URL=https://qemu.weilnetz.de/aarch64/"
+    echo [INFO] ARM64 detected -- QEMU ARM64 native build required
+    echo [INFO] x86_64 QEMU will CRASH on ARM64 due to JIT-inside-JIT emulation
+) else (
+    set "QEMU_DOWNLOAD_URL=https://qemu.weilnetz.de/w64/"
+    echo [INFO] x86_64 detected -- standard QEMU build OK
+)
+
 :: --- Step 2: Prerequisites ---
 echo.
 echo [INFO] Checking prerequisites...
@@ -51,11 +66,34 @@ echo [OK]   cargo found
 
 if not exist "%QEMU_PATH%" (
     echo [ERR] QEMU not found at %QEMU_PATH%
-    echo       Install from: https://qemu.weilnetz.de/w64/
+    echo       Install from: %QEMU_DOWNLOAD_URL%
     pause
     exit /b 1
 )
 echo [OK]   qemu-system-x86_64 found
+
+:: Check if installed QEMU matches host architecture
+if /I "%ARCH%"=="ARM64" (
+    echo [INFO] Verifying QEMU is ARM64 native build...
+    "%QEMU_PATH%" --version >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo.
+        echo [ERR] ============================================================
+        echo [ERR]  QEMU binary is NOT compatible with ARM64!
+        echo [ERR]  The installed QEMU is an x86_64 build which will crash
+        echo [ERR]  on Windows ARM due to JIT-inside-JIT emulation.
+        echo [ERR]
+        echo [ERR]  Please download the ARM64 native build from:
+        echo [ERR]    %QEMU_DOWNLOAD_URL%
+        echo [ERR]
+        echo [ERR]  Uninstall current QEMU, then install the ARM64 version.
+        echo [ERR] ============================================================
+        echo.
+        pause
+        exit /b 1
+    )
+    echo [OK]   QEMU verified working on ARM64
+)
 
 if not exist "%QEMU_IMG_PATH%" (
     echo [WARN] qemu-img not found at %QEMU_IMG_PATH%
@@ -63,31 +101,57 @@ if not exist "%QEMU_IMG_PATH%" (
 
 where websockify >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [WARN] websockify not found ^(optional, needed for VNC proxy^)
-    echo        Install: pip install websockify
+    echo [INFO] websockify not found. Installing via pip...
+    python3 -m pip install websockify >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo [WARN] Failed to install websockify. Install manually: python3 -m pip install websockify
+    ) else (
+        echo [OK]   websockify installed
+    )
+) else (
+    echo [OK]   websockify found
 )
 
 echo.
 
-:: --- Step 3: Build from source ---
+:: --- Step 3: Build or locate binary ---
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
-echo [INFO] Building vm_ctl from source ^(release mode^)...
-cargo build --release
-if %errorlevel% neq 0 (
-    echo [ERR] Build failed.
-    pause
-    exit /b 1
+:: Check for pre-built binary first (cross-compiled from Mac/Linux)
+set "PREBUILT=%SCRIPT_DIR%target\x86_64-pc-windows-gnu\release\vm_ctl.exe"
+set "PREBUILT2=%SCRIPT_DIR%vm_ctl.exe"
+
+if exist "%PREBUILT%" (
+    set "BINARY=%PREBUILT%"
+    echo [OK]   Found pre-built binary at %PREBUILT%
+) else if exist "%PREBUILT2%" (
+    set "BINARY=%PREBUILT2%"
+    echo [OK]   Found pre-built binary at %PREBUILT2%
+) else (
+    echo [INFO] No pre-built binary found. Building from source...
+
+    :: Use a local target directory to avoid OS error 87 on shared/network filesystems
+    set "CARGO_TARGET_DIR=C:\vmcontrol\_build"
+
+    echo [INFO] Building vm_ctl from source ^(release mode^)...
+    cargo build --release
+    if !errorlevel! neq 0 (
+        echo [ERR] Build failed.
+        echo       Alternatively, cross-compile from Mac: cargo build --release --target x86_64-pc-windows-gnu
+        echo       Then place vm_ctl.exe in this folder and re-run install.bat
+        pause
+        exit /b 1
+    )
+    set "BINARY=!CARGO_TARGET_DIR!\release\vm_ctl.exe"
 )
 
-set "BINARY=%SCRIPT_DIR%target\release\vm_ctl.exe"
 if not exist "%BINARY%" (
     echo [ERR] Binary not found at %BINARY%
     pause
     exit /b 1
 )
-echo [OK]   Binary built successfully
+echo [OK]   Binary ready
 echo.
 
 :: --- Step 4: Create directories ---
@@ -165,8 +229,14 @@ if %errorlevel% equ 0 (
     echo [WARN] NSSM not found. Using Scheduled Task as fallback...
     echo        Download NSSM: https://nssm.cc/download
     echo.
+    :: Create a launcher script that sets working directory before running
+    (
+        echo @echo off
+        echo cd /d "%CTL_BIN%"
+        echo "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080
+    ) > "%CTL_BIN%\start_vmcontrol.bat"
     schtasks /delete /tn "%SERVICE_NAME%" /f >nul 2>&1
-    schtasks /create /tn "%SERVICE_NAME%" /tr "\"%CTL_BIN%\vm_ctl.exe\" server 0.0.0.0:8080" /sc onstart /ru SYSTEM /f >nul
+    schtasks /create /tn "%SERVICE_NAME%" /tr "\"%CTL_BIN%\start_vmcontrol.bat\"" /sc onstart /ru SYSTEM /f >nul
     if !errorlevel! equ 0 (
         echo [OK]   Scheduled Task created ^(starts on boot^)
         echo [INFO] Starting vmcontrol now...
@@ -186,7 +256,20 @@ echo [OK]   Firewall rule added
 
 echo.
 
-:: --- Step 10: Summary ---
+:: --- Step 10: Create Desktop shortcut (Admin PowerShell) ---
+echo [INFO] Creating desktop shortcut...
+set "DESKTOP=%USERPROFILE%\Desktop"
+set "SHORTCUT=%DESKTOP%\vmcontrol.lnk"
+
+powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%SHORTCUT%'); $sc.TargetPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; $sc.Arguments = '-NoExit -Command cd C:\vmcontrol; C:\vmcontrol\bin\vm_ctl.exe server 0.0.0.0:8080'; $sc.WorkingDirectory = 'C:\vmcontrol'; $sc.Description = 'vmcontrol Server (Admin)'; $sc.Save()"
+
+:: Set shortcut to Run as Administrator
+powershell -NoProfile -Command "$bytes = [System.IO.File]::ReadAllBytes('%SHORTCUT%'); $bytes[0x15] = $bytes[0x15] -bor 0x20; [System.IO.File]::WriteAllBytes('%SHORTCUT%', $bytes)"
+
+echo [OK]   Desktop shortcut created: %SHORTCUT%
+echo.
+
+:: --- Step 11: Summary ---
 echo ================================================================
 echo   vmcontrol v%VERSION% installed successfully!
 echo ================================================================

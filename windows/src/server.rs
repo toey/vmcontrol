@@ -284,7 +284,7 @@ async fn upload_iso_handler(
 
     let iso_path = get_conf("iso_path");
     let _ = std::fs::create_dir_all(&iso_path);
-    let dest = format!("{}/{}", iso_path, safe_name);
+    let dest = format!("{}\\{}", iso_path, safe_name);
 
     match std::fs::write(&dest, &body) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -323,7 +323,7 @@ async fn list_disks_handler() -> HttpResponse {
         Ok(disks) => {
             let result: Vec<serde_json::Value> = disks.iter().map(|d| {
                 // Get actual file size from filesystem
-                let file_path = format!("{}/{}.qcow2", disk_path, d.name);
+                let file_path = format!("{}\\{}.qcow2", disk_path, d.name);
                 let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
                 serde_json::json!({
                     "name": d.name,
@@ -382,7 +382,7 @@ async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse
     }
 
     let disk_path = get_conf("disk_path");
-    let path = format!("{}/{}.qcow2", disk_path, name);
+    let path = format!("{}\\{}.qcow2", disk_path, name);
 
     // Delete file
     let _ = std::fs::remove_file(&path);
@@ -435,8 +435,8 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
     }
 
     let disk_path = get_conf("disk_path");
-    let src_file = format!("{}/{}.qcow2", disk_path, source);
-    let dst_file = format!("{}/{}.qcow2", disk_path, new_name);
+    let src_file = format!("{}\\{}.qcow2", disk_path, source);
+    let dst_file = format!("{}\\{}.qcow2", disk_path, new_name);
 
     if !std::path::Path::new(&src_file).exists() {
         return HttpResponse::BadRequest().json(ApiResponse {
@@ -514,7 +514,7 @@ async fn delete_iso_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
     }
 
     let iso_path = get_conf("iso_path");
-    let path = format!("{}/{}", iso_path, name);
+    let path = format!("{}\\{}", iso_path, name);
 
     match std::fs::remove_file(&path) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -612,7 +612,7 @@ async fn upload_image_handler(
 
     let disk_path = get_conf("disk_path");
     let _ = std::fs::create_dir_all(&disk_path);
-    let upload_path = format!("{}/{}", disk_path, safe_name);
+    let upload_path = format!("{}\\{}", disk_path, safe_name);
 
     // Save uploaded file
     if let Err(e) = std::fs::write(&upload_path, &body) {
@@ -640,7 +640,7 @@ async fn upload_image_handler(
     let qcow2_name = safe_name.rsplit_once('.')
         .map(|(base, _)| format!("{}.qcow2", base))
         .unwrap_or_else(|| format!("{}.qcow2", safe_name));
-    let qcow2_path = format!("{}/{}", disk_path, qcow2_name);
+    let qcow2_path = format!("{}\\{}", disk_path, qcow2_name);
     let qemu_img = get_conf("qemu_img_path");
     let src_fmt = src_format.to_string();
     let up_path = upload_path.clone();
@@ -725,7 +725,7 @@ async fn delete_image_handler(body: web::Json<serde_json::Value>) -> HttpRespons
     }
 
     let disk_path = get_conf("disk_path");
-    let path = format!("{}/{}", disk_path, name);
+    let path = format!("{}\\{}", disk_path, name);
 
     match std::fs::remove_file(&path) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -805,7 +805,7 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 
     let live_path = get_conf("live_path");
-    let path = format!("{}/{}", live_path, filename);
+    let path = format!("{}\\{}", live_path, filename);
 
     match std::fs::remove_file(&path) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {

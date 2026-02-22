@@ -101,7 +101,7 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
             let vm = parts[0].to_string();
             let iso = parts[1];
             let iso_path = get_conf("iso_path");
-            let cmd = format!("change ide0-cd0 {}/{}", iso_path, iso);
+            let cmd = format!("change ide0-cd0 {}\\{}", iso_path, iso);
             (vm, cmd)
         }
         "unmountiso" => {
@@ -125,7 +125,7 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
             let now = chrono::Local::now();
             let ts = now.format("%Y%m%d_%H%M%S");
             let cmd = format!(
-                "migrate \"exec: {} -c > {}/{}_{}.gz\"",
+                "migrate \"exec: {} -c > {}\\{}_{}.gz\"",
                 gzip_path, live_path, smac, ts
             );
             (smac.to_string(), cmd)
