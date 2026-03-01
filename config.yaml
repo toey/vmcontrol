@@ -1,0 +1,15 @@
+qemu_path: /opt/homebrew/bin/qemu-system-x86_64
+qemu_img_path: /opt/homebrew/bin/qemu-img
+ctl_bin_path: /opt/ctl/bin
+pctl_path: /tmp/vmcontrol-dev
+disk_path: /tmp/vmcontrol-dev/disks
+iso_path: /tmp/vmcontrol-dev/iso
+live_path: /tmp/vmcontrol-dev/backups
+gzip_path: /usr/bin/gzip
+websockify_path: /Users/toey/.pyenv/versions/3.13.5/bin/websockify
+python_path: /Users/toey/.pyenv/versions/3.13.5/bin/python3
+vs_up_script: vs-up.sh
+vs_down_script: vs-down.sh
+pctl_script: pctl.sh
+domain: localhost
+db_path: /tmp/vmcontrol-dev/vmcontrol.db

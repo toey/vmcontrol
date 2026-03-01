@@ -22,6 +22,7 @@
             gap: 12px;
             border-bottom: 1px solid #30363d;
             flex-shrink: 0;
+            flex-wrap: wrap;
         }
         .toolbar h1 {
             font-size: 16px;
@@ -54,75 +55,36 @@
             cursor: pointer;
             font-weight: 600;
         }
-        .btn-connect {
-            background: #238636;
-            color: #fff;
-        }
+        .btn-connect { background: #238636; color: #fff; }
         .btn-connect:hover { background: #2ea043; }
-        .btn-disconnect {
-            background: #da3633;
-            color: #fff;
-        }
+        .btn-disconnect { background: #da3633; color: #fff; }
         .btn-disconnect:hover { background: #f85149; }
-        .btn-fullscreen {
-            background: #30363d;
-            color: #c9d1d9;
-        }
+        .btn-fullscreen { background: #30363d; color: #c9d1d9; }
         .btn-fullscreen:hover { background: #484f58; }
         .btn-back {
-            background: #30363d;
-            color: #c9d1d9;
-            text-decoration: none;
-            padding: 5px 14px;
-            border-radius: 4px;
-            font-size: 13px;
-            font-weight: 600;
+            background: #30363d; color: #c9d1d9; text-decoration: none;
+            padding: 5px 14px; border-radius: 4px; font-size: 13px; font-weight: 600;
         }
         .btn-back:hover { background: #484f58; }
-        .btn-reset {
-            background: #d29922;
-            color: #000;
-        }
+        .btn-reset { background: #d29922; color: #000; }
         .btn-reset:hover { background: #e3b341; }
-        .btn-mount {
-            background: #1f6feb;
-            color: #fff;
-        }
-        .btn-mount:hover { background: #388bfd; }
-        .btn-unmount {
-            background: #6e7681;
-            color: #fff;
-        }
+        .btn-action { background: #1f6feb; color: #fff; }
+        .btn-action:hover { background: #388bfd; }
+        .btn-unmount { background: #6e7681; color: #fff; }
         .btn-unmount:hover { background: #848d97; }
-        .toolbar select {
-            min-width: 120px;
-        }
+        .toolbar select { min-width: 120px; }
         #status {
-            font-size: 13px;
-            padding: 2px 8px;
-            border-radius: 4px;
-            margin-left: auto;
+            font-size: 13px; padding: 2px 8px; border-radius: 4px; margin-left: auto;
         }
         .status-connected { background: #238636; color: #fff; }
         .status-disconnected { background: #6e7681; color: #fff; }
         .status-connecting { background: #d29922; color: #000; }
         #vnc-container {
-            flex: 1;
-            background: #000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            overflow: hidden;
-            position: relative;
+            flex: 1; background: #000; display: flex; align-items: center;
+            justify-content: center; overflow: hidden; position: relative;
         }
-        #vnc-container canvas {
-            max-width: 100%;
-            max-height: 100%;
-        }
-        .placeholder {
-            text-align: center;
-            color: #484f58;
-        }
+        #vnc-container canvas { max-width: 100%; max-height: 100%; }
+        .placeholder { text-align: center; color: #484f58; }
         .placeholder h2 { font-size: 24px; margin-bottom: 8px; }
         .placeholder p { font-size: 14px; }
     </style>
@@ -131,15 +93,17 @@
     <div class="toolbar">
         <a href="/" class="btn-back">&larr; Back</a>
         <h1>VM Console</h1>
-        <span id="vnc-host" style="display:none">localhost</span>
+        <span id="vnc-host" style="display:none"></span>
         <label>Port <span id="vnc-port" class="info-text">12001</span></label>
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
         <button class="btn-reset" onclick="doReset()">Reset VM</button>
         <select id="iso-select"><option value="">-- ISO --</option></select>
-        <button class="btn-mount" onclick="doMountIso()">Mount</button>
+        <button class="btn-action" onclick="doMountIso()">Mount</button>
         <button class="btn-unmount" onclick="doUnmountIso()">Unmount</button>
+        <button onclick="doSendCtrlAltDel()" style="background:#6e40c9;color:#fff;">Ctrl+Alt+Del</button>
+        <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
     <div id="vnc-container">
@@ -150,9 +114,11 @@
     </div>
 
     <script type="module">
-        import RFB from 'https://esm.sh/@novnc/novnc@1.5.0/lib/rfb.js';
+        // Load noVNC from local vendor files (not CDN) for reliable keyboard support
+        import RFB from '/vendor/novnc/core/rfb.js';
 
         let rfb = null;
+        window._rfb = null;  // expose for debugging/paste
 
         function setStatus(text, cls) {
             var el = document.getElementById('status');
@@ -172,13 +138,16 @@
 
             try {
                 rfb = new RFB(document.getElementById('vnc-container'), url);
+                window._rfb = rfb;
                 rfb.scaleViewport = true;
                 rfb.resizeSession = false;
+                rfb.focusOnClick = true;
 
                 rfb.addEventListener('connect', function() {
                     setStatus('Connected', 'status-connected');
                     document.getElementById('btn-connect').style.display = 'none';
                     document.getElementById('btn-disconnect').style.display = '';
+                    rfb.focus();
                 });
 
                 rfb.addEventListener('disconnect', function(e) {
@@ -190,6 +159,7 @@
                     document.getElementById('btn-connect').style.display = '';
                     document.getElementById('btn-disconnect').style.display = 'none';
                     rfb = null;
+                    window._rfb = null;
                 });
             } catch (err) {
                 setStatus('Error: ' + err.message, 'status-disconnected');
@@ -198,6 +168,27 @@
 
         window.doDisconnect = function() {
             if (rfb) { rfb.disconnect(); rfb = null; }
+        };
+
+        window.doSendCtrlAltDel = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            rfb.sendCtrlAltDel();
+            setStatus('Sent Ctrl+Alt+Del', 'status-connected');
+        };
+
+        window.doPaste = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            var text = prompt('Text to paste into VM:');
+            if (!text) return;
+            for (var i = 0; i < text.length; i++) {
+                var ch = text.charCodeAt(i);
+                if (text[i] === '\n') {
+                    rfb.sendKey(0xff0d);
+                } else {
+                    rfb.sendKey(ch);
+                }
+            }
+            setStatus('Typed ' + text.length + ' chars', 'status-connected');
         };
 
         window.toggleFullscreen = function() {
@@ -297,8 +288,18 @@
             }
         };
 
+        // Re-focus VNC after toolbar button clicks
+        document.querySelector('.toolbar').addEventListener('click', function(e) {
+            if (!rfb) return;
+            if (e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT') return;
+            setTimeout(function() { if (rfb) rfb.focus(); }, 150);
+        });
+
         // Load ISO list on page load
         loadIsoList();
+
+        // Set VNC host to current page hostname
+        document.getElementById('vnc-host').textContent = window.location.hostname || 'localhost';
 
         // auto-connect if port in URL params
         var params = new URLSearchParams(window.location.search);
@@ -307,9 +308,7 @@
             if (params.get('host')) {
                 document.getElementById('vnc-host').textContent = params.get('host');
             }
-            window.addEventListener('DOMContentLoaded', function() {
-                setTimeout(doConnect, 500);
-            });
+            setTimeout(doConnect, 500);
         }
     </script>
 </body>

@@ -30,6 +30,12 @@ async function apiFetch(url, opts) {
     return res;
 }
 
+// HTML entity escaping to prevent XSS when inserting server data into innerHTML
+function escapeHtml(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 // OS Templates — image: default disk name pattern for auto-match
 var OS_TEMPLATES = {
     'custom':          null,
@@ -94,6 +100,7 @@ function applyOsTemplate() {
     document.getElementById('start-cpu-threads').value = tpl.threads;
     document.getElementById('start-memory-size').value = tpl.memory;
     document.getElementById('start-is-windows').value = tpl.is_windows;
+    document.getElementById('start-arch').value = tpl.arch || 'x86_64';
 
     // Resolve base image: saved mapping → auto-match → none
     var savedMap = loadImageMappings();
@@ -193,7 +200,7 @@ function updateTemplateInfo(templateKey, imageName) {
     var isSaved = savedMap[templateKey] === imageName;
 
     if (imageName) {
-        infoDiv.innerHTML = '<span style="color:#3fb950;">Base image: <b>' + imageName + '.qcow2</b></span>' +
+        infoDiv.innerHTML = '<span style="color:#3fb950;">Base image: <b>' + escapeHtml(imageName) + '.qcow2</b></span>' +
             (isSaved ? ' <small style="color:#8b949e;">(saved)</small>' : '');
     } else {
         infoDiv.innerHTML = '<span style="color:#d29922;">No image paired. Select a <b>Base Image</b> or upload one in ' +
@@ -330,9 +337,9 @@ async function loadBackupList() {
             '</tr>';
         backups.forEach(function(b) {
             html += '<tr style="border-bottom:1px solid #21262d;">' +
-                '<td style="padding:6px 8px;">' + b.vm_name + '</td>' +
-                '<td style="padding:6px 8px;">' + (b.datetime || '<em>unknown</em>') + '</td>' +
-                '<td style="padding:6px 8px;text-align:right;">' + formatSize(b.size) + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.vm_name) + '</td>' +
+                '<td style="padding:6px 8px;">' + (b.datetime ? escapeHtml(b.datetime) : '<em>unknown</em>') + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;">' + escapeHtml(formatSize(b.size)) + '</td>' +
                 '<td style="padding:6px 8px;text-align:right;">' +
                 '<button class="btn-remove" onclick="deleteBackup(\'' + b.filename.replace(/'/g, "\\'") + '\')">X</button>' +
                 '</td></tr>';
@@ -381,7 +388,7 @@ function collectVmConfig() {
             threads: val('start-cpu-threads'),
         },
         memory: { size: val('start-memory-size') },
-        features: { is_windows: val('start-is-windows') },
+        features: { is_windows: val('start-is-windows'), arch: val('start-arch') },
         network_adapters: network_adapters,
         disks: disks,
     };
@@ -504,13 +511,13 @@ async function loadDiskList() {
             listDiv.innerHTML = '<em>No disk files</em>';
         } else {
             listDiv.innerHTML = disks.map(function(d) {
-                var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + d.owner + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
+                var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
                 var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + d.name.replace(/'/g, "\\'") + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">Clone</button>';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + d.name + '.qcow2 <small>(' + sizeInfo + ')</small>' + ownerText + '</span>' +
+                    '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
                     '<span>' + resizeBtn + ' ' + cloneBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
@@ -650,7 +657,7 @@ async function loadImageList() {
         } else {
             listDiv.innerHTML = images.map(function(img) {
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + img.name + ' <small>(' + formatSize(img.size) + ')</small></span>' +
+                    '<span>' + escapeHtml(img.name) + ' <small>(' + escapeHtml(formatSize(img.size)) + ')</small></span>' +
                     '<button class="btn-remove" onclick="deleteImage(\'' + img.name.replace(/'/g, "\\'") + '\')">X</button>' +
                     '</div>';
             }).join('');
@@ -786,7 +793,7 @@ async function loadIsoList() {
         } else {
             listDiv.innerHTML = isos.map(function(iso) {
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + iso.name + ' <small>(' + formatSize(iso.size) + ')</small></span>' +
+                    '<span>' + escapeHtml(iso.name) + ' <small>(' + escapeHtml(formatSize(iso.size)) + ')</small></span>' +
                     '<button class="btn-remove" onclick="deleteIso(\'' + iso.name.replace(/'/g, "\\'") + '\')">X</button>' +
                     '</div>';
             }).join('');
@@ -925,12 +932,10 @@ function getVmVncPort(smac) {
 async function vmVncStart(smac) {
     var port = getVmVncPort(smac);
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
-    var ok = await apiCall('vnc/start', { smac: smac, novncport: String(port) });
-    if (ok) {
-        window._vncActive[smac] = true;
-        loadVmListTable();
-        window.open('/vnc.html?port=' + port + '&smac=' + smac, '_blank');
-    }
+    // QEMU has built-in WebSocket VNC — just open the console directly
+    window._vncActive[smac] = true;
+    loadVmListTable();
+    window.open('/vnc.html?port=' + port + '&smac=' + smac, '_blank');
 }
 
 async function vmVncStop(smac) {
@@ -1149,9 +1154,9 @@ async function loadVmListTable() {
         tbody.innerHTML = vms.map(function(vm) {
             var config = {};
             try { config = JSON.parse(vm.config); } catch(e) {}
-            var cpuText = config.cpu ? config.cpu.cores + 'c/' + config.cpu.threads + 't' : '-';
-            var memText = config.memory ? config.memory.size + 'MB' : '-';
-            var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) { return d.diskname || '-'; }).join(', ') : '-';
+            var cpuText = config.cpu ? escapeHtml(config.cpu.cores) + 'c/' + escapeHtml(config.cpu.threads) + 't' : '-';
+            var memText = config.memory ? escapeHtml(config.memory.size) + 'MB' : '-';
+            var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) { return escapeHtml(d.diskname) || '-'; }).join(', ') : '-';
             var vncPort = config.vnc_port || '-';
             var statusClass = vm.status === 'running' ? 'status-running' : 'status-stopped';
             var statusText = vm.status || 'stopped';
@@ -1175,15 +1180,15 @@ async function loadVmListTable() {
             actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
 
             var nameCell = vm.status === 'running'
-                ? '<a href="/vnc.html?port=' + vncPort + '&smac=' + vm.smac + '" class="vm-name-link" target="_blank">' + vm.smac + '</a>'
-                : vm.smac;
+                ? '<a href="/vnc.html?port=' + vncPort + '&smac=' + encodeURIComponent(vm.smac) + '" class="vm-name-link" target="_blank">' + escapeHtml(vm.smac) + '</a>'
+                : escapeHtml(vm.smac);
 
             return '<tr>' +
                 '<td>' + nameCell + '</td>' +
                 '<td>' + cpuText + '</td>' +
                 '<td>' + memText + '</td>' +
                 '<td>' + diskText + '</td>' +
-                '<td><small style="color:#58a6ff;">:' + vncPort + '</small> <span class="' + statusClass + '">' + statusText + '</span></td>' +
+                '<td><small style="color:#58a6ff;">:' + escapeHtml(vncPort) + '</small> <span class="' + statusClass + '">' + escapeHtml(statusText) + '</span></td>' +
                 '<td>' + actions + '</td>' +
                 '</tr>';
         }).join('');
@@ -1235,6 +1240,7 @@ async function editVm(smac) {
             }
             if (config.features) {
                 document.getElementById('start-is-windows').value = config.features.is_windows || '0';
+                document.getElementById('start-arch').value = config.features.arch || 'x86_64';
             }
 
             // Fill Network Adapters

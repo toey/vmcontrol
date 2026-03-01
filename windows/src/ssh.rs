@@ -49,6 +49,55 @@ pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
     Ok(output)
 }
 
+/// Spawn a long-running process in the background with stderr logging.
+/// Used for QEMU instead of -daemonize which has WebSocket VNC bugs.
+/// Returns (pid, log_path) so caller can check logs on failure.
+pub fn spawn_background(program: &str, args: &[&str]) -> Result<(u32, String), String> {
+    let pctl_path = std::path::PathBuf::from(r"C:\vmcontrol\logs");
+    let _ = std::fs::create_dir_all(&pctl_path);
+    let log_path = pctl_path.join(format!("qemu_{}.log", std::process::id()));
+    let log_file = std::fs::File::create(&log_path)
+        .map_err(|e| format!("unable to create log file: {}", e))?;
+    let log_file2 = log_file.try_clone()
+        .map_err(|e| format!("unable to clone log handle: {}", e))?;
+    #[cfg(target_os = "windows")]
+    let mut child = {
+        use std::os::windows::process::CommandExt;
+        const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000; // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(log_file2)
+            .stderr(log_file)
+            .creation_flags(DETACH_FLAGS)
+            .spawn()
+            .map_err(|e| format!("unable to spawn '{}': {}", program, e))?
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(log_file2)
+        .stderr(log_file)
+        .spawn()
+        .map_err(|e| format!("unable to spawn '{}': {}", program, e))?;
+    // Brief wait then verify QEMU didn't crash immediately
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let stderr = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let msg = if stderr.trim().is_empty() {
+                format!("process exited immediately with {}", status)
+            } else {
+                format!("process exited with {}: {}", status, stderr.trim())
+            };
+            Err(msg)
+        }
+        Ok(None) => Ok((child.id(), log_path.to_string_lossy().to_string())),
+        Err(e) => Ok((child.id(), format!("(could not check status: {})", e))),
+    }
+}
+
 /// Spawn a long-running process in the background (e.g. QEMU VM)
 /// Returns immediately after starting the process
 pub fn spawn_cmd(program: &str, args: &[&str]) -> Result<String, String> {

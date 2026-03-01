@@ -5,11 +5,12 @@ Cross-platform QEMU/KVM virtual machine management system written in Rust. Provi
 ## Features
 
 - **Web UI** -- Control panel at `http://localhost:8080` for managing VMs
-- **REST API** -- Full programmatic control over VM lifecycle
-- **Multi-OS** -- Windows (x86_64 + ARM64), macOS, Linux
+- **REST API** -- Full programmatic control over VM lifecycle with API key authentication
+- **Multi-Architecture** -- x86_64 and aarch64 (ARM64) guest support
+- **Multi-OS** -- Windows, macOS, Linux host platforms
 - **Cloud-Init** -- NoCloud metadata service with per-VM configuration
-- **VNC Console** -- WebSocket VNC proxy via websockify (noVNC viewer included)
-- **Disk Management** -- Create, clone, delete QCOW2 disks with SQLite tracking
+- **VNC Console** -- Built-in QEMU WebSocket VNC with bundled noVNC viewer
+- **Disk Management** -- Create, clone, resize, delete QCOW2 disks with SQLite tracking
 - **ISO Mount** -- Upload and boot VMs from ISO images (up to 4 GB)
 - **Live Migration** -- Move running VMs between hosts
 - **Backup** -- Timestamped VM snapshots with gzip compression
@@ -41,8 +42,8 @@ open http://localhost:8080
 | **Rust** | [rustup.rs](https://rustup.rs) | [rustup.rs](https://sh.rustup.rs) | [rustup.rs](https://sh.rustup.rs) |
 | **QEMU** | [qemu.weilnetz.de](https://qemu.weilnetz.de/w64/) | `brew install qemu` | `apt install qemu-system-x86 qemu-utils` |
 | **ISO tool** | Included (oscdimg/mkisofs) | Included (hdiutil) | `apt install genisoimage` |
-| **Python 3** | Optional (for VNC proxy) | Optional | Optional |
-| **websockify** | `pip install websockify` | `pip3 install websockify` | `pip3 install websockify` |
+
+> **Note:** websockify and Python are no longer required. VNC proxying is now handled natively by QEMU's built-in WebSocket support.
 
 ---
 
@@ -60,11 +61,10 @@ cd windows
 The installer will:
 1. Detect CPU architecture (x86_64 / ARM64) and verify QEMU compatibility
 2. Build `vm_ctl.exe` from source using Cargo
-3. Auto-detect Python and websockify paths
-4. Create directory structure at `C:\vmcontrol\`
-5. Generate `config.yaml` with detected paths
-6. Install as Windows Service (NSSM) or Scheduled Task
-7. Add firewall rule for port 8080
+3. Create directory structure at `C:\vmcontrol\`
+4. Generate `config.yaml` with detected paths
+5. Install as Windows Service (NSSM) or Scheduled Task
+6. Add firewall rule for port 8080
 
 **Service management:**
 ```powershell
@@ -203,18 +203,42 @@ Config file location:
 ```yaml
 qemu_path: /usr/bin/qemu-system-x86_64
 qemu_img_path: /usr/bin/qemu-img
+qemu_aarch64_path: /usr/bin/qemu-system-aarch64
+edk2_aarch64_bios: /usr/share/qemu/edk2-aarch64-code.fd
 ctl_bin_path: /opt/ctl/bin
 pctl_path: /tmp/vmcontrol
 disk_path: /tmp/vmcontrol/disks
 iso_path: /tmp/vmcontrol/iso
 live_path: /tmp/vmcontrol/backups
 gzip_path: /usr/bin/gzip
-python_path: python3
-websockify_path: websockify
+db_path: /tmp/vmcontrol/vmcontrol.db
 domain: localhost
+qemu_accel: hvf:tcg
+qemu_machine: pc
 ```
 
 The installer generates this file automatically with detected paths. Edit manually to customize.
+
+### aarch64 (ARM64) Guest Support
+
+To run ARM64 VMs, ensure:
+- `qemu-system-aarch64` is installed
+- EDK2 UEFI firmware is available (`edk2-aarch64-code.fd`)
+- Set `arch: aarch64` when creating a VM
+
+The system uses QEMU `virt` machine type with `virtio-gpu-pci` display and `-cpu max` for aarch64 guests.
+
+---
+
+## API Authentication
+
+All `/api/*` endpoints require an API key via the `X-API-Key` header:
+
+```bash
+curl -H "X-API-Key: your-api-key" http://localhost:8080/api/vm/list
+```
+
+The API key is configured in the server settings. The Web UI handles authentication automatically.
 
 ---
 
@@ -244,6 +268,7 @@ The installer generates this file automatically with detected paths. Edit manual
 | `POST` | `/api/disk/create` | Create disk |
 | `POST` | `/api/disk/delete` | Delete disk |
 | `POST` | `/api/disk/clone` | Clone disk |
+| `POST` | `/api/disk/resize` | Resize disk |
 | `GET` | `/api/iso/list` | List ISOs |
 | `POST` | `/api/iso/upload` | Upload ISO (max 4 GB) |
 | `POST` | `/api/vm/mountiso` | Mount ISO to VM |
@@ -253,8 +278,7 @@ The installer generates this file automatically with detected paths. Edit manual
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/vnc/start` | Start VNC proxy |
-| `POST` | `/api/vnc/stop` | Stop VNC proxy |
+| `GET` | `/api/vnc/status` | VNC connection status |
 | `GET` | `/api/backup/list` | List backups |
 | `POST` | `/api/vm/backup` | Create backup |
 | `POST` | `/api/vm/livemigrate` | Live migrate VM |
@@ -303,7 +327,8 @@ vmcontrol/
 │   ├── index.html         # Control panel
 │   ├── vnc.html           # VNC viewer (noVNC)
 │   ├── app.js             # Application logic
-│   └── style.css          # Styling
+│   ├── style.css          # Styling
+│   └── vendor/novnc/      # Bundled noVNC library
 ├── windows/                # Windows platform
 │   ├── install.bat        # Windows installer
 │   └── src/               # Windows-specific code

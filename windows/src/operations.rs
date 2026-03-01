@@ -3,7 +3,7 @@ use crate::config::get_conf;
 use crate::db;
 use crate::mds;
 use crate::models::*;
-use crate::ssh::{send_cmd, run_cmd, sanitize_name, validate_port, spawn_cmd_with_log};
+use crate::ssh::{send_cmd, run_cmd, sanitize_name, spawn_background, validate_port};
 
 /// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
 fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
@@ -88,19 +88,21 @@ fn find_free_port(start: u16, skip: &[u16]) -> u16 {
 
 /// Start a QEMU VM from config stored in the database
 fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, String> {
-    let qemu_path = get_conf("qemu_path");
+    let is_aarch64 = cfg.features.arch == "aarch64";
+    let qemu_path = if is_aarch64 {
+        get_conf("qemu_aarch64_path")
+    } else {
+        get_conf("qemu_path")
+    };
     let pctl_path = get_conf("pctl_path");
     let disk_path = get_conf("disk_path");
-    let live_path = get_conf("live_path");
-    let gzip_path = get_conf("gzip_path");
     let qemu_accel = get_conf("qemu_accel");
-    let qemu_machine = get_conf("qemu_machine");
+    let qemu_machine = if is_aarch64 { "virt".to_string() } else { get_conf("qemu_machine") };
 
     // ensure directories exist
     let _ = std::fs::create_dir_all(&pctl_path);
     let _ = std::fs::create_dir_all(&disk_path);
 
-    let livemode = "0";
     let mut output_log = String::new();
 
     // Use smac as the VM identifier
@@ -109,31 +111,51 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     // Build QEMU arguments safely (no shell involved)
     let mut qemu_args: Vec<String> = Vec::new();
 
-    // Boot options
-    qemu_args.extend([
-        "-nodefaults", "-vga", "std", "-boot", "d",
-    ].map(String::from));
+    // Boot options -- aarch64 virt machine uses virtio-gpu instead of -vga std
+    // NOTE: no -daemonize — QEMU's daemonize + websocket VNC is unreliable.
+    // We use spawn_background() instead to run QEMU in the background.
+    if is_aarch64 {
+        qemu_args.extend([
+            "-nodefaults", "-boot", "d",
+        ].map(String::from));
+        // UEFI firmware required for aarch64
+        let bios = get_conf("edk2_aarch64_bios");
+        if !std::path::Path::new(&bios).exists() {
+            return Err(format!("aarch64 requires UEFI firmware but '{}' not found. Install EDK2 or set edk2_aarch64_bios in config.", bios));
+        }
+        qemu_args.push("-bios".into());
+        qemu_args.push(bios);
+        // CPU for aarch64 — use "max" for broad compatibility (works with both HVF/KVM and TCG)
+        qemu_args.push("-cpu".into());
+        qemu_args.push("max".into());
+        // VGA via virtio-gpu
+        qemu_args.push("-device".into());
+        qemu_args.push("virtio-gpu-pci".into());
+        // USB controller + keyboard + tablet (virt machine has no PS/2)
+        qemu_args.push("-device".into());
+        qemu_args.push("qemu-xhci".into());
+        qemu_args.push("-device".into());
+        qemu_args.push("usb-kbd".into());
+        qemu_args.push("-device".into());
+        qemu_args.push("usb-tablet".into());
+    } else {
+        qemu_args.extend([
+            "-nodefaults", "-vga", "std", "-boot", "d",
+        ].map(String::from));
+    }
 
     // Windows localtime
     if cfg.features.is_windows == "1" {
         qemu_args.push("-localtime".into());
     }
 
-    // Windows: QEMU uses TCP for VNC and monitor (no Unix sockets)
-    // Find a free VNC port, skipping ports already used by running VMs (from DB)
-    let db_used_ports = used_qemu_vnc_ports();
-    let vnc_port = find_free_port(5900, &db_used_ports);
-    let vnc_display = vnc_port - 5900;
-    qemu_args.push("-display".into());
-    qemu_args.push(format!("vnc=0.0.0.0:{}", vnc_display));
-    output_log.push_str(&format!("VNC port: {} (display :{})\n", vnc_port, vnc_display));
-
-    // Save qemu_vnc_port to DB config so websockify knows where to connect
-    if let Ok(vm) = db::get_vm(&ismac) {
-        let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-        dbcfg["qemu_vnc_port"] = serde_json::json!(vnc_port);
-        let _ = db::update_vm(&ismac, &serde_json::to_string(&dbcfg).unwrap_or_default());
+    // Display VNC with built-in WebSocket (no websockify needed)
+    if cfg.vnc_port <= 12000 || cfg.vnc_port > 13000 {
+        return Err(format!("VNC port {} out of valid range (12001-13000)", cfg.vnc_port));
     }
+    let vnc_display = cfg.vnc_port - 12000;
+    qemu_args.push("-display".into());
+    qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, cfg.vnc_port));
 
     // Memory
     qemu_args.push("-m".into());
@@ -224,30 +246,46 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
 
-    // CDROM
-    qemu_args.push("-drive".into());
-    qemu_args.push("if=ide,index=0,media=cdrom".into());
+    // CDROM -- aarch64 virt has no IDE, use virtio (but only when ISO mounted;
+    // virtio-blk-pci requires media, so skip empty cdrom for aarch64)
+    if !is_aarch64 {
+        qemu_args.push("-drive".into());
+        qemu_args.push("if=ide,index=0,media=cdrom".into());
+    }
 
     // Generate cloud-init seed ISO from MDS config
     match generate_seed_iso(&ismac) {
         Ok(seed_iso_path) => {
             output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
-            qemu_args.push("-drive".into());
-            qemu_args.push(format!(
-                "file={},if=ide,index=1,media=cdrom,readonly=on", seed_iso_path
-            ));
+            if is_aarch64 {
+                qemu_args.push("-drive".into());
+                qemu_args.push(format!(
+                    "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
+                ));
+                qemu_args.push("-device".into());
+                qemu_args.push("virtio-blk-pci,drive=seed0".into());
+            } else {
+                qemu_args.push("-drive".into());
+                qemu_args.push(format!(
+                    "file={},if=ide,index=1,media=cdrom,readonly=on", seed_iso_path
+                ));
+            }
         }
         Err(e) => {
             output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
         }
     };
 
-    // SMBIOS cloud-init hint
-    qemu_args.push("-smbios".into());
-    qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
+    // SMBIOS cloud-init hint (x86_64 only -- aarch64 virt doesn't support SMBIOS)
+    if !is_aarch64 {
+        qemu_args.push("-smbios".into());
+        qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
+    }
 
-    // USB tablet (for mouse)
-    qemu_args.extend(["-usb", "-device", "usb-tablet,bus=usb-bus.0,port=1"].map(String::from));
+    // USB tablet (for mouse) -- aarch64 already has xhci+kbd+tablet from above
+    if !is_aarch64 {
+        qemu_args.extend(["-usb", "-device", "usb-tablet,bus=usb-bus.0,port=1"].map(String::from));
+    }
 
     // Monitor TCP socket (Windows)
     let monitor_port = find_free_port(55555, &[]);
@@ -257,52 +295,13 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let monitor_port_file = format!(r"{}\{}.port", pctl_path, ismac);
     let _ = std::fs::write(&monitor_port_file, monitor_port.to_string());
 
-    // Live migration incoming (if applicable)
-    if livemode == "1" {
-        qemu_args.push("-incoming".into());
-        qemu_args.push(format!("exec: {} -c -d {}\\{}.gz", gzip_path, live_path, ismac));
-    }
-
-    // Start VM as background process with stderr logging
+    // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
     let args_ref: Vec<&str> = qemu_args.iter().map(|s| s.as_str()).collect();
-    let log_path = format!(r"{}\logs\qemu_{}.log", pctl_path, ismac);
     output_log.push_str(&format!("QEMU: {} {}\n", qemu_path, qemu_args.join(" ")));
-    let mut child = spawn_cmd_with_log(&qemu_path, &args_ref, &log_path)
+    let (pid, log_path) = spawn_background(&qemu_path, &args_ref)
         .map_err(|e| format!("QEMU start error: {}", e))?;
-
-    let pid = child.id();
-    output_log.push_str(&format!("Process started (PID: {})\n", pid));
+    output_log.push_str(&format!("QEMU started (PID {})\n", pid));
     output_log.push_str(&format!("QEMU log: {}\n", log_path));
-
-    // Wait briefly then check if QEMU is still alive
-    std::thread::sleep(std::time::Duration::from_secs(2));
-
-    match child.try_wait() {
-        Ok(Some(exit_status)) => {
-            // QEMU exited already -- read the log to find out why
-            let stderr_content = std::fs::read_to_string(&log_path).unwrap_or_default();
-            let err_msg = if stderr_content.trim().is_empty() {
-                format!("QEMU exited immediately with {}", exit_status)
-            } else {
-                format!("QEMU exited with {}: {}", exit_status, stderr_content.trim())
-            };
-            let _ = db::set_vm_status(smac, "stopped");
-            // Clear qemu_vnc_port from config since QEMU is not running
-            if let Ok(vm) = db::get_vm(smac) {
-                let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-                dbcfg.as_object_mut().map(|m| m.remove("qemu_vnc_port"));
-                let _ = db::update_vm(smac, &serde_json::to_string(&dbcfg).unwrap_or_default());
-            }
-            return Err(err_msg);
-        }
-        Ok(None) => {
-            // Process still running -- good
-            output_log.push_str("QEMU process verified alive after 2s\n");
-        }
-        Err(e) => {
-            output_log.push_str(&format!("WARNING: could not check process status: {}\n", e));
-        }
-    }
 
     // Set status to running
     if let Err(e) = db::set_vm_status(smac, "running") {
@@ -338,17 +337,13 @@ pub fn stop(json_str: &str) -> Result<String, String> {
     // Also try taskkill as fallback if monitor failed
     if pctl_result.contains("Error") || pctl_result.contains("error") {
         output.push_str("Monitor unavailable, trying taskkill...\n");
-        let _ = send_cmd("taskkill /F /IM qemu-system-x86_64.exe");
+        let _ = run_cmd("taskkill", &["/F", "/IM", "qemu-system-x86_64.exe"]);
+        let _ = run_cmd("taskkill", &["/F", "/IM", "qemu-system-aarch64.exe"]);
         output.push_str("Sent taskkill for QEMU processes\n");
     }
     // Set status to stopped + clear qemu_vnc_port
     if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
         output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
-    }
-    if let Ok(vm) = db::get_vm(&cmd.smac) {
-        let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-        dbcfg.as_object_mut().map(|m| m.remove("qemu_vnc_port"));
-        let _ = db::update_vm(&cmd.smac, &serde_json::to_string(&dbcfg).unwrap_or_default());
     }
     Ok(output)
 }
@@ -368,11 +363,6 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let output = send_cmd_pctl("powerdown", &cmd.smac);
     // Set status to stopped + clear qemu_vnc_port
     let _ = db::set_vm_status(&cmd.smac, "stopped");
-    if let Ok(vm) = db::get_vm(&cmd.smac) {
-        let mut dbcfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-        dbcfg.as_object_mut().map(|m| m.remove("qemu_vnc_port"));
-        let _ = db::update_vm(&cmd.smac, &serde_json::to_string(&dbcfg).unwrap_or_default());
-    }
     Ok(output)
 }
 
@@ -497,7 +487,7 @@ fn next_ipv4() -> String {
 fn next_vnc_port() -> u16 {
     let used = used_vnc_ports();
     let mut port: u16 = 12001;
-    while used.contains(&port) {
+    while used.contains(&port) && port < 13000 {
         port += 2;
     }
     port
@@ -709,172 +699,18 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
 // --- VNC operations ---
 
 pub fn vnc_start(json_str: &str) -> Result<String, String> {
+    // QEMU now has built-in WebSocket VNC — no websockify needed.
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let port = validate_port(&cmd.novncport)?;
-    let mut output = String::new();
-    output.push_str(&format!(
-        "Starting VNC proxy 0.0.0.0:{} -> {}\n",
-        port, cmd.smac
-    ));
-
-    // Windows: websockify is a long-running proxy -- must be spawned, not blocked on.
-    // Try direct 'websockify' first, then fall back to 'python -m websockify'.
-    let listen = format!("0.0.0.0:{}", port);
-    // Read QEMU VNC port from DB config, default to 5900
-    let vnc_port = match db::get_vm(&cmd.smac) {
-        Ok(vm) => {
-            let cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-            cfg.get("qemu_vnc_port")
-                .and_then(|v| v.as_u64())
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "5900".to_string())
-        }
-        Err(_) => "5900".to_string(),
-    };
-    let target = format!("127.0.0.1:{}", vnc_port);
-    let pctl_path = get_conf("pctl_path");
-
-    let mut websockify = get_conf("websockify_path");
-
-    // Auto-detect websockify.exe if not a real path
-    if !std::path::Path::new(&websockify).exists() {
-        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-        let search_dirs = vec![
-            format!(r"{}\Python", localappdata),
-            format!(r"{}\Programs\Python", localappdata),
-        ];
-        for base in &search_dirs {
-            if let Ok(entries) = std::fs::read_dir(base) {
-                for entry in entries.flatten() {
-                    let ws = entry.path().join("Scripts").join("websockify.exe");
-                    if ws.exists() {
-                        websockify = ws.to_string_lossy().to_string();
-                        break;
-                    }
-                }
-            }
-            if std::path::Path::new(&websockify).exists() { break; }
-        }
-    }
-
-    let has_websockify = std::path::Path::new(&websockify).exists();
-    let mut child_pid: u32 = 0;
-
-    if has_websockify {
-        use std::process::{Command, Stdio};
-        output.push_str(&format!("Using websockify: {}\n", websockify));
-
-        #[cfg(target_os = "windows")]
-        let child = {
-            use std::os::windows::process::CommandExt;
-            const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000;
-            Command::new(&websockify)
-                .args(&[listen.as_str(), target.as_str()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .creation_flags(DETACH_FLAGS)
-                .spawn()
-                .map_err(|e| format!("VNC start error: {}: {}", websockify, e))?
-        };
-        #[cfg(not(target_os = "windows"))]
-        let child = Command::new(&websockify)
-            .args(&[listen.as_str(), target.as_str()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("VNC start error: {}: {}", websockify, e))?;
-
-        child_pid = child.id();
-        output.push_str(&format!("websockify started (PID: {})\n", child_pid));
-    } else {
-        use std::process::{Command, Stdio};
-
-        // Get python_path from config, auto-detect if default or not a real path
-        let mut python_path = get_conf("python_path");
-        if !std::path::Path::new(&python_path).exists() {
-            // Auto-detect: search common Windows Python installation paths
-            let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_default();
-            let search_dirs = vec![
-                format!(r"{}\Python", localappdata),
-                format!(r"{}\Programs\Python", localappdata),
-            ];
-            let mut found = String::new();
-            'search: for base in &search_dirs {
-                if let Ok(entries) = std::fs::read_dir(base) {
-                    for entry in entries.flatten() {
-                        let p = entry.path().join("python.exe");
-                        if p.exists() {
-                            found = p.to_string_lossy().to_string();
-                            break 'search;
-                        }
-                    }
-                }
-            }
-            if !found.is_empty() {
-                output.push_str(&format!("Auto-detected python: {}\n", found));
-                python_path = found;
-            } else {
-                return Err("VNC start error: python not found. Set python_path in config.yaml".into());
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000;
-            let child = Command::new(&python_path)
-                .args(&["-m", "websockify", listen.as_str(), target.as_str()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .creation_flags(DETACH_FLAGS)
-                .spawn()
-                .map_err(|e| format!("VNC start error: python_path='{}' err={}", python_path, e))?;
-            child_pid = child.id();
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let child = Command::new(&python_path)
-                .args(&["-m", "websockify", listen.as_str(), target.as_str()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| format!("VNC start error: python_path='{}' err={}", python_path, e))?;
-            child_pid = child.id();
-        }
-        output.push_str(&format!("websockify started (PID: {})\n", child_pid));
-    }
-
-    // Save websockify PID so vnc_stop can kill it
-    let ws_pid_file = format!(r"{}\{}.ws_pid", pctl_path, cmd.smac);
-    let _ = std::fs::write(&ws_pid_file, child_pid.to_string());
-
-    Ok(output)
+    Ok(format!("VNC WebSocket ready on port {} (built-in QEMU)\n", port))
 }
 
 pub fn vnc_stop(json_str: &str) -> Result<String, String> {
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
-    let port = validate_port(&cmd.novncport)?;
-    let mut output = String::new();
-    output.push_str(&format!("Stopping VNC proxy port {}\n", port));
-
-    // Kill websockify by saved PID
-    let pctl_path = get_conf("pctl_path");
-    let ws_pid_file = format!(r"{}\{}.ws_pid", pctl_path, cmd.smac);
-    if let Ok(pid_str) = std::fs::read_to_string(&ws_pid_file) {
-        let pid = pid_str.trim();
-        // Kill the process tree (cmd.exe + python3)
-        match send_cmd(&format!("taskkill /F /T /PID {}", pid)) {
-            Ok(out) => output.push_str(&out),
-            Err(e) => output.push_str(&format!("taskkill warning: {}\n", e)),
-        }
-        let _ = std::fs::remove_file(&ws_pid_file);
-    } else {
-        output.push_str("No websockify PID file found, process may already be stopped\n");
-    }
-
-    Ok(output)
+    let _ = validate_port(&cmd.novncport)?;
+    Ok(format!("VNC for {} stopped with VM\n", cmd.smac))
 }

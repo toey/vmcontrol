@@ -16,8 +16,6 @@ fn defaults() -> HashMap<String, String> {
     m.insert("disk_path".into(), "/tmp/vmcontrol/disks".into());
     m.insert("iso_path".into(), "/tmp/vmcontrol/iso".into());
     m.insert("qemu_img_path".into(), "/usr/bin/qemu-img".into());
-    m.insert("websockify_path".into(), "websockify".into());
-    m.insert("python_path".into(), "python3".into());
     m.insert("domain".into(), "localhost".into());
     // New config keys
     m.insert("db_path".into(), "/tmp/vmcontrol/vmcontrol.db".into());
@@ -25,6 +23,8 @@ fn defaults() -> HashMap<String, String> {
     m.insert("static_path".into(), "./static".into());
     m.insert("qemu_accel".into(), "kvm:tcg".into());
     m.insert("qemu_machine".into(), "pc".into());
+    m.insert("qemu_aarch64_path".into(), "/usr/bin/qemu-system-aarch64".into());
+    m.insert("edk2_aarch64_bios".into(), "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd".into());
     m
 }
 

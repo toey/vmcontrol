@@ -1,4 +1,4 @@
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// Execute a shell command via sh -c (UNSAFE with user input — prefer run_cmd)
 pub fn send_cmd(command: &str) -> Result<String, String> {
@@ -47,6 +47,41 @@ pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
         output.push_str(&stderr);
     }
     Ok(output)
+}
+
+/// Spawn a long-running process in the background with stderr logging.
+/// Used for QEMU instead of -daemonize which has WebSocket VNC bugs.
+/// Returns (pid, log_path) so caller can check logs on failure.
+pub fn spawn_background(program: &str, args: &[&str]) -> Result<(u32, String), String> {
+    let pctl_path = std::env::temp_dir().join("vmcontrol");
+    let _ = std::fs::create_dir_all(pctl_path.join("logs"));
+    let log_path = pctl_path.join(format!("logs/qemu_{}.log", std::process::id()));
+    let log_file = std::fs::File::create(&log_path)
+        .map_err(|e| format!("unable to create log file: {}", e))?;
+    let log_file2 = log_file.try_clone()
+        .map_err(|e| format!("unable to clone log handle: {}", e))?;
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(log_file2)
+        .stderr(log_file)
+        .spawn()
+        .map_err(|e| format!("unable to spawn '{}': {}", program, e))?;
+    // Brief wait then verify QEMU didn't crash immediately
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let stderr = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let msg = if stderr.trim().is_empty() {
+                format!("process exited immediately with {}", status)
+            } else {
+                format!("process exited with {}: {}", status, stderr.trim())
+            };
+            Err(msg)
+        }
+        Ok(None) => Ok((child.id(), log_path.to_string_lossy().to_string())),
+        Err(e) => Ok((child.id(), format!("(could not check status: {})", e))),
+    }
 }
 
 /// Validate that a string is safe for use as a VM name / identifier.

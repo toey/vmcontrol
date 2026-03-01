@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+fn default_vnc_port() -> u16 { 12001 }
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct VmStartConfig {
     pub cpu: CpuInfo,
@@ -7,6 +9,8 @@ pub struct VmStartConfig {
     pub features: Features,
     pub network_adapters: Vec<NetworkAdapter>,
     pub disks: Vec<DiskInfo>,
+    #[serde(default = "default_vnc_port")]
+    pub vnc_port: u16,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -21,9 +25,13 @@ pub struct MemoryInfo {
     pub size: String,
 }
 
+fn default_arch() -> String { "x86_64".into() }
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Features {
     pub is_windows: String,
+    #[serde(default = "default_arch")]
+    pub arch: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
