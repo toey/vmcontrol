@@ -99,71 +99,6 @@ if not exist "%QEMU_IMG_PATH%" (
     echo [WARN] qemu-img not found at %QEMU_IMG_PATH%
 )
 
-:: --- Detect real Python path ---
-echo [INFO] Searching for Python installation...
-set "PYTHON_EXE="
-set "WEBSOCKIFY_EXE="
-
-:: Search %LOCALAPPDATA%\Python\*\python.exe (e.g. pythoncore-3.14-64)
-for /d %%D in ("%LOCALAPPDATA%\Python\*") do (
-    if exist "%%D\python.exe" (
-        if not defined PYTHON_EXE (
-            set "PYTHON_EXE=%%D\python.exe"
-        )
-    )
-    if exist "%%D\Scripts\websockify.exe" (
-        if not defined WEBSOCKIFY_EXE (
-            set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
-        )
-    )
-)
-:: Search %LOCALAPPDATA%\Programs\Python\*\python.exe
-for /d %%D in ("%LOCALAPPDATA%\Programs\Python\*") do (
-    if exist "%%D\python.exe" (
-        if not defined PYTHON_EXE (
-            set "PYTHON_EXE=%%D\python.exe"
-        )
-    )
-    if exist "%%D\Scripts\websockify.exe" (
-        if not defined WEBSOCKIFY_EXE (
-            set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
-        )
-    )
-)
-
-if defined PYTHON_EXE (
-    echo [OK]   Python found: %PYTHON_EXE%
-) else (
-    echo [WARN] Python not found. VNC proxy will not work.
-    echo        Install Python from: https://www.python.org/downloads/
-)
-
-:: Install websockify if python found but websockify missing
-if defined PYTHON_EXE (
-    if not defined WEBSOCKIFY_EXE (
-        echo [INFO] websockify not found. Installing via pip...
-        "%PYTHON_EXE%" -m pip install websockify >nul 2>&1
-        if !errorlevel! neq 0 (
-            echo [WARN] Failed to install websockify. Install manually: pip install websockify
-        ) else (
-            echo [OK]   websockify installed
-            :: Re-search for websockify.exe after install
-            for /d %%D in ("%LOCALAPPDATA%\Python\*") do (
-                if exist "%%D\Scripts\websockify.exe" (
-                    if not defined WEBSOCKIFY_EXE set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
-                )
-            )
-            for /d %%D in ("%LOCALAPPDATA%\Programs\Python\*") do (
-                if exist "%%D\Scripts\websockify.exe" (
-                    if not defined WEBSOCKIFY_EXE set "WEBSOCKIFY_EXE=%%D\Scripts\websockify.exe"
-                )
-            )
-        )
-    ) else (
-        echo [OK]   websockify found: %WEBSOCKIFY_EXE%
-    )
-)
-
 echo.
 
 :: --- Step 3: Build or locate binary ---
@@ -182,15 +117,51 @@ if exist "%PREBUILT%" (
     echo [OK]   Found pre-built binary at %PREBUILT2%
 ) else (
     echo [INFO] No pre-built binary found. Building from source...
+    echo [INFO] Tip: if build fails, see windows\readme.txt for toolchain setup
 
     :: Use a local target directory to avoid OS error 87 on shared/network filesystems
     set "CARGO_TARGET_DIR=C:\vmcontrol\_build"
 
     echo [INFO] Building vm_ctl from source ^(release mode^)...
-    cargo build --release
+    cargo build --release 2>"%TEMP%\vmcontrol_build.log"
     if !errorlevel! neq 0 (
-        echo [ERR] Build failed.
-        echo       Alternatively, cross-compile from Mac: cargo build --release --target x86_64-pc-windows-gnu
+        :: Check if it's the dlltool/MinGW error
+        findstr /i "dlltool" "%TEMP%\vmcontrol_build.log" >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo [ERR] Build failed: dlltool.exe not found.
+            echo.
+            echo       The GNU toolchain requires MinGW-w64. You have two options:
+            echo.
+            echo       Option A -- Install Visual Studio Build Tools ^(recommended^):
+            echo         1. Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+            echo         2. Select "Desktop development with C++"
+            echo         3. Run: rustup default stable-msvc
+            echo         4. Re-run install.bat
+            echo.
+            echo       Option B -- Install MinGW-w64 ^(for GNU toolchain^):
+            echo         1. Run: winget install -e --id MidnightCommander.WinSCP
+            echo            or download from: https://github.com/niXman/mingw-builds-binaries/releases
+            echo         2. Add MinGW bin folder to PATH
+            echo         3. Re-run install.bat
+        ) else (
+            findstr /i "link.exe" "%TEMP%\vmcontrol_build.log" >nul 2>&1
+            if !errorlevel! equ 0 (
+                echo [ERR] Build failed: link.exe not found.
+                echo.
+                echo       The MSVC toolchain requires Visual Studio Build Tools.
+                echo       Either install Build Tools or switch to GNU toolchain:
+                echo.
+                echo         rustup toolchain install stable-x86_64-pc-windows-gnu
+                echo         rustup default stable-x86_64-pc-windows-gnu
+                echo.
+                echo       Note: GNU toolchain requires MinGW-w64 ^(provides dlltool.exe^).
+            ) else (
+                echo [ERR] Build failed. See log: %TEMP%\vmcontrol_build.log
+            )
+        )
+        echo.
+        echo       Alternatively, cross-compile from Mac:
+        echo         cargo build --release --target x86_64-pc-windows-gnu
         echo       Then place vm_ctl.exe in this folder and re-run install.bat
         pause
         exit /b 1
@@ -236,12 +207,6 @@ echo [OK]   Binary installed to %CTL_BIN%\vm_ctl.exe
 echo [OK]   Static files installed to %STATIC_DIR%\
 
 :: --- Step 7: Generate config.yaml ---
-:: Set detected paths for config
-set "CONF_PYTHON=python3"
-if defined PYTHON_EXE set "CONF_PYTHON=%PYTHON_EXE%"
-set "CONF_WEBSOCKIFY=websockify"
-if defined WEBSOCKIFY_EXE set "CONF_WEBSOCKIFY=%WEBSOCKIFY_EXE%"
-
 if not exist "%CONFIG_YAML%" (
     echo [INFO] Generating config.yaml with detected paths...
     (
@@ -253,21 +218,14 @@ if not exist "%CONFIG_YAML%" (
         echo iso_path: C:\vmcontrol\iso
         echo live_path: C:\vmcontrol\backups
         echo gzip_path: gzip
-        echo python_path: %CONF_PYTHON%
-        echo websockify_path: %CONF_WEBSOCKIFY%
         echo vs_up_script: vs-up.bat
         echo vs_down_script: vs-down.bat
         echo pctl_script: pctl.bat
         echo domain: localhost
     ) > "%CONFIG_YAML%"
     echo [OK]   config.yaml created
-    echo [OK]   python_path: %CONF_PYTHON%
-    echo [OK]   websockify_path: %CONF_WEBSOCKIFY%
 ) else (
     echo [WARN] config.yaml already exists -- skipping ^(preserving your customizations^)
-    echo [INFO] To update python/websockify paths, edit %CONFIG_YAML%
-    echo [INFO]   python_path: %CONF_PYTHON%
-    echo [INFO]   websockify_path: %CONF_WEBSOCKIFY%
 )
 
 echo.

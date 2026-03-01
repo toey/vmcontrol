@@ -60,7 +60,7 @@ cd windows
 
 The installer will:
 1. Detect CPU architecture (x86_64 / ARM64) and verify QEMU compatibility
-2. Build `vm_ctl.exe` from source using Cargo
+2. Build `vm_ctl.exe` from source using Cargo (or use pre-built binary)
 3. Create directory structure at `C:\vmcontrol\`
 4. Generate `config.yaml` with detected paths
 5. Install as Windows Service (NSSM) or Scheduled Task
@@ -95,11 +95,7 @@ C:\vmcontrol\
 
 > **Windows ARM64 note:** If running on ARM (e.g. Parallels), install the QEMU ARM64 build from [qemu.weilnetz.de/aarch64](https://qemu.weilnetz.de/aarch64/). The installer detects this automatically.
 
-> **Rust toolchain:** If you see `link.exe not found`, switch to the GNU toolchain:
-> ```powershell
-> rustup toolchain install stable-x86_64-pc-windows-gnu --force-non-host
-> rustup default stable-x86_64-pc-windows-gnu --force-non-host
-> ```
+> **Rust toolchain:** You need either MSVC (Visual Studio Build Tools) or GNU (MinGW-w64) toolchain. See `windows/readme.txt` for detailed setup instructions.
 
 ---
 
