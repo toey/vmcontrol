@@ -117,50 +117,98 @@ if exist "%PREBUILT%" (
     echo [OK]   Found pre-built binary at %PREBUILT2%
 ) else (
     echo [INFO] No pre-built binary found. Building from source...
-    echo [INFO] Tip: if build fails, see windows\readme.txt for toolchain setup
 
     :: Use a local target directory to avoid OS error 87 on shared/network filesystems
     set "CARGO_TARGET_DIR=C:\vmcontrol\_build"
 
+    :: --- Auto-detect best Rust toolchain ---
+    echo [INFO] Detecting Rust toolchain...
+    set "USE_TOOLCHAIN="
+
+    :: Check current default toolchain
+    for /f "tokens=1" %%T in ('rustup default 2^>nul') do set "CURRENT_TC=%%T"
+    echo [INFO] Current toolchain: !CURRENT_TC!
+
+    :: Check if MSVC linker (cl.exe) is available via vswhere
+    set "MSVC_OK=0"
+    where cl.exe >nul 2>&1 && set "MSVC_OK=1"
+    if "!MSVC_OK!"=="0" (
+        :: Try to find Visual Studio Build Tools via vswhere
+        set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+        if exist "!VSWHERE!" (
+            for /f "delims=" %%P in ('"!VSWHERE!" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2^>nul') do (
+                if exist "%%P\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "MSVC_OK=1"
+                    echo [INFO] Visual Studio Build Tools found at: %%P
+                )
+            )
+        )
+    )
+
+    :: Check if MinGW dlltool is available (needed for GNU toolchain)
+    set "GNU_OK=0"
+    where dlltool.exe >nul 2>&1 && set "GNU_OK=1"
+
+    :: Decide which toolchain to use
+    if "!MSVC_OK!"=="1" (
+        echo [INFO] MSVC Build Tools detected -- using MSVC toolchain
+        :: Install and set MSVC toolchain if not already active
+        echo !CURRENT_TC! | findstr /i "msvc" >nul 2>&1
+        if !errorlevel! neq 0 (
+            echo [INFO] Switching to stable-msvc toolchain...
+            rustup toolchain install stable-msvc >nul 2>&1
+            rustup default stable-msvc >nul 2>&1
+            echo [OK]   Switched to stable-msvc
+        ) else (
+            echo [OK]   Already using MSVC toolchain
+        )
+        set "USE_TOOLCHAIN=msvc"
+    ) else if "!GNU_OK!"=="1" (
+        echo [INFO] MinGW-w64 detected -- using GNU toolchain
+        echo !CURRENT_TC! | findstr /i "gnu" >nul 2>&1
+        if !errorlevel! neq 0 (
+            echo [INFO] Switching to stable-gnu toolchain...
+            rustup toolchain install stable-x86_64-pc-windows-gnu >nul 2>&1
+            rustup default stable-x86_64-pc-windows-gnu >nul 2>&1
+            echo [OK]   Switched to stable-x86_64-pc-windows-gnu
+        ) else (
+            echo [OK]   Already using GNU toolchain
+        )
+        set "USE_TOOLCHAIN=gnu"
+    ) else (
+        :: Neither MSVC nor GNU linker found -- try building anyway, show help on failure
+        echo [WARN] No C linker detected ^(no cl.exe / no dlltool.exe^)
+        echo [INFO] Attempting build with current toolchain...
+        set "USE_TOOLCHAIN=unknown"
+    )
+
     echo [INFO] Building vm_ctl from source ^(release mode^)...
     cargo build --release 2>"%TEMP%\vmcontrol_build.log"
     if !errorlevel! neq 0 (
-        :: Check if it's the dlltool/MinGW error
-        findstr /i "dlltool" "%TEMP%\vmcontrol_build.log" >nul 2>&1
-        if !errorlevel! equ 0 (
-            echo [ERR] Build failed: dlltool.exe not found.
+        echo.
+        type "%TEMP%\vmcontrol_build.log" 2>nul | findstr /i "error" 2>nul
+        echo.
+        echo [ERR] Build failed.
+        echo.
+        if "!USE_TOOLCHAIN!"=="unknown" (
+            echo       No C/C++ linker was found. Install one of the following:
             echo.
-            echo       The GNU toolchain requires MinGW-w64. You have two options:
-            echo.
-            echo       Option A -- Install Visual Studio Build Tools ^(recommended^):
+            echo       Option A -- Visual Studio Build Tools ^(recommended^):
             echo         1. Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
             echo         2. Select "Desktop development with C++"
-            echo         3. Run: rustup default stable-msvc
-            echo         4. Re-run install.bat
+            echo         3. Re-run install.bat ^(toolchain will be auto-configured^)
             echo.
-            echo       Option B -- Install MinGW-w64 ^(for GNU toolchain^):
-            echo         1. Run: winget install -e --id MidnightCommander.WinSCP
-            echo            or download from: https://github.com/niXman/mingw-builds-binaries/releases
-            echo         2. Add MinGW bin folder to PATH
-            echo         3. Re-run install.bat
+            echo       Option B -- MinGW-w64:
+            echo         1. Run:  winget install -e --id MSYS2.MSYS2
+            echo         2. Open MSYS2 and run:  pacman -S mingw-w64-x86_64-toolchain
+            echo         3. Add C:\msys64\mingw64\bin to your PATH
+            echo         4. Re-run install.bat ^(toolchain will be auto-configured^)
         ) else (
-            findstr /i "link.exe" "%TEMP%\vmcontrol_build.log" >nul 2>&1
-            if !errorlevel! equ 0 (
-                echo [ERR] Build failed: link.exe not found.
-                echo.
-                echo       The MSVC toolchain requires Visual Studio Build Tools.
-                echo       Either install Build Tools or switch to GNU toolchain:
-                echo.
-                echo         rustup toolchain install stable-x86_64-pc-windows-gnu
-                echo         rustup default stable-x86_64-pc-windows-gnu
-                echo.
-                echo       Note: GNU toolchain requires MinGW-w64 ^(provides dlltool.exe^).
-            ) else (
-                echo [ERR] Build failed. See log: %TEMP%\vmcontrol_build.log
-            )
+            echo       See build log: %TEMP%\vmcontrol_build.log
         )
         echo.
         echo       Alternatively, cross-compile from Mac:
+        echo         cd windows
         echo         cargo build --release --target x86_64-pc-windows-gnu
         echo       Then place vm_ctl.exe in this folder and re-run install.bat
         pause
