@@ -1,7 +1,7 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-const DB_PATH: &str = "/tmp/vmcontrol/vmcontrol.db";
+use crate::config::get_conf;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DiskRecord {
@@ -23,9 +23,16 @@ pub struct VmRecord {
 
 /// Open (or create) the database, ensure the table exists + migrate
 fn open_db() -> Result<Connection, String> {
-    let _ = std::fs::create_dir_all("/tmp/vmcontrol");
+    let db_path = get_conf("db_path");
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let conn =
-        Connection::open(DB_PATH).map_err(|e| format!("DB open error: {}", e))?;
+        Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
+
+    // Enable WAL mode for better concurrency
+    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS vms (
             smac TEXT PRIMARY KEY,
@@ -159,11 +166,11 @@ pub fn list_vms() -> Result<Vec<VmRecord>, String> {
 
 // ======== Disk operations ========
 
-/// Insert a new disk record
+/// Insert a new disk record (INSERT OR IGNORE to avoid duplicate errors on auto-sync)
 pub fn insert_disk(name: &str, size: &str) -> Result<(), String> {
     let conn = open_db()?;
     conn.execute(
-        "INSERT INTO disks (name, size) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO disks (name, size) VALUES (?1, ?2)",
         params![name, size],
     )
     .map_err(|e| format!("DB insert disk error: {}", e))?;
@@ -209,6 +216,17 @@ pub fn set_disk_owner(name: &str, owner: &str) -> Result<(), String> {
         params![name, owner],
     )
     .map_err(|e| format!("DB set disk owner error: {}", e))?;
+    Ok(())
+}
+
+/// Update disk size
+pub fn update_disk_size(name: &str, new_size: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "UPDATE disks SET size = ?2 WHERE name = ?1",
+        params![name, new_size],
+    )
+    .map_err(|e| format!("DB update disk size error: {}", e))?;
     Ok(())
 }
 

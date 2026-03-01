@@ -1,14 +1,14 @@
 use crate::config::get_conf;
+use crate::ssh::{sanitize_name, validate_ip};
 
 pub fn curl_request(url: &str) {
     match reqwest::blocking::get(url) {
         Ok(resp) => {
             let body = resp.text().unwrap_or_default();
-            println!("DEBUG: size=> {}", body.len());
-            println!("DEBUG: content=> {}", body);
+            log::debug!("curl_request: size={} url={}", body.len(), url);
         }
         Err(e) => {
-            eprintln!("ERROR: {}", e);
+            log::error!("curl_request error: {}", e);
         }
     }
 }
@@ -92,10 +92,14 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
             // smac is "vmname isoname" for mountiso
             let parts: Vec<&str> = smac.splitn(2, ' ').collect();
             if parts.len() < 2 {
-                return format!("Error: mountiso requires smac and isoname\n");
+                return "Error: mountiso requires smac and isoname\n".to_string();
             }
             let vm = parts[0].to_string();
             let iso = parts[1];
+            // Validate ISO name to prevent monitor command injection
+            if let Err(e) = sanitize_name(iso) {
+                return format!("Error: invalid ISO name: {}\n", e);
+            }
             let iso_path = get_conf("iso_path");
             let cmd = format!("change ide0-cd0 {}/{}", iso_path, iso);
             (vm, cmd)
@@ -106,10 +110,14 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
         "livemigrate" => {
             let parts: Vec<&str> = smac.splitn(2, ' ').collect();
             if parts.len() < 2 {
-                return format!("Error: livemigrate requires smac and target ip\n");
+                return "Error: livemigrate requires smac and target ip\n".to_string();
             }
             let vm = parts[0].to_string();
             let target = parts[1];
+            // Validate IP address
+            if let Err(e) = validate_ip(target) {
+                return format!("Error: invalid target IP: {}\n", e);
+            }
             let cmd = format!("migrate -d tcp:{}:4444", target);
             (vm, cmd)
         }

@@ -1,3 +1,35 @@
+// ──────────────────────────────────────────
+// API Key Authentication Helper
+// ──────────────────────────────────────────
+function getApiKey() {
+    return localStorage.getItem('vmcontrol_api_key') || '';
+}
+function setApiKey(key) {
+    if (key) localStorage.setItem('vmcontrol_api_key', key);
+    else localStorage.removeItem('vmcontrol_api_key');
+}
+function apiHeaders(extra) {
+    var h = extra || {};
+    var key = getApiKey();
+    if (key) h['X-API-Key'] = key;
+    return h;
+}
+// Wrapper for fetch that handles 401 (auth required)
+async function apiFetch(url, opts) {
+    opts = opts || {};
+    opts.headers = apiHeaders(opts.headers || {});
+    var res = await fetch(url, opts);
+    if (res.status === 401) {
+        var key = prompt('API Key required. Enter your VMCONTROL_API_KEY:');
+        if (key) {
+            setApiKey(key);
+            opts.headers['X-API-Key'] = key;
+            res = await fetch(url, opts);
+        }
+    }
+    return res;
+}
+
 // OS Templates — image: default disk name pattern for auto-match
 var OS_TEMPLATES = {
     'custom':          null,
@@ -225,7 +257,7 @@ async function apiCall(operation, payload) {
     try {
         var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
-        var response = await fetch(apiPath, {
+        var response = await apiFetch(apiPath, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -281,7 +313,7 @@ async function executeBackup() {
 
 async function loadBackupList() {
     try {
-        var response = await fetch('/api/backup/list');
+        var response = await apiFetch('/api/backup/list');
         var backups = await safeJson(response);
         var listDiv = document.getElementById('backup-list');
         if (!listDiv) return;
@@ -462,7 +494,7 @@ function addDisk(selectedValue) {
 // Load disk list from API and cache it
 async function loadDiskList() {
     try {
-        var response = await fetch('/api/disk/list');
+        var response = await apiFetch('/api/disk/list');
         var disks = await safeJson(response);
         window._diskList = disks;
         // Render file list in Create Disk tab
@@ -473,12 +505,13 @@ async function loadDiskList() {
         } else {
             listDiv.innerHTML = disks.map(function(d) {
                 var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + d.owner + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
+                var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + d.name.replace(/'/g, "\\'") + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">Clone</button>';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                     '<span>' + d.name + '.qcow2 <small>(' + sizeInfo + ')</small>' + ownerText + '</span>' +
-                    '<span>' + cloneBtn + ' ' + deleteBtn + '</span>' +
+                    '<span>' + resizeBtn + ' ' + cloneBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -538,6 +571,14 @@ async function executeCreateDisk() {
     }
 }
 
+// Resize a disk
+async function resizeDisk(name, currentSize) {
+    var newSize = prompt('Resize disk: ' + name + '.qcow2\nCurrent size: ' + currentSize + '\nEnter new size (e.g. 20G, 512M):', currentSize || '40G');
+    if (!newSize) return;
+    var ok = await apiCall('disk/resize', { name: name, size: newSize });
+    if (ok) loadDiskList();
+}
+
 // Delete a disk file
 async function deleteDisk(name) {
     if (!confirm('Delete disk: ' + name + '.qcow2?')) return;
@@ -545,7 +586,7 @@ async function deleteDisk(name) {
     statusEl.className = 'loading';
     statusEl.textContent = 'Deleting ' + name + '...';
     try {
-        var response = await fetch('/api/disk/delete', {
+        var response = await apiFetch('/api/disk/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: name }),
@@ -575,7 +616,7 @@ async function cloneDisk(source) {
     statusEl.className = 'loading';
     statusEl.textContent = 'Cloning ' + source + ' -> ' + newName + '...';
     try {
-        var response = await fetch('/api/disk/clone', {
+        var response = await apiFetch('/api/disk/clone', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source: source, name: newName }),
@@ -600,7 +641,7 @@ async function cloneDisk(source) {
 // Load image list
 async function loadImageList() {
     try {
-        var response = await fetch('/api/image/list');
+        var response = await apiFetch('/api/image/list');
         var images = await safeJson(response);
         var listDiv = document.getElementById('image-file-list');
         if (!listDiv) return;
@@ -642,6 +683,7 @@ async function uploadImage() {
     xhr.open('POST', '/api/image/upload');
     xhr.setRequestHeader('X-Filename', file.name);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
 
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
@@ -686,7 +728,7 @@ async function deleteImage(name) {
     statusEl.className = 'loading';
     statusEl.textContent = 'Deleting ' + name + '...';
     try {
-        var response = await fetch('/api/image/delete', {
+        var response = await apiFetch('/api/image/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: name }),
@@ -724,7 +766,7 @@ function executeUnmountIso() {
 // Load ISO list and populate dropdown + file list
 async function loadIsoList() {
     try {
-        var response = await fetch('/api/iso/list');
+        var response = await apiFetch('/api/iso/list');
         var isos = await safeJson(response);
         // Populate dropdown
         var sel = document.getElementById('mountiso-isoname');
@@ -789,6 +831,7 @@ async function uploadIso() {
     xhr.open('POST', '/api/iso/upload');
     xhr.setRequestHeader('X-Filename', file.name);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
 
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
@@ -833,7 +876,7 @@ async function deleteIso(name) {
     statusEl.className = 'loading';
     statusEl.textContent = 'Deleting ' + name + '...';
     try {
-        var response = await fetch('/api/iso/delete', {
+        var response = await apiFetch('/api/iso/delete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: name }),
@@ -952,7 +995,7 @@ async function loadMdsConfig() {
     statusEl.className = 'loading';
     statusEl.textContent = 'Loading MDS config for ' + smac + '...';
     try {
-        var response = await fetch('/api/vm/' + encodeURIComponent(smac) + '/mds');
+        var response = await apiFetch('/api/vm/' + encodeURIComponent(smac) + '/mds');
         var data = await safeJson(response);
         if (data.success && data.output) {
             var config = JSON.parse(data.output);
@@ -1036,7 +1079,7 @@ async function saveMdsConfig() {
         kea_socket_path: '',
     };
     try {
-        var response = await fetch('/api/vm/' + encodeURIComponent(smac) + '/mds', {
+        var response = await apiFetch('/api/vm/' + encodeURIComponent(smac) + '/mds', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
@@ -1061,7 +1104,7 @@ async function saveMdsConfig() {
 // Load VM list from database and populate all SMAC dropdowns
 async function loadVmList() {
     try {
-        var response = await fetch('/api/vm/list');
+        var response = await apiFetch('/api/vm/list');
         var vms = await safeJson(response);
         window._vmList = vms;
         var selects = [
@@ -1093,7 +1136,7 @@ async function loadVmList() {
 async function loadVmListTable() {
     var tbody = document.getElementById('vm-list-body');
     try {
-        var response = await fetch('/api/vm/list');
+        var response = await apiFetch('/api/vm/list');
         var vms = await safeJson(response);
         window._vmList = vms;
         window._vmListData = vms; // Cache for VNC port lookup
@@ -1161,7 +1204,7 @@ async function vmAction(action, smac) {
 // Edit VM — load config into Create form
 async function editVm(smac) {
     try {
-        var response = await fetch('/api/vm/get/' + encodeURIComponent(smac));
+        var response = await apiFetch('/api/vm/get/' + encodeURIComponent(smac));
         var vm = await safeJson(response);
         if (vm.smac) {
             window._editingVm = smac;

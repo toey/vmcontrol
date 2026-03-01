@@ -51,19 +51,6 @@ pub struct SimpleCmd {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CreateCmd {
-    pub smac: String,
-    pub size: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct CopyImageCmd {
-    pub itemplate: String,
-    pub smac: String,
-    pub size: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MountIsoCmd {
     pub smac: String,
     pub isoname: String,

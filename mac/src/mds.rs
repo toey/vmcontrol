@@ -1,9 +1,8 @@
 use actix_web::{web, HttpRequest, HttpResponse};
 use serde::{Deserialize, Serialize};
 
+use crate::config::get_conf;
 use crate::models::ApiResponse;
-
-const MDS_CONFIG_PATH: &str = "/tmp/vmcontrol/mds.json";
 
 // ──────────────────────────────────────────
 // MDS Config Model
@@ -42,7 +41,8 @@ impl Default for MdsConfig {
 }
 
 pub fn load_mds_config() -> MdsConfig {
-    match std::fs::read_to_string(MDS_CONFIG_PATH) {
+    let mds_config_path = get_conf("mds_config_path");
+    match std::fs::read_to_string(&mds_config_path) {
         Ok(content) => {
             serde_json::from_str(&content).unwrap_or_else(|e| {
                 eprintln!("MDS config parse error: {}", e);
@@ -54,10 +54,13 @@ pub fn load_mds_config() -> MdsConfig {
 }
 
 pub fn save_mds_config(config: &MdsConfig) -> Result<(), String> {
-    let _ = std::fs::create_dir_all("/tmp/vmcontrol");
+    let mds_config_path = get_conf("mds_config_path");
+    if let Some(parent) = std::path::Path::new(&mds_config_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let json = serde_json::to_string_pretty(config)
         .map_err(|e| format!("JSON serialize error: {}", e))?;
-    std::fs::write(MDS_CONFIG_PATH, json)
+    std::fs::write(&mds_config_path, json)
         .map_err(|e| format!("File write error: {}", e))
 }
 

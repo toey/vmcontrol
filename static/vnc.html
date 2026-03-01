@@ -131,7 +131,7 @@
     <div class="toolbar">
         <a href="/" class="btn-back">&larr; Back</a>
         <h1>VM Console</h1>
-        <span id="vnc-host" style="display:none">localhost</span>
+        <span id="vnc-host" style="display:none"></span>
         <label>Port <span id="vnc-port" class="info-text">12001</span></label>
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
@@ -300,6 +300,9 @@
         // Load ISO list on page load
         loadIsoList();
 
+        // Set VNC host to current page hostname (not hardcoded localhost)
+        document.getElementById('vnc-host').textContent = window.location.hostname || 'localhost';
+
         // auto-connect if port in URL params
         var params = new URLSearchParams(window.location.search);
         if (params.get('port')) {
@@ -307,9 +310,7 @@
             if (params.get('host')) {
                 document.getElementById('vnc-host').textContent = params.get('host');
             }
-            window.addEventListener('DOMContentLoaded', function() {
-                setTimeout(doConnect, 500);
-            });
+            setTimeout(doConnect, 500);
         }
     </script>
 </body>

@@ -1,11 +1,94 @@
 use actix_files as fs;
-use actix_web::{middleware, web, App, HttpResponse, HttpServer};
+use actix_web::{dev, middleware, web, App, HttpResponse, HttpServer};
 use actix_web::web::Bytes;
+use std::future::{ready, Future, Ready};
+use std::pin::Pin;
+use std::rc::Rc;
 
 use crate::config::get_conf;
 use crate::mds;
 use crate::models::ApiResponse;
 use crate::operations;
+
+// ──────────────────────────────────────────
+// API Key Authentication Middleware
+// ──────────────────────────────────────────
+
+/// Optional API key authentication.
+/// Set env VMCONTROL_API_KEY to enable. If unset, all requests are allowed.
+pub struct ApiKeyAuth(pub String);
+
+impl<S, B> dev::Transform<S, dev::ServiceRequest> for ApiKeyAuth
+where
+    S: dev::Service<dev::ServiceRequest, Response = dev::ServiceResponse<B>, Error = actix_web::Error> + 'static,
+    B: 'static,
+{
+    type Response = dev::ServiceResponse<B>;
+    type Error = actix_web::Error;
+    type InitError = ();
+    type Transform = ApiKeyAuthMiddleware<S>;
+    type Future = Ready<Result<Self::Transform, Self::InitError>>;
+
+    fn new_transform(&self, service: S) -> Self::Future {
+        ready(Ok(ApiKeyAuthMiddleware {
+            service: Rc::new(service),
+            api_key: self.0.clone(),
+        }))
+    }
+}
+
+pub struct ApiKeyAuthMiddleware<S> {
+    service: Rc<S>,
+    api_key: String,
+}
+
+impl<S, B> dev::Service<dev::ServiceRequest> for ApiKeyAuthMiddleware<S>
+where
+    S: dev::Service<dev::ServiceRequest, Response = dev::ServiceResponse<B>, Error = actix_web::Error> + 'static,
+    B: 'static,
+{
+    type Response = dev::ServiceResponse<B>;
+    type Error = actix_web::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
+
+    dev::forward_ready!(service);
+
+    fn call(&self, req: dev::ServiceRequest) -> Self::Future {
+        let svc = self.service.clone();
+        let api_key = self.api_key.clone();
+
+        Box::pin(async move {
+            // No API key configured = no auth required
+            if api_key.is_empty() {
+                return svc.call(req).await;
+            }
+
+            // Skip auth for static files and EC2 metadata endpoints
+            let path = req.path().to_string();
+            if !path.starts_with("/api/") {
+                return svc.call(req).await;
+            }
+
+            // Check X-API-Key header
+            let provided = req.headers()
+                .get("X-API-Key")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+
+            if provided == api_key {
+                svc.call(req).await
+            } else {
+                Err(actix_web::error::ErrorUnauthorized(
+                    "Invalid or missing API key. Set X-API-Key header."
+                ))
+            }
+        })
+    }
+}
+
+// ──────────────────────────────────────────
+// API Handlers
+// ──────────────────────────────────────────
 
 async fn handle_operation(
     body: web::Json<serde_json::Value>,
@@ -181,40 +264,54 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "vnc_stop", operations::vnc_stop).await
 }
 
+/// List VMs -- auto-backfill VNC ports in a single pass
 async fn list_vms_handler() -> HttpResponse {
-    // Auto-backfill VNC ports for VMs that don't have one
-    if let Ok(vms) = crate::db::list_vms() {
-        let mut used_ports: Vec<u16> = Vec::new();
-        let mut need_port: Vec<String> = Vec::new();
-        for vm in &vms {
-            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
-                if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
-                    used_ports.push(p as u16);
+    match crate::db::list_vms() {
+        Ok(vms) => {
+            // Auto-backfill VNC ports for VMs that don't have one
+            let mut used_ports: Vec<u16> = Vec::new();
+            let mut need_port: Vec<String> = Vec::new();
+            for vm in &vms {
+                if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                    if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
+                        used_ports.push(p as u16);
+                    } else {
+                        need_port.push(vm.smac.clone());
+                    }
                 } else {
                     need_port.push(vm.smac.clone());
                 }
-            } else {
-                need_port.push(vm.smac.clone());
             }
-        }
-        let mut next_port: u16 = 12001;
-        for smac in &need_port {
-            while used_ports.contains(&next_port) {
-                next_port += 2;
-            }
-            // Update config with new vnc_port
-            if let Ok(vm) = crate::db::get_vm(smac) {
-                let mut cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-                cfg["vnc_port"] = serde_json::json!(next_port);
-                let _ = crate::db::update_vm(smac, &serde_json::to_string(&cfg).unwrap_or_default());
-            }
-            used_ports.push(next_port);
-            next_port += 2;
-        }
-    }
 
-    match crate::db::list_vms() {
-        Ok(vms) => HttpResponse::Ok().json(vms),
+            // Assign missing VNC ports
+            if !need_port.is_empty() {
+                let mut next_port: u16 = 12001;
+                for smac in &need_port {
+                    while used_ports.contains(&next_port) {
+                        next_port += 2;
+                    }
+                    if let Ok(vm) = crate::db::get_vm(smac) {
+                        let mut cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+                        cfg["vnc_port"] = serde_json::json!(next_port);
+                        let _ = crate::db::update_vm(smac, &serde_json::to_string(&cfg).unwrap_or_default());
+                    }
+                    used_ports.push(next_port);
+                    next_port += 2;
+                }
+                // Re-fetch after updates
+                match crate::db::list_vms() {
+                    Ok(updated_vms) => HttpResponse::Ok().json(updated_vms),
+                    Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: format!("Failed to list VMs: {}", e),
+                        output: None,
+                    }),
+                }
+            } else {
+                // No updates needed, return directly
+                HttpResponse::Ok().json(vms)
+            }
+        }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
             message: format!("Failed to list VMs: {}", e),
@@ -274,10 +371,10 @@ async fn upload_iso_handler(
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
         .collect();
-    if safe_name.is_empty() || !safe_name.ends_with(".iso") {
+    if safe_name.is_empty() || !safe_name.ends_with(".iso") || safe_name.contains("..") {
         return HttpResponse::BadRequest().json(ApiResponse {
             success: false,
-            message: "Invalid filename (must end with .iso)".into(),
+            message: "Invalid filename (must end with .iso, no '..' allowed)".into(),
             output: None,
         });
     }
@@ -345,6 +442,10 @@ async fn list_disks_handler() -> HttpResponse {
 
 async fn create_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "create-disk", operations::create_disk).await
+}
+
+async fn resize_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    handle_operation(body, "resize-disk", operations::resize_disk).await
 }
 
 async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
@@ -591,7 +692,7 @@ async fn upload_image_handler(
         .chars()
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
         .collect();
-    if safe_name.is_empty() {
+    if safe_name.is_empty() || safe_name.contains("..") {
         return HttpResponse::BadRequest().json(ApiResponse {
             success: false,
             message: "Invalid filename".into(),
@@ -753,16 +854,18 @@ async fn list_backups_handler() -> HttpResponse {
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                     // Parse VM name and timestamp from filename: vmname_YYYYMMDD_HHMMSS.gz
                     let base = fname.trim_end_matches(".gz");
-                    // Find the timestamp part (last 2 underscore-separated segments)
                     let parts: Vec<&str> = base.rsplitn(3, '_').collect();
-                    let (vm_name, datetime) = if parts.len() >= 3 {
+                    let (vm_name, datetime) = if parts.len() >= 3
+                        && parts[1].len() >= 8
+                        && parts[0].len() >= 6
+                    {
                         // parts[0]=HHMMSS, parts[1]=YYYYMMDD, parts[2]=vmname
                         let dt = format!("{}-{}-{} {}:{}:{}",
                             &parts[1][0..4], &parts[1][4..6], &parts[1][6..8],
                             &parts[0][0..2], &parts[0][2..4], &parts[0][4..6]);
                         (parts[2].to_string(), dt)
                     } else {
-                        // Old format: vmname.gz (no timestamp)
+                        // Old format or unrecognized: use whole base as name
                         (base.to_string(), String::new())
                     };
                     backups.push(serde_json::json!({
@@ -824,6 +927,15 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
+    // Read API key from environment (optional authentication)
+    let api_key = std::env::var("VMCONTROL_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        println!("WARNING: No VMCONTROL_API_KEY set -- API is unauthenticated");
+    } else {
+        println!("API key authentication enabled");
+    }
+
+    let static_path = get_conf("static_path");
     let mds_bind = "169.254.169.254:80";
 
     println!("VM Control API server starting on http://{}", bind_addr);
@@ -851,9 +963,11 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     }
 
     // Main control panel + MDS on main port
-    HttpServer::new(|| {
+    let api_key_clone = api_key.clone();
+    HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
+            .wrap(ApiKeyAuth(api_key_clone.clone()))
             // Allow up to 4GB uploads for ISO files
             .app_data(web::PayloadConfig::new(4_294_967_296))
             // API routes
@@ -878,6 +992,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/disk/create", web::post().to(create_disk_handler))
             .route("/api/disk/delete", web::post().to(delete_disk_handler))
             .route("/api/disk/clone", web::post().to(clone_disk_handler))
+            .route("/api/disk/resize", web::post().to(resize_disk_handler))
             // Image routes
             .route("/api/image/list", web::get().to(list_images_handler))
             .route("/api/image/upload", web::post().to(upload_image_handler))
@@ -895,7 +1010,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // MDS routes
             .configure(mds::configure_mds_routes)
             // Static files (must be last - catch-all)
-            .service(fs::Files::new("/", "./static").index_file("index.html"))
+            .service(fs::Files::new("/", &static_path).index_file("index.html"))
     })
     .bind(bind_addr)?
     .run()

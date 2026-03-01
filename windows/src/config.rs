@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+static CONFIG_CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 fn defaults() -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -16,22 +19,38 @@ fn defaults() -> HashMap<String, String> {
     m.insert("websockify_path".into(), "websockify".into());
     m.insert("python_path".into(), "python3".into());
     m.insert("domain".into(), "localhost".into());
+    // New config keys
+    m.insert("db_path".into(), r"C:\vmcontrol\vmcontrol.db".into());
+    m.insert("mds_config_path".into(), r"C:\vmcontrol\mds.json".into());
+    m.insert("static_path".into(), "./static".into());
+    m.insert("qemu_accel".into(), "whpx:tcg".into());
+    m.insert("qemu_machine".into(), "pc".into());
     m
 }
 
-pub fn get_conf(name: &str) -> String {
+fn load_config() -> HashMap<String, String> {
     let config_path = r"C:\vmcontrol\bin\config.yaml";
-    let map = match std::fs::read_to_string(config_path) {
-        Ok(content) => {
-            serde_yaml::from_str::<HashMap<String, String>>(&content).unwrap_or_else(|e| {
-                eprintln!("get conf error: parse yaml: {}", e);
-                defaults()
-            })
+    let mut map = defaults();
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        match serde_yaml::from_str::<HashMap<String, String>>(&content) {
+            Ok(file_map) => {
+                // Merge file config over defaults
+                for (k, v) in file_map {
+                    map.insert(k, v);
+                }
+            }
+            Err(e) => {
+                eprintln!("config: parse yaml error: {}", e);
+            }
         }
-        Err(_) => defaults(),
-    };
+    }
+    map
+}
+
+pub fn get_conf(name: &str) -> String {
+    let map = CONFIG_CACHE.get_or_init(load_config);
     map.get(name).cloned().unwrap_or_else(|| {
-        eprintln!("get conf error: key '{}' not found", name);
+        eprintln!("config: key '{}' not found", name);
         String::new()
     })
 }

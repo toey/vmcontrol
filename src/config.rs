@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::sync::OnceLock;
+
+static CONFIG_CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 fn defaults() -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -14,23 +17,45 @@ fn defaults() -> HashMap<String, String> {
     m.insert("iso_path".into(), "/tmp/vmcontrol/iso".into());
     m.insert("qemu_img_path".into(), "/opt/homebrew/bin/qemu-img".into());
     m.insert("websockify_path".into(), "websockify".into());
+    m.insert("python_path".into(), "python3".into());
     m.insert("domain".into(), "localhost".into());
+    // New config keys
+    m.insert("db_path".into(), "/tmp/vmcontrol/vmcontrol.db".into());
+    m.insert("mds_config_path".into(), "/tmp/vmcontrol/mds.json".into());
+    m.insert("static_path".into(), "./static".into());
+    m.insert("qemu_accel".into(), "hvf:tcg".into());
+    m.insert("qemu_machine".into(), "pc".into());
     m
 }
 
-pub fn get_conf(name: &str) -> String {
-    let config_path = "/opt/ctl/bin/config.yaml";
-    let map = match std::fs::read_to_string(config_path) {
-        Ok(content) => {
-            serde_yaml::from_str::<HashMap<String, String>>(&content).unwrap_or_else(|e| {
-                eprintln!("get conf error: parse yaml: {}", e);
-                defaults()
-            })
-        }
-        Err(_) => defaults(),
+fn load_config() -> HashMap<String, String> {
+    // Check local config first, then system config
+    let config_path = if std::path::Path::new("config.yaml").exists() {
+        "config.yaml"
+    } else {
+        "/opt/ctl/bin/config.yaml"
     };
+    let mut map = defaults();
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        match serde_yaml::from_str::<HashMap<String, String>>(&content) {
+            Ok(file_map) => {
+                // Merge file config over defaults
+                for (k, v) in file_map {
+                    map.insert(k, v);
+                }
+            }
+            Err(e) => {
+                eprintln!("config: parse yaml error: {}", e);
+            }
+        }
+    }
+    map
+}
+
+pub fn get_conf(name: &str) -> String {
+    let map = CONFIG_CACHE.get_or_init(load_config);
     map.get(name).cloned().unwrap_or_else(|| {
-        eprintln!("get conf error: key '{}' not found", name);
+        eprintln!("config: key '{}' not found", name);
         String::new()
     })
 }
