@@ -9,7 +9,9 @@ set "VERSION=0.2.0"
 
 :: --- Path constants (must match windows\src\config.rs) ---
 set "QEMU_PATH=C:\Program Files\qemu\qemu-system-x86_64.exe"
+set "QEMU_AARCH64_PATH=C:\Program Files\qemu\qemu-system-aarch64.exe"
 set "QEMU_IMG_PATH=C:\Program Files\qemu\qemu-img.exe"
+set "EDK2_AARCH64_BIOS=C:\Program Files\qemu\share\edk2-aarch64-code.fd"
 set "CTL_BIN=C:\vmcontrol\bin"
 set "CONFIG_YAML=C:\vmcontrol\bin\config.yaml"
 set "PCTL_PATH=C:\vmcontrol"
@@ -64,35 +66,62 @@ if %errorlevel% neq 0 (
 )
 echo [OK]   cargo found
 
-if not exist "%QEMU_PATH%" (
-    echo [ERR] QEMU not found at %QEMU_PATH%
-    echo       Install from: %QEMU_DOWNLOAD_URL%
-    pause
-    exit /b 1
-)
-echo [OK]   qemu-system-x86_64 found
-
-:: Check if installed QEMU matches host architecture
+:: On ARM64, check for qemu-system-aarch64 as primary binary
 if /I "%ARCH%"=="ARM64" (
-    echo [INFO] Verifying QEMU is ARM64 native build...
-    "%QEMU_PATH%" --version >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo.
-        echo [ERR] ============================================================
-        echo [ERR]  QEMU binary is NOT compatible with ARM64!
-        echo [ERR]  The installed QEMU is an x86_64 build which will crash
-        echo [ERR]  on Windows ARM due to JIT-inside-JIT emulation.
-        echo [ERR]
-        echo [ERR]  Please download the ARM64 native build from:
-        echo [ERR]    %QEMU_DOWNLOAD_URL%
-        echo [ERR]
-        echo [ERR]  Uninstall current QEMU, then install the ARM64 version.
-        echo [ERR] ============================================================
-        echo.
+    if exist "%QEMU_AARCH64_PATH%" (
+        echo [OK]   qemu-system-aarch64 found
+    ) else (
+        echo [WARN] qemu-system-aarch64 not found at %QEMU_AARCH64_PATH%
+        echo        ARM64 native VMs will not be available
+    )
+    :: Also check if qemu-system-x86_64 exists (for x86_64 guest emulation)
+    if exist "%QEMU_PATH%" (
+        echo [OK]   qemu-system-x86_64 found ^(for x86_64 guest emulation^)
+        echo [INFO] Verifying QEMU is ARM64 native build...
+        "%QEMU_PATH%" --version >nul 2>&1
+        if !errorlevel! neq 0 (
+            echo [WARN] qemu-system-x86_64 appears to be an x86_64 build
+            echo        It may crash on ARM64 due to JIT-inside-JIT emulation
+            echo        Download ARM64 native build from: %QEMU_DOWNLOAD_URL%
+        ) else (
+            echo [OK]   QEMU verified working on ARM64
+        )
+    ) else (
+        echo [WARN] qemu-system-x86_64 not found at %QEMU_PATH%
+    )
+    :: At least one QEMU binary must exist
+    if not exist "%QEMU_AARCH64_PATH%" (
+        if not exist "%QEMU_PATH%" (
+            echo [ERR] No QEMU binary found. Install ARM64 QEMU from:
+            echo       %QEMU_DOWNLOAD_URL%
+            pause
+            exit /b 1
+        )
+    )
+    :: Check for EDK2 UEFI firmware
+    if exist "%EDK2_AARCH64_BIOS%" (
+        echo [OK]   EDK2 aarch64 UEFI firmware found
+    ) else (
+        :: Also check common alternative paths
+        set "EDK2_ALT1=C:\Program Files\qemu\share\edk2-aarch64-code.fd"
+        set "EDK2_ALT2=C:\Program Files\qemu\edk2-aarch64-code.fd"
+        if exist "!EDK2_ALT2!" (
+            set "EDK2_AARCH64_BIOS=!EDK2_ALT2!"
+            echo [OK]   EDK2 aarch64 UEFI firmware found at !EDK2_ALT2!
+        ) else (
+            echo [WARN] EDK2 aarch64 UEFI firmware not found
+            echo        aarch64 VMs require edk2-aarch64-code.fd
+            echo        Set edk2_aarch64_bios in config.yaml after install
+        )
+    )
+) else (
+    if not exist "%QEMU_PATH%" (
+        echo [ERR] QEMU not found at %QEMU_PATH%
+        echo       Install from: %QEMU_DOWNLOAD_URL%
         pause
         exit /b 1
     )
-    echo [OK]   QEMU verified working on ARM64
+    echo [OK]   qemu-system-x86_64 found
 )
 
 if not exist "%QEMU_IMG_PATH%" (
@@ -105,16 +134,25 @@ echo.
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
 
-:: Check for pre-built binary first (cross-compiled from Mac/Linux)
-set "PREBUILT=%SCRIPT_DIR%target\x86_64-pc-windows-gnu\release\vm_ctl.exe"
-set "PREBUILT2=%SCRIPT_DIR%vm_ctl.exe"
+:: Check for pre-built binary first (cross-compiled or local build)
+set "PREBUILT_LOCAL=%SCRIPT_DIR%vm_ctl.exe"
+if /I "%ARCH%"=="ARM64" (
+    set "PREBUILT_TARGET=%SCRIPT_DIR%target\aarch64-pc-windows-msvc\release\vm_ctl.exe"
+) else (
+    set "PREBUILT_TARGET=%SCRIPT_DIR%target\x86_64-pc-windows-gnu\release\vm_ctl.exe"
+)
+:: Also check MSVC target path
+set "PREBUILT_MSVC=%SCRIPT_DIR%target\release\vm_ctl.exe"
 
-if exist "%PREBUILT%" (
-    set "BINARY=%PREBUILT%"
-    echo [OK]   Found pre-built binary at %PREBUILT%
-) else if exist "%PREBUILT2%" (
-    set "BINARY=%PREBUILT2%"
-    echo [OK]   Found pre-built binary at %PREBUILT2%
+if exist "%PREBUILT_LOCAL%" (
+    set "BINARY=%PREBUILT_LOCAL%"
+    echo [OK]   Found pre-built binary at %PREBUILT_LOCAL%
+) else if exist "%PREBUILT_TARGET%" (
+    set "BINARY=%PREBUILT_TARGET%"
+    echo [OK]   Found pre-built binary at %PREBUILT_TARGET%
+) else if exist "%PREBUILT_MSVC%" (
+    set "BINARY=%PREBUILT_MSVC%"
+    echo [OK]   Found pre-built binary at %PREBUILT_MSVC%
 ) else (
     echo [INFO] No pre-built binary found. Building from source...
 
@@ -145,41 +183,62 @@ if exist "%PREBUILT%" (
         )
     )
 
-    :: Check if MinGW dlltool is available (needed for GNU toolchain)
-    set "GNU_OK=0"
-    where dlltool.exe >nul 2>&1 && set "GNU_OK=1"
-
     :: Decide which toolchain to use
-    if "!MSVC_OK!"=="1" (
-        echo [INFO] MSVC Build Tools detected -- using MSVC toolchain
-        :: Install and set MSVC toolchain if not already active
-        echo !CURRENT_TC! | findstr /i "msvc" >nul 2>&1
-        if !errorlevel! neq 0 (
-            echo [INFO] Switching to stable-msvc toolchain...
-            rustup toolchain install stable-msvc >nul 2>&1
-            rustup default stable-msvc >nul 2>&1
-            echo [OK]   Switched to stable-msvc
+    if /I "%ARCH%"=="ARM64" (
+        :: ARM64: MSVC is the only supported toolchain (no GNU for aarch64-windows)
+        if "!MSVC_OK!"=="1" (
+            echo [INFO] MSVC Build Tools detected -- using MSVC toolchain ^(ARM64^)
+            echo !CURRENT_TC! | findstr /i "msvc" >nul 2>&1
+            if !errorlevel! neq 0 (
+                echo [INFO] Switching to stable-msvc toolchain...
+                rustup toolchain install stable-msvc >nul 2>&1
+                rustup default stable-msvc >nul 2>&1
+                echo [OK]   Switched to stable-msvc ^(aarch64-pc-windows-msvc^)
+            ) else (
+                echo [OK]   Already using MSVC toolchain
+            )
+            set "USE_TOOLCHAIN=msvc"
         ) else (
-            echo [OK]   Already using MSVC toolchain
+            echo [WARN] No MSVC Build Tools detected
+            echo [INFO] ARM64 Windows requires MSVC toolchain ^(GNU is not available^)
+            echo [INFO] Attempting build with current toolchain...
+            set "USE_TOOLCHAIN=unknown"
         )
-        set "USE_TOOLCHAIN=msvc"
-    ) else if "!GNU_OK!"=="1" (
-        echo [INFO] MinGW-w64 detected -- using GNU toolchain
-        echo !CURRENT_TC! | findstr /i "gnu" >nul 2>&1
-        if !errorlevel! neq 0 (
-            echo [INFO] Switching to stable-gnu toolchain...
-            rustup toolchain install stable-x86_64-pc-windows-gnu >nul 2>&1
-            rustup default stable-x86_64-pc-windows-gnu >nul 2>&1
-            echo [OK]   Switched to stable-x86_64-pc-windows-gnu
-        ) else (
-            echo [OK]   Already using GNU toolchain
-        )
-        set "USE_TOOLCHAIN=gnu"
     ) else (
-        :: Neither MSVC nor GNU linker found -- try building anyway, show help on failure
-        echo [WARN] No C linker detected ^(no cl.exe / no dlltool.exe^)
-        echo [INFO] Attempting build with current toolchain...
-        set "USE_TOOLCHAIN=unknown"
+        :: x86_64: Try MSVC first, then GNU
+        :: Check if MinGW dlltool is available (needed for GNU toolchain)
+        set "GNU_OK=0"
+        where dlltool.exe >nul 2>&1 && set "GNU_OK=1"
+
+        if "!MSVC_OK!"=="1" (
+            echo [INFO] MSVC Build Tools detected -- using MSVC toolchain
+            echo !CURRENT_TC! | findstr /i "msvc" >nul 2>&1
+            if !errorlevel! neq 0 (
+                echo [INFO] Switching to stable-msvc toolchain...
+                rustup toolchain install stable-msvc >nul 2>&1
+                rustup default stable-msvc >nul 2>&1
+                echo [OK]   Switched to stable-msvc
+            ) else (
+                echo [OK]   Already using MSVC toolchain
+            )
+            set "USE_TOOLCHAIN=msvc"
+        ) else if "!GNU_OK!"=="1" (
+            echo [INFO] MinGW-w64 detected -- using GNU toolchain
+            echo !CURRENT_TC! | findstr /i "gnu" >nul 2>&1
+            if !errorlevel! neq 0 (
+                echo [INFO] Switching to stable-gnu toolchain...
+                rustup toolchain install stable-x86_64-pc-windows-gnu >nul 2>&1
+                rustup default stable-x86_64-pc-windows-gnu >nul 2>&1
+                echo [OK]   Switched to stable-x86_64-pc-windows-gnu
+            ) else (
+                echo [OK]   Already using GNU toolchain
+            )
+            set "USE_TOOLCHAIN=gnu"
+        ) else (
+            echo [WARN] No C linker detected ^(no cl.exe / no dlltool.exe^)
+            echo [INFO] Attempting build with current toolchain...
+            set "USE_TOOLCHAIN=unknown"
+        )
     )
 
     echo [INFO] Building vm_ctl from source ^(release mode^)...
@@ -191,25 +250,34 @@ if exist "%PREBUILT%" (
         echo [ERR] Build failed.
         echo.
         if "!USE_TOOLCHAIN!"=="unknown" (
-            echo       No C/C++ linker was found. Install one of the following:
+            echo       No C/C++ linker was found.
             echo.
-            echo       Option A -- Visual Studio Build Tools ^(recommended^):
+            echo       Install Visual Studio Build Tools:
             echo         1. Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
             echo         2. Select "Desktop development with C++"
+            if /I not "%ARCH%"=="ARM64" (
+                echo         3. Also select "ARM64/ARM64EC build tools" if on ARM
+            )
             echo         3. Re-run install.bat ^(toolchain will be auto-configured^)
-            echo.
-            echo       Option B -- MinGW-w64:
-            echo         1. Run:  winget install -e --id MSYS2.MSYS2
-            echo         2. Open MSYS2 and run:  pacman -S mingw-w64-x86_64-toolchain
-            echo         3. Add C:\msys64\mingw64\bin to your PATH
-            echo         4. Re-run install.bat ^(toolchain will be auto-configured^)
+            if /I not "%ARCH%"=="ARM64" (
+                echo.
+                echo       Alternative -- MinGW-w64 ^(x86_64 only, not available for ARM64^):
+                echo         1. Run:  winget install -e --id MSYS2.MSYS2
+                echo         2. Open MSYS2 and run:  pacman -S mingw-w64-x86_64-toolchain
+                echo         3. Add C:\msys64\mingw64\bin to your PATH
+                echo         4. Re-run install.bat
+            )
         ) else (
             echo       See build log: %TEMP%\vmcontrol_build.log
         )
         echo.
         echo       Alternatively, cross-compile from Mac:
         echo         cd windows
-        echo         cargo build --release --target x86_64-pc-windows-gnu
+        if /I "%ARCH%"=="ARM64" (
+            echo         cargo build --release --target aarch64-pc-windows-msvc
+        ) else (
+            echo         cargo build --release --target x86_64-pc-windows-gnu
+        )
         echo       Then place vm_ctl.exe in this folder and re-run install.bat
         pause
         exit /b 1
@@ -260,6 +328,8 @@ if not exist "%CONFIG_YAML%" (
     (
         echo qemu_path: %QEMU_PATH%
         echo qemu_img_path: %QEMU_IMG_PATH%
+        echo qemu_aarch64_path: %QEMU_AARCH64_PATH%
+        echo edk2_aarch64_bios: %EDK2_AARCH64_BIOS%
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
@@ -272,6 +342,9 @@ if not exist "%CONFIG_YAML%" (
         echo domain: localhost
     ) > "%CONFIG_YAML%"
     echo [OK]   config.yaml created
+    if /I "%ARCH%"=="ARM64" (
+        echo [OK]   ARM64 paths included: qemu_aarch64_path, edk2_aarch64_bios
+    )
 ) else (
     echo [WARN] config.yaml already exists -- skipping ^(preserving your customizations^)
 )
