@@ -321,10 +321,10 @@ if exist "%PREBUILT_LOCAL%" (
                             set "VS_SETUP=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe"
                             if exist "!VS_SETUP!" (
                                 echo [INFO] Running: setup.exe modify --add VC.Tools.ARM64 + Windows SDK
-                                "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet --wait --norestart
+                                "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet
                                 if !errorlevel! neq 0 (
                                     echo [WARN] setup.exe modify returned error, trying with Windows10 SDK...
-                                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows10SDK.20348 --quiet --wait --norestart
+                                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows10SDK.20348 --quiet
                                 )
                                 echo [INFO] Retrying vcvarsall.bat arm64...
                                 call "!VCVARSALL!" arm64
