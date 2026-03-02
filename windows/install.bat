@@ -374,16 +374,37 @@ if exist "%PREBUILT_LOCAL%" (
             )
         )
         if defined VS_INSTALL_PATH (
+            :: Check if LLVM/Clang is already installed but not in PATH
             set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\ARM64\bin"
-            if not exist "!LLVM_BIN!" set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\bin"
+            if not exist "!LLVM_BIN!\clang.exe" set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\x64\bin"
+            if not exist "!LLVM_BIN!\clang.exe" set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\bin"
             if exist "!LLVM_BIN!\clang.exe" (
                 set "PATH=!LLVM_BIN!;!PATH!"
                 set "LIBCLANG_PATH=!LLVM_BIN!"
                 echo [OK]   Added LLVM to PATH: !LLVM_BIN!
             ) else (
-                echo [WARN] clang.exe not found in VS LLVM directory
-                echo        ring crate may fail to build on ARM64
-                echo        Install Clang via: Visual Studio Installer ^> Individual Components ^> "C++ Clang Compiler"
+                :: Clang not installed -- auto-install via VS Installer
+                echo [INFO] Clang/LLVM not installed. Installing via VS Installer...
+                set "VS_SETUP=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe"
+                if exist "!VS_SETUP!" (
+                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --quiet
+                    echo [INFO] Clang component installed. Searching for clang.exe...
+                    :: Re-check all possible paths
+                    set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\ARM64\bin"
+                    if not exist "!LLVM_BIN!\clang.exe" set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\x64\bin"
+                    if not exist "!LLVM_BIN!\clang.exe" set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\bin"
+                    if exist "!LLVM_BIN!\clang.exe" (
+                        set "PATH=!LLVM_BIN!;!PATH!"
+                        set "LIBCLANG_PATH=!LLVM_BIN!"
+                        echo [OK]   Added LLVM to PATH: !LLVM_BIN!
+                    ) else (
+                        echo [WARN] clang.exe still not found after install
+                        echo        Install manually: Visual Studio Installer ^> Individual Components ^> "C++ Clang Compiler"
+                    )
+                ) else (
+                    echo [WARN] VS Installer setup.exe not found -- cannot auto-install Clang
+                    echo        Install Clang via: Visual Studio Installer ^> Individual Components ^> "C++ Clang Compiler"
+                )
             )
         ) else (
             echo [WARN] VS installation not found -- cannot locate clang
