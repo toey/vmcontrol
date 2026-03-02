@@ -11,6 +11,8 @@ Cross-platform QEMU/KVM virtual machine management system written in Rust. Provi
 - **Cloud-Init** -- NoCloud metadata service with per-VM configuration
 - **VNC Console** -- Built-in QEMU WebSocket VNC with bundled noVNC viewer
 - **Disk Management** -- Create, clone, resize, delete QCOW2 disks with SQLite tracking
+- **Disk Export** -- Download disks as qcow2, or convert to raw/vmdk/vdi/vhdx on-the-fly
+- **Image Import** -- Upload vmdk/vdi/vhdx/raw images with auto-conversion to qcow2
 - **ISO Mount** -- Upload and boot VMs from ISO images (up to 4 GB)
 - **Live Migration** -- Move running VMs between hosts
 - **Backup** -- Timestamped VM snapshots with gzip compression
@@ -256,35 +258,82 @@ The API key is configured in the server settings. The Web UI handles authenticat
 | `POST` | `/api/vm/reset` | Reset VM |
 | `POST` | `/api/vm/delete` | Delete VM |
 
-### Disk & ISO
+### Disk Management
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/disk/list` | List disks |
-| `POST` | `/api/disk/create` | Create disk |
-| `POST` | `/api/disk/delete` | Delete disk |
-| `POST` | `/api/disk/clone` | Clone disk |
-| `POST` | `/api/disk/resize` | Resize disk |
-| `GET` | `/api/iso/list` | List ISOs |
-| `POST` | `/api/iso/upload` | Upload ISO (max 4 GB) |
-| `POST` | `/api/vm/mountiso` | Mount ISO to VM |
-| `POST` | `/api/vm/unmountiso` | Unmount ISO |
+| `POST` | `/api/disk/create` | Create disk (`name`, `size`) |
+| `POST` | `/api/disk/delete` | Delete disk (`name`) |
+| `POST` | `/api/disk/clone` | Clone disk (`source`, `name`) |
+| `POST` | `/api/disk/resize` | Resize disk (`name`, `size`) |
+| `GET` | `/api/disk/export/{name}` | Export/download disk (see below) |
 
-### VNC & Backup
+### Disk Export
+
+Export a disk image with optional format conversion:
+
+```bash
+# Download as qcow2 (default -- no conversion, fastest)
+curl -O -H "X-API-Key: KEY" http://localhost:8080/api/disk/export/mydisk
+
+# Convert and download as VMDK (VMware)
+curl -O -H "X-API-Key: KEY" http://localhost:8080/api/disk/export/mydisk?format=vmdk
+
+# Convert and download as VDI (VirtualBox)
+curl -O -H "X-API-Key: KEY" http://localhost:8080/api/disk/export/mydisk?format=vdi
+
+# Convert and download as VHDX (Hyper-V)
+curl -O -H "X-API-Key: KEY" http://localhost:8080/api/disk/export/mydisk?format=vhdx
+
+# Convert and download as raw image
+curl -O -H "X-API-Key: KEY" http://localhost:8080/api/disk/export/mydisk?format=raw
+```
+
+Supported formats: `qcow2` (default), `raw`, `vmdk`, `vdi`, `vhdx`
+
+### Image Import
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/vnc/status` | VNC connection status |
+| `GET` | `/api/image/list` | List disk images |
+| `POST` | `/api/image/upload` | Upload image (auto-converts to qcow2) |
+| `POST` | `/api/image/delete` | Delete image |
+
+Upload supports: qcow2, vmdk, vdi, vhdx, raw, img -- non-qcow2 formats are auto-converted via `qemu-img convert`.
+
+### ISO Management
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/iso/list` | List ISOs |
+| `POST` | `/api/iso/upload` | Upload ISO (max 4 GB) |
+| `POST` | `/api/iso/delete` | Delete ISO |
+| `POST` | `/api/vm/mountiso` | Mount ISO to VM |
+| `POST` | `/api/vm/unmountiso` | Unmount ISO |
+
+### VNC Console
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/vnc/start` | Start VNC session (`smac`, `novncport`) |
+| `POST` | `/api/vnc/stop` | Stop VNC session |
+
+### Backup & Migration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | `GET` | `/api/backup/list` | List backups |
-| `POST` | `/api/vm/backup` | Create backup |
-| `POST` | `/api/vm/livemigrate` | Live migrate VM |
+| `POST` | `/api/backup/delete` | Delete backup |
+| `POST` | `/api/vm/backup` | Create VM backup (gzip snapshot) |
+| `POST` | `/api/vm/livemigrate` | Live migrate VM to another host |
 
 ### Metadata Service (MDS)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/vm/{smac}/mds` | Get VM metadata config |
-| `POST` | `/api/vm/{smac}/mds` | Save VM metadata config |
+| `GET` | `/api/vm/{smac}/mds` | Get per-VM metadata config |
+| `POST` | `/api/vm/{smac}/mds` | Save per-VM metadata config |
 
 ---
 
