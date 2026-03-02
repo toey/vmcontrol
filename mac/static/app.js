@@ -1208,7 +1208,20 @@ async function loadVmListTable() {
             try { config = JSON.parse(vm.config); } catch(e) {}
             var cpuText = config.cpu ? escapeHtml(config.cpu.cores) + 'c/' + escapeHtml(config.cpu.threads) + 't' : '-';
             var memText = config.memory ? escapeHtml(config.memory.size) + 'MB' : '-';
-            var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) { return escapeHtml(d.diskname) || '-'; }).join(', ') : '-';
+            var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) {
+                var dname = d.diskname || '-';
+                var safeDname = dname.replace(/'/g, "\\'");
+                return escapeHtml(dname) +
+                    ' <span class="export-dropdown">' +
+                    '<button class="btn-export btn-export-sm" onclick="event.stopPropagation();this.parentElement.classList.toggle(\'open\')" title="Export">⬇</button>' +
+                    '<span class="export-dropdown-content">' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'qcow2\')">⬇ qcow2</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vmdk\')">⬇ VMDK</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vdi\')">⬇ VDI</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vhdx\')">⬇ VHDX</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'raw\')">⬇ Raw</a>' +
+                    '</span></span>';
+            }).join(', ') : '-';
             var vncPort = config.vnc_port || '-';
             var statusClass = vm.status === 'running' ? 'status-running' : 'status-stopped';
             var statusText = vm.status || 'stopped';

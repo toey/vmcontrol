@@ -216,6 +216,12 @@ textarea:focus {
 .btn-export:hover {
     background: #2ea043;
 }
+.btn-export-sm {
+    padding: 1px 5px;
+    font-size: 0.75em;
+    vertical-align: middle;
+    margin-left: 2px;
+}
 
 .export-dropdown {
     position: relative;
