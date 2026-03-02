@@ -264,7 +264,7 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/')) ? '/api/' + operation : '/api/vm/' + operation;
+        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/') || operation.startsWith('group/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
         var response = await apiFetch(apiPath, {
             method: 'POST',
@@ -415,8 +415,14 @@ async function executeCreateVm() {
         config: config,
     });
     if (ok) {
+        // Set group if specified
+        var groupName = getCreateFormGroup();
+        if (groupName) {
+            await setVmGroup(vmName, groupName);
+        }
         loadVmList();
         loadVmListTable();
+        loadGroupList();
         // Reset edit mode
         window._editingVm = null;
         document.getElementById('create-title').textContent = 'Create VM';
@@ -426,6 +432,8 @@ async function executeCreateVm() {
         document.getElementById('create-os-template').value = 'custom';
         document.getElementById('create-base-image').value = '';
         document.getElementById('template-info').innerHTML = '';
+        document.getElementById('create-group').value = '';
+        document.getElementById('create-group-new').value = '';
     }
 }
 
@@ -445,8 +453,12 @@ async function executeUpdateVm() {
         config: config,
     });
     if (ok) {
+        // Set group
+        var groupName = getCreateFormGroup();
+        await setVmGroup(vmName, groupName);
         loadVmList();
         loadVmListTable();
+        loadGroupList();
         // Reset edit mode
         window._editingVm = null;
         document.getElementById('create-title').textContent = 'Create VM';
@@ -456,6 +468,8 @@ async function executeUpdateVm() {
         document.getElementById('create-os-template').value = 'custom';
         document.getElementById('create-base-image').value = '';
         document.getElementById('template-info').innerHTML = '';
+        document.getElementById('create-group').value = '';
+        document.getElementById('create-group-new').value = '';
     }
 }
 
@@ -1324,66 +1338,98 @@ async function loadVmListTable() {
         window._vmListData = vms; // Cache for VNC port lookup
 
         if (vms.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="6"><em>No VMs created yet. Go to Create VM tab to add one.</em></td></tr>';
+            tbody.innerHTML = '<tr><td colspan="7"><em>No VMs created yet. Go to Create VM tab to add one.</em></td></tr>';
             return;
         }
 
-        tbody.innerHTML = vms.map(function(vm) {
-            var config = {};
-            try { config = JSON.parse(vm.config); } catch(e) {}
-            var cpuText = config.cpu ? escapeHtml(config.cpu.cores) + 'c/' + escapeHtml(config.cpu.threads) + 't' : '-';
-            var memText = config.memory ? escapeHtml(config.memory.size) + 'MB' : '-';
-            var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) {
-                var dname = d.diskname || '-';
-                var safeDname = dname.replace(/'/g, "\\'");
-                return escapeHtml(dname) +
-                    ' <span class="export-dropdown">' +
-                    '<button class="btn-export btn-export-sm" onclick="event.stopPropagation();this.parentElement.classList.toggle(\'open\')" title="Export">⬇</button>' +
-                    '<span class="export-dropdown-content">' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'qcow2\')">⬇ qcow2</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vmdk\')">⬇ VMDK</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vdi\')">⬇ VDI</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vhdx\')">⬇ VHDX</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'raw\')">⬇ Raw</a>' +
-                    '</span></span>';
-            }).join(', ') : '-';
-            var vncPort = config.vnc_port || '-';
-            var statusClass = vm.status === 'running' ? 'status-running' : 'status-stopped';
-            var statusText = vm.status || 'stopped';
-
-            var actions = '';
-            if (vm.status === 'running') {
-                actions += '<button class="btn-vm-action btn-vm-stop" onclick="vmAction(\'stop\',\'' + vm.smac + '\')">Stop</button> ';
-                actions += '<button class="btn-vm-action btn-vm-reset" onclick="vmAction(\'reset\',\'' + vm.smac + '\')">Reset</button> ';
-                actions += '<button class="btn-vm-action btn-vm-powerdown" onclick="vmAction(\'powerdown\',\'' + vm.smac + '\')">Powerdown</button> ';
-                if (window._vncActive[vm.smac]) {
-                    actions += '<button class="btn-vm-action btn-vm-vncstop" onclick="vmVncStop(\'' + vm.smac + '\')">VNC Stop</button> ';
-                } else {
-                    actions += '<button class="btn-vm-action btn-vm-vnc" onclick="vmVncStart(\'' + vm.smac + '\')">VNC</button> ';
-                }
-            } else {
-                // VM stopped → clear VNC active state
-                delete window._vncActive[vm.smac];
-                actions += '<button class="btn-vm-action btn-vm-start" onclick="vmAction(\'start\',\'' + vm.smac + '\')">Start</button> ';
+        // Group VMs by group_name
+        var grouped = {};
+        var groupOrder = [];
+        vms.forEach(function(vm) {
+            var g = vm.group_name || '';
+            if (!grouped[g]) {
+                grouped[g] = [];
+                groupOrder.push(g);
             }
-            actions += '<button class="btn-vm-action btn-vm-edit" onclick="editVm(\'' + vm.smac + '\')">Edit</button> ';
-            actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
+            grouped[g].push(vm);
+        });
 
-            var nameCell = vm.status === 'running'
-                ? '<a href="/vnc.html?port=' + vncPort + '&smac=' + encodeURIComponent(vm.smac) + '" class="vm-name-link" target="_blank">' + escapeHtml(vm.smac) + '</a>'
-                : escapeHtml(vm.smac);
+        var html = '';
+        groupOrder.forEach(function(groupName) {
+            var groupLabel = groupName || '(Ungrouped)';
+            var groupVms = grouped[groupName];
+            // Group header row
+            html += '<tr class="group-header-row">' +
+                '<td colspan="7" style="background:#161b22;padding:8px 10px;font-weight:bold;color:#58a6ff;border-bottom:2px solid #30363d;font-size:0.9rem;">' +
+                '📁 ' + escapeHtml(groupLabel) + ' <small style="color:#8b949e;font-weight:normal;">(' + groupVms.length + ')</small>' +
+                '</td></tr>';
 
-            return '<tr>' +
-                '<td>' + nameCell + '</td>' +
-                '<td>' + cpuText + '</td>' +
-                '<td>' + memText + '</td>' +
-                '<td>' + diskText + '</td>' +
-                '<td><small style="color:#58a6ff;">:' + escapeHtml(vncPort) + '</small> <span class="' + statusClass + '">' + escapeHtml(statusText) + '</span></td>' +
-                '<td>' + actions + '</td>' +
-                '</tr>';
-        }).join('');
+            groupVms.forEach(function(vm) {
+                var config = {};
+                try { config = JSON.parse(vm.config); } catch(e) {}
+                var cpuText = config.cpu ? escapeHtml(config.cpu.cores) + 'c/' + escapeHtml(config.cpu.threads) + 't' : '-';
+                var memText = config.memory ? escapeHtml(config.memory.size) + 'MB' : '-';
+                var isStopped = vm.status !== 'running';
+                var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) {
+                    var dname = d.diskname || '-';
+                    var safeDname = dname.replace(/'/g, "\\'");
+                    if (!isStopped) return escapeHtml(dname);
+                    return escapeHtml(dname) +
+                        ' <span class="export-dropdown">' +
+                        '<button class="btn-export btn-export-sm" onclick="event.stopPropagation();this.parentElement.classList.toggle(\'open\')" title="Export">⬇</button>' +
+                        '<span class="export-dropdown-content">' +
+                        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'qcow2\')">⬇ qcow2</a>' +
+                        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vmdk\')">⬇ VMDK</a>' +
+                        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vdi\')">⬇ VDI</a>' +
+                        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'vhdx\')">⬇ VHDX</a>' +
+                        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeDname + '\', \'raw\')">⬇ Raw</a>' +
+                        '</span></span>';
+                }).join(', ') : '-';
+                var vncPort = config.vnc_port || '-';
+                var statusClass = vm.status === 'running' ? 'status-running' : 'status-stopped';
+                var statusText = vm.status || 'stopped';
+
+                // Group cell — click to show dropdown
+                var groupCell = '<span class="group-label" onclick="this.innerHTML=showGroupDropdown(\'' + escapeHtml(vm.smac).replace(/'/g, "\\'") + '\', \'' + escapeHtml(vm.group_name || '').replace(/'/g, "\\'") + '\')" style="cursor:pointer;color:#8b949e;font-size:0.85rem;" title="Click to change group">' +
+                    escapeHtml(vm.group_name || '(Ungrouped)') + '</span>';
+
+                var actions = '';
+                if (vm.status === 'running') {
+                    actions += '<button class="btn-vm-action btn-vm-stop" onclick="vmAction(\'stop\',\'' + vm.smac + '\')">Stop</button> ';
+                    actions += '<button class="btn-vm-action btn-vm-reset" onclick="vmAction(\'reset\',\'' + vm.smac + '\')">Reset</button> ';
+                    actions += '<button class="btn-vm-action btn-vm-powerdown" onclick="vmAction(\'powerdown\',\'' + vm.smac + '\')">Powerdown</button> ';
+                    if (window._vncActive[vm.smac]) {
+                        actions += '<button class="btn-vm-action btn-vm-vncstop" onclick="vmVncStop(\'' + vm.smac + '\')">VNC Stop</button> ';
+                    } else {
+                        actions += '<button class="btn-vm-action btn-vm-vnc" onclick="vmVncStart(\'' + vm.smac + '\')">VNC</button> ';
+                    }
+                } else {
+                    // VM stopped → clear VNC active state
+                    delete window._vncActive[vm.smac];
+                    actions += '<button class="btn-vm-action btn-vm-start" onclick="vmAction(\'start\',\'' + vm.smac + '\')">Start</button> ';
+                }
+                actions += '<button class="btn-vm-action btn-vm-edit" onclick="editVm(\'' + vm.smac + '\')">Edit</button> ';
+                actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
+
+                var nameCell = vm.status === 'running'
+                    ? '<a href="/vnc.html?port=' + vncPort + '&smac=' + encodeURIComponent(vm.smac) + '" class="vm-name-link" target="_blank">' + escapeHtml(vm.smac) + '</a>'
+                    : escapeHtml(vm.smac);
+
+                html += '<tr>' +
+                    '<td>' + nameCell + '</td>' +
+                    '<td>' + groupCell + '</td>' +
+                    '<td>' + cpuText + '</td>' +
+                    '<td>' + memText + '</td>' +
+                    '<td>' + diskText + '</td>' +
+                    '<td><small style="color:#58a6ff;">:' + escapeHtml(vncPort) + '</small> <span class="' + statusClass + '">' + escapeHtml(statusText) + '</span></td>' +
+                    '<td>' + actions + '</td>' +
+                    '</tr>';
+            });
+        });
+
+        tbody.innerHTML = html;
     } catch (err) {
-        tbody.innerHTML = '<tr><td colspan="6">Error loading VM list</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7">Error loading VM list</td></tr>';
     }
 }
 
@@ -1415,6 +1461,20 @@ async function editVm(smac) {
             document.getElementById('create-title').textContent = 'Edit VM: ' + vm.smac;
             document.getElementById('create-submit-btn').textContent = 'Save Changes';
             document.getElementById('create-submit-btn').setAttribute('onclick', 'executeUpdateVm()');
+
+            // Fill group
+            await loadGroupList();
+            var groupSel = document.getElementById('create-group');
+            var groupName = vm.group_name || '';
+            // Ensure group option exists
+            if (groupName && !Array.from(groupSel.options).some(function(o) { return o.value === groupName; })) {
+                var opt = document.createElement('option');
+                opt.value = groupName;
+                opt.textContent = groupName;
+                groupSel.appendChild(opt);
+            }
+            groupSel.value = groupName;
+            document.getElementById('create-group-new').value = '';
 
             var config = {};
             try { config = JSON.parse(vm.config); } catch(e) {}
@@ -1480,6 +1540,83 @@ async function deleteVmFromList(smac) {
     }
 }
 
+// ======== Group Management ========
+
+// Load group list for dropdowns
+async function loadGroupList() {
+    try {
+        var response = await apiFetch('/api/group/list');
+        var groups = await safeJson(response);
+        window._groupList = groups || [];
+        // Populate create form group dropdown
+        var sel = document.getElementById('create-group');
+        if (sel) {
+            var current = sel.value;
+            sel.innerHTML = '<option value="">(Ungrouped)</option>';
+            groups.forEach(function(g) {
+                var opt = document.createElement('option');
+                opt.value = g;
+                opt.textContent = g;
+                sel.appendChild(opt);
+            });
+            if (current) sel.value = current;
+        }
+    } catch (err) {
+        console.error('Failed to load group list:', err);
+    }
+}
+
+// Set VM group via API
+async function setVmGroup(smac, groupName) {
+    try {
+        var response = await apiFetch('/api/vm/set-group', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ smac: smac, group_name: groupName }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            loadVmListTable();
+            loadGroupList();
+        }
+    } catch (err) {
+        console.error('Failed to set group:', err);
+    }
+}
+
+// Show inline group change dropdown
+function showGroupDropdown(smac, currentGroup) {
+    var groups = window._groupList || [];
+    var options = '<option value="">(Ungrouped)</option>';
+    groups.forEach(function(g) {
+        options += '<option value="' + escapeHtml(g) + '"' + (g === currentGroup ? ' selected' : '') + '>' + escapeHtml(g) + '</option>';
+    });
+    options += '<option value="__new__">+ New Group...</option>';
+    var selectHtml = '<select onchange="onGroupChange(this, \'' + escapeHtml(smac).replace(/'/g, "\\'") + '\')" style="font-size:0.85rem;padding:2px 4px;">' + options + '</select>';
+    return selectHtml;
+}
+
+function onGroupChange(selectEl, smac) {
+    var val = selectEl.value;
+    if (val === '__new__') {
+        var newGroup = prompt('Enter new group name:');
+        if (newGroup && newGroup.trim()) {
+            setVmGroup(smac, newGroup.trim());
+        } else {
+            loadVmListTable(); // revert
+        }
+    } else {
+        setVmGroup(smac, val);
+    }
+}
+
+// Get selected group from Create form (dropdown or new input)
+function getCreateFormGroup() {
+    var newGroup = (document.getElementById('create-group-new').value || '').trim();
+    if (newGroup) return newGroup;
+    return document.getElementById('create-group').value || '';
+}
+
 // Init
 window.addEventListener('DOMContentLoaded', function() {
     addNetworkAdapter();
@@ -1491,4 +1628,5 @@ window.addEventListener('DOMContentLoaded', function() {
     loadIsoList();
     loadVmListTable();
     loadSwitchList();
+    loadGroupList();
 });

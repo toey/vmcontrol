@@ -1049,6 +1049,45 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 }
 
+// ======== Group Management ========
+
+async fn list_groups_handler() -> HttpResponse {
+    match crate::db::list_groups() {
+        Ok(groups) => HttpResponse::Ok().json(groups),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list groups: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn set_vm_group_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let smac = match body.get("smac").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'smac' field".into(),
+                output: None,
+            });
+        }
+    };
+    let group_name = body.get("group_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match crate::db::set_vm_group(&smac, &group_name) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("VM '{}' group set to '{}'", smac, if group_name.is_empty() { "(ungrouped)" } else { &group_name }),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
 // ======== Switch Management ========
 
 async fn list_switches_handler() -> HttpResponse {
@@ -1243,6 +1282,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Backup routes
             .route("/api/backup/list", web::get().to(list_backups_handler))
             .route("/api/backup/delete", web::post().to(delete_backup_handler))
+            // Group routes
+            .route("/api/group/list", web::get().to(list_groups_handler))
+            .route("/api/vm/set-group", web::post().to(set_vm_group_handler))
             // Switch routes
             .route("/api/switch/list", web::get().to(list_switches_handler))
             .route("/api/switch/create", web::post().to(create_switch_handler))

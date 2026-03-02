@@ -33,6 +33,7 @@
                     <thead>
                         <tr>
                             <th>VM-NAME</th>
+                            <th>Group</th>
                             <th>CPU</th>
                             <th>Memory</th>
                             <th>Disk</th>
@@ -41,7 +42,7 @@
                         </tr>
                     </thead>
                     <tbody id="vm-list-body">
-                        <tr><td colspan="6"><em>Loading...</em></td></tr>
+                        <tr><td colspan="7"><em>Loading...</em></td></tr>
                     </tbody>
                 </table>
             </div>
@@ -51,6 +52,16 @@
         <div id="tab-create" class="tab-panel">
             <h2 id="create-title">Create VM</h2>
             <label>VM-NAME <input type="text" id="create-vm-name" placeholder="my-vm-01"></label>
+            <div class="template-row" style="margin-bottom:0.5rem;">
+                <label>Group
+                    <select id="create-group">
+                        <option value="">(Ungrouped)</option>
+                    </select>
+                </label>
+                <label style="flex:0 0 auto;">
+                    <input type="text" id="create-group-new" placeholder="or type new group" style="width:180px;">
+                </label>
+            </div>
             <div class="template-row">
                 <label>OS Template
                     <select id="create-os-template" onchange="applyOsTemplate()">

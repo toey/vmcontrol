@@ -19,6 +19,7 @@ pub struct VmRecord {
     pub config: String,
     pub status: String,
     pub created_at: String,
+    pub group_name: String,
 }
 
 /// Open (or create) the database, ensure the table exists + migrate
@@ -81,6 +82,15 @@ fn open_db() -> Result<Connection, String> {
             .map_err(|e| format!("DB migrate status error: {}", e))?;
     }
 
+    // Migration: add group_name column if not exists
+    let has_group: bool = conn
+        .prepare("SELECT group_name FROM vms LIMIT 0")
+        .is_ok();
+    if !has_group {
+        conn.execute_batch("ALTER TABLE vms ADD COLUMN group_name TEXT NOT NULL DEFAULT '';")
+            .map_err(|e| format!("DB migrate group error: {}", e))?;
+    }
+
     Ok(conn)
 }
 
@@ -125,7 +135,7 @@ pub fn set_vm_status(smac: &str, status: &str) -> Result<(), String> {
 pub fn get_vm(smac: &str) -> Result<VmRecord, String> {
     let conn = open_db()?;
     conn.query_row(
-        "SELECT smac, mac, disk_size, COALESCE(config,'{}'), COALESCE(status,'stopped'), created_at FROM vms WHERE smac = ?1",
+        "SELECT smac, mac, disk_size, COALESCE(config,'{}'), COALESCE(status,'stopped'), created_at, COALESCE(group_name,'') FROM vms WHERE smac = ?1",
         params![smac],
         |row| {
             Ok(VmRecord {
@@ -135,6 +145,7 @@ pub fn get_vm(smac: &str) -> Result<VmRecord, String> {
                 config: row.get(3)?,
                 status: row.get(4)?,
                 created_at: row.get(5)?,
+                group_name: row.get(6)?,
             })
         },
     )
@@ -149,11 +160,11 @@ pub fn delete_vm(smac: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// List all VM records, ordered by created_at descending (newest first)
+/// List all VM records, ordered by group then created_at descending
 pub fn list_vms() -> Result<Vec<VmRecord>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare("SELECT smac, mac, disk_size, COALESCE(config,'{}'), COALESCE(status,'stopped'), created_at FROM vms ORDER BY created_at DESC")
+        .prepare("SELECT smac, mac, disk_size, COALESCE(config,'{}'), COALESCE(status,'stopped'), created_at, COALESCE(group_name,'') FROM vms ORDER BY group_name ASC, created_at DESC")
         .map_err(|e| format!("DB query error: {}", e))?;
     let rows = stmt
         .query_map([], |row| {
@@ -164,6 +175,7 @@ pub fn list_vms() -> Result<Vec<VmRecord>, String> {
                 config: row.get(3)?,
                 status: row.get(4)?,
                 created_at: row.get(5)?,
+                group_name: row.get(6)?,
             })
         })
         .map_err(|e| format!("DB query error: {}", e))?;
@@ -172,6 +184,39 @@ pub fn list_vms() -> Result<Vec<VmRecord>, String> {
         vms.push(row.map_err(|e| format!("DB row error: {}", e))?);
     }
     Ok(vms)
+}
+
+// ======== Group operations ========
+
+/// Set VM group
+pub fn set_vm_group(smac: &str, group_name: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    let updated = conn
+        .execute(
+            "UPDATE vms SET group_name = ?2 WHERE smac = ?1",
+            params![smac, group_name],
+        )
+        .map_err(|e| format!("DB set group error: {}", e))?;
+    if updated == 0 {
+        return Err(format!("VM '{}' not found", smac));
+    }
+    Ok(())
+}
+
+/// List distinct group names
+pub fn list_groups() -> Result<Vec<String>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT group_name FROM vms WHERE group_name != '' ORDER BY group_name ASC")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let mut groups = Vec::new();
+    for row in rows {
+        groups.push(row.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(groups)
 }
 
 // ======== Disk operations ========
