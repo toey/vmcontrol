@@ -317,23 +317,35 @@ if exist "%PREBUILT_LOCAL%" (
                     ) else (
                         echo [WARN] vcvarsall.bat ran but link.exe still not found
                         if /I "%ARCH%"=="ARM64" (
-                            echo [INFO] ARM64 build tools may be missing. Installing...
-                            where winget >nul 2>&1
-                            if !errorlevel! equ 0 (
-                                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait" --accept-package-agreements --accept-source-agreements
+                            echo [INFO] ARM64 native build tools missing. Adding component via VS Installer...
+                            set "VS_SETUP=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe"
+                            if exist "!VS_SETUP!" (
+                                echo [INFO] Running: setup.exe modify --add VC.Tools.ARM64 + Windows SDK
+                                "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet --wait --norestart
+                                if !errorlevel! neq 0 (
+                                    echo [WARN] setup.exe modify returned error, trying with Windows10 SDK...
+                                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows10SDK.20348 --quiet --wait --norestart
+                                )
                                 echo [INFO] Retrying vcvarsall.bat arm64...
                                 call "!VCVARSALL!" arm64
                                 where link.exe >nul 2>&1
                                 if !errorlevel! equ 0 (
                                     echo [OK]   ARM64 tools installed -- link.exe found
                                 ) else (
-                                    echo [ERR] link.exe still not found after installing ARM64 tools.
-                                    echo       Open "Visual Studio Installer" and manually add:
-                                    echo       Individual Components ^> "MSVC ARM64/ARM64EC build tools"
-                                    echo       Then re-run install.bat
+                                    echo [ERR] link.exe still not found.
+                                    echo       Open "Visual Studio Installer" ^> Modify ^> Individual Components
+                                    echo       Check these items:
+                                    echo         [x] MSVC v143 ARM64/ARM64EC build tools ^(Latest^)
+                                    echo         [x] Windows 11 SDK ^(any version^)
+                                    echo       Click Modify, then re-run install.bat
                                     pause
                                     exit /b 1
                                 )
+                            ) else (
+                                echo [ERR] VS Installer setup.exe not found.
+                                echo       Open "Visual Studio Installer" manually and add ARM64 tools.
+                                pause
+                                exit /b 1
                             )
                         )
                     )
