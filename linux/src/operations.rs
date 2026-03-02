@@ -48,13 +48,13 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     std::fs::write(format!("{}/user-data", seed_dir), &user_data)
         .map_err(|e| format!("Failed to write user-data: {}", e))?;
 
-    // Create ISO using genisoimage / mkisofs (Linux) — safe: no shell involved
+    // Create ISO using hdiutil (macOS) — safe: no shell involved
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
-    run_cmd("genisoimage", &[
-        "-o", &iso_path, "-V", "cidata", "-J", "-R", &seed_dir,
-    ]).or_else(|_| run_cmd("mkisofs", &[
-        "-o", &iso_path, "-V", "cidata", "-J", "-R", &seed_dir,
-    ])).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    run_cmd("hdiutil", &[
+        "makehybrid", "-iso", "-joliet",
+        "-default-volume-name", "cidata",
+        "-o", &iso_path, &seed_dir,
+    ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
@@ -88,7 +88,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let mut qemu_args: Vec<String> = Vec::new();
 
     // Boot options — aarch64 virt machine uses virtio-gpu instead of -vga std
-    // NOTE: no -daemonize — QEMU's daemonize + websocket VNC is unreliable.
+    // NOTE: no -daemonize — QEMU's daemonize + websocket VNC crashes on macOS.
     // We use spawn_background() instead to run QEMU in the background.
     if is_aarch64 {
         qemu_args.extend([
@@ -126,12 +126,30 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     }
 
     // Display VNC with built-in WebSocket (no websockify needed)
-    if cfg.vnc_port <= 12000 || cfg.vnc_port > 13000 {
-        return Err(format!("VNC port {} out of valid range (12001-13000)", cfg.vnc_port));
+    // Prevent VNC port collision: if another running VM already uses this port, auto-reassign
+    let mut vnc_port = cfg.vnc_port;
+    let running_ports = running_vnc_ports(smac);
+    if running_ports.contains(&vnc_port) {
+        let new_port = next_free_vnc_port(smac);
+        output_log.push_str(&format!(
+            "VNC port {} already in use by another running VM, reassigned to {}\n",
+            vnc_port, new_port
+        ));
+        vnc_port = new_port;
+        // Update the saved config with the new port
+        if let Ok(vm) = db::get_vm(smac) {
+            if let Ok(mut saved_cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                saved_cfg["vnc_port"] = serde_json::json!(vnc_port);
+                let _ = db::update_vm(smac, &serde_json::to_string(&saved_cfg).unwrap_or_default());
+            }
+        }
     }
-    let vnc_display = cfg.vnc_port - 12000;
+    if vnc_port <= 12000 || vnc_port > 13000 {
+        return Err(format!("VNC port {} out of valid range (12001-13000)", vnc_port));
+    }
+    let vnc_display = vnc_port - 12000;
     qemu_args.push("-display".into());
-    qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, cfg.vnc_port));
+    qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, vnc_port));
 
     // Memory
     qemu_args.push("-m".into());
@@ -208,7 +226,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
     }
 
-    // Machine type — configurable accelerator (kvm:tcg for Linux, hvf:tcg for macOS)
+    // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
     qemu_args.push("-machine".into());
     qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
 
@@ -303,14 +321,7 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
-    let pctl_result = send_cmd_pctl("stop", &cmd.smac);
-    output.push_str(&pctl_result);
-    // Fallback if monitor socket failed
-    if pctl_result.contains("Error") || pctl_result.contains("error") {
-        output.push_str("Monitor unavailable, trying pkill...\n");
-        let _ = run_cmd("pkill", &["-f", &format!("qemu.*server,nowait.*{}", cmd.smac)]);
-        output.push_str("Sent pkill for QEMU processes\n");
-    }
+    output.push_str(&send_cmd_pctl("stop", &cmd.smac));
     // Set status to stopped
     if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
         output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
@@ -401,6 +412,35 @@ fn used_vnc_ports() -> Vec<u16> {
         }
     }
     ports
+}
+
+/// Collect VNC ports used by *running* VMs only (for collision detection at start time)
+fn running_vnc_ports(exclude_smac: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if vm.status != "running" || vm.smac == exclude_smac {
+                continue;
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
+                    ports.push(p as u16);
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Find next available VNC port that is not used by any running VM
+fn next_free_vnc_port(exclude_smac: &str) -> u16 {
+    let running = running_vnc_ports(exclude_smac);
+    let all_used = used_vnc_ports();
+    let mut port: u16 = 12001;
+    while (running.contains(&port) || all_used.contains(&port)) && port < 13000 {
+        port += 2;
+    }
+    port
 }
 
 /// Collect all Local IPv4 addresses used by VMs in DB
@@ -651,18 +691,44 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
 // --- VNC operations ---
 
 pub fn vnc_start(json_str: &str) -> Result<String, String> {
-    // QEMU now has built-in WebSocket VNC — no websockify needed.
+    // QEMU has built-in WebSocket VNC — this endpoint checks status and returns the actual port.
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
-    let port = validate_port(&cmd.novncport)?;
-    Ok(format!("VNC WebSocket ready on port {} (built-in QEMU)\n", port))
+    let _port = validate_port(&cmd.novncport)?;
+
+    // Check if VM is running
+    let vm = db::get_vm(&cmd.smac)?;
+    if vm.status != "running" {
+        return Err(format!("VM '{}' is not running — start the VM first", cmd.smac));
+    }
+
+    // Get actual VNC port from saved config
+    let actual_port = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+        cfg.get("vnc_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16
+    } else {
+        0
+    };
+
+    if actual_port == 0 {
+        return Err("VNC port not configured for this VM".into());
+    }
+
+    Ok(format!("VNC WebSocket ready on port {} (built-in QEMU)\n", actual_port))
 }
 
 pub fn vnc_stop(json_str: &str) -> Result<String, String> {
+    // QEMU built-in WebSocket VNC stops when VM stops.
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let _ = validate_port(&cmd.novncport)?;
-    Ok(format!("VNC for {} stopped with VM\n", cmd.smac))
+
+    // Check if VM exists
+    let vm = db::get_vm(&cmd.smac)?;
+    if vm.status != "running" {
+        return Ok(format!("VM '{}' is already stopped — VNC is not active\n", cmd.smac));
+    }
+
+    Ok(format!("VNC for {} will stop when VM stops (built-in QEMU)\n", cmd.smac))
 }
