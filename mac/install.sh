@@ -113,7 +113,17 @@ fi
 
 cp "$BINARY" "$CTL_BIN/vm_ctl"
 chmod +x "$CTL_BIN/vm_ctl"
-cp -r "$SCRIPT_DIR/static/"* "$STATIC_DIR/"
+# Prefer root static/ (single source of truth), fall back to platform static/
+if [[ -d "$SCRIPT_DIR/../static" ]]; then
+    cp -r "$SCRIPT_DIR/../static/"* "$STATIC_DIR/"
+    success "Static files installed from repo root"
+elif [[ -d "$SCRIPT_DIR/static" ]]; then
+    cp -r "$SCRIPT_DIR/static/"* "$STATIC_DIR/"
+    success "Static files installed from platform dir"
+else
+    error "Static files not found!"
+    exit 1
+fi
 success "Binary installed to $CTL_BIN/vm_ctl"
 success "Static files installed to $STATIC_DIR/"
 

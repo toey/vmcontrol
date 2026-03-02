@@ -204,6 +204,53 @@ textarea:focus {
     background: #388bfd;
 }
 
+.btn-export {
+    padding: 4px 10px;
+    background: #238636;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85em;
+}
+.btn-export:hover {
+    background: #2ea043;
+}
+
+.export-dropdown {
+    position: relative;
+    display: inline-block;
+}
+.export-dropdown-content {
+    display: none;
+    position: absolute;
+    right: 0;
+    bottom: 100%;
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    min-width: 140px;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+    margin-bottom: 4px;
+}
+.export-dropdown-content a {
+    display: block;
+    padding: 6px 12px;
+    color: #c9d1d9;
+    text-decoration: none;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+.export-dropdown-content a:hover {
+    background: #30363d;
+    color: #58a6ff;
+}
+.export-dropdown:hover .export-dropdown-content,
+.export-dropdown.open .export-dropdown-content {
+    display: block;
+}
+
 .btn-add {
     padding: 6px 14px;
     background: #21262d;

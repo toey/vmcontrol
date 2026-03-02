@@ -511,14 +511,24 @@ async function loadDiskList() {
             listDiv.innerHTML = '<em>No disk files</em>';
         } else {
             listDiv.innerHTML = disks.map(function(d) {
+                var safeName = d.name.replace(/'/g, "\\'");
                 var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
-                var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + d.name.replace(/'/g, "\\'") + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
-                var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">Clone</button>';
-                var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + d.name.replace(/'/g, "\\'") + '\')">X</button>';
+                var exportBtn = '<span class="export-dropdown">' +
+                    '<button class="btn-export" onclick="this.parentElement.classList.toggle(\'open\')" title="Export / Download">Export ▾</button>' +
+                    '<span class="export-dropdown-content">' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">⬇ qcow2 (original)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">⬇ VMDK (VMware)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">⬇ VDI (VirtualBox)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">⬇ VHDX (Hyper-V)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">⬇ Raw image</a>' +
+                    '</span></span>';
+                var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
+                var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
+                var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                     '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
-                    '<span>' + resizeBtn + ' ' + cloneBtn + ' ' + deleteBtn + '</span>' +
+                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -642,6 +652,48 @@ async function cloneDisk(source) {
         statusEl.textContent = 'Network error: ' + err.message;
     }
 }
+
+// Export/download a disk in the specified format
+function exportDisk(name, format) {
+    // Close dropdown
+    document.querySelectorAll('.export-dropdown.open').forEach(function(el) { el.classList.remove('open'); });
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    var label = format === 'qcow2' ? format : format.toUpperCase();
+    statusEl.textContent = 'Downloading ' + name + '.' + format + '...';
+    // Build download URL with API key
+    var url = '/api/disk/export/' + encodeURIComponent(name);
+    if (format && format !== 'qcow2') url += '?format=' + format;
+    // Use fetch with API key header, then trigger download via blob
+    apiFetch(url).then(function(response) {
+        if (!response.ok) {
+            return response.json().then(function(data) {
+                throw new Error(data.message || 'Export failed');
+            });
+        }
+        return response.blob();
+    }).then(function(blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name + '.' + format;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        statusEl.className = 'success';
+        statusEl.textContent = 'Downloaded ' + name + '.' + format;
+    }).catch(function(err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Export error: ' + err.message;
+    });
+}
+
+// Close export dropdowns when clicking outside
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.export-dropdown')) {
+        document.querySelectorAll('.export-dropdown.open').forEach(function(el) { el.classList.remove('open'); });
+    }
+});
 
 // ======== Image Management ========
 

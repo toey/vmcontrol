@@ -490,7 +490,17 @@ if %errorlevel% equ 0 (
 :: --- Step 6: Copy binary and static files ---
 echo [INFO] Installing binary and static files...
 copy /y "%BINARY%" "%CTL_BIN%\vm_ctl.exe" >nul
-xcopy /s /y /i /q "%SCRIPT_DIR%static\*" "%STATIC_DIR%\" >nul
+:: Prefer root static\ (single source of truth), fall back to platform static\
+if exist "%SCRIPT_DIR%..\static\app.js" (
+    xcopy /s /y /i /q "%SCRIPT_DIR%..\static\*" "%STATIC_DIR%\" >nul
+    echo [OK]   Static files installed from repo root
+) else if exist "%SCRIPT_DIR%static\app.js" (
+    xcopy /s /y /i /q "%SCRIPT_DIR%static\*" "%STATIC_DIR%\" >nul
+    echo [OK]   Static files installed from platform dir
+) else (
+    echo [ERR]  Static files not found!
+    exit /b 1
+)
 echo [OK]   Binary installed to %CTL_BIN%\vm_ctl.exe
 echo [OK]   Static files installed to %STATIC_DIR%\
 
