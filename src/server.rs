@@ -842,6 +842,132 @@ async fn delete_image_handler(body: web::Json<serde_json::Value>) -> HttpRespons
     }
 }
 
+/// Export a disk image — supports qcow2 (direct download) or convert to raw/vmdk/vdi/vhdx
+async fn export_disk_handler(
+    req: actix_web::HttpRequest,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let name = path.into_inner();
+
+    // Sanitize
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.is_empty() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Invalid disk name".into(),
+            output: None,
+        });
+    }
+
+    let disk_path = get_conf("disk_path");
+    let qcow2_file = format!("{}/{}.qcow2", disk_path, name);
+
+    if !std::path::Path::new(&qcow2_file).exists() {
+        return HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: format!("Disk '{}' not found", name),
+            output: None,
+        });
+    }
+
+    // Check requested format from query param ?format=raw|vmdk|vdi|vhdx|qcow2
+    let query = web::Query::<std::collections::HashMap<String, String>>::from_query(req.query_string())
+        .unwrap_or_else(|_| web::Query(std::collections::HashMap::new()));
+    let format = query.get("format").map(|s| s.as_str()).unwrap_or("qcow2");
+
+    match format {
+        "qcow2" => {
+            // Direct download — stream the qcow2 file
+            let download_name = format!("{}.qcow2", name);
+            match actix_files::NamedFile::open_async(&qcow2_file).await {
+                Ok(f) => f
+                    .set_content_disposition(actix_web::http::header::ContentDisposition {
+                        disposition: actix_web::http::header::DispositionType::Attachment,
+                        parameters: vec![
+                            actix_web::http::header::DispositionParam::Filename(download_name),
+                        ],
+                    })
+                    .into_response(&req),
+                Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to open disk file: {}", e),
+                    output: None,
+                }),
+            }
+        }
+        "raw" | "vmdk" | "vdi" | "vhdx" => {
+            // Convert via qemu-img then stream
+            let qemu_img = get_conf("qemu_img_path");
+            let ext = format.to_string();
+            let download_name = format!("{}.{}", name, ext);
+            let tmp_file = format!("{}/{}_export_{}.{}", disk_path, name, std::process::id(), ext);
+            let src = qcow2_file.clone();
+            let dst = tmp_file.clone();
+            let fmt = ext.clone();
+
+            let convert = web::block(move || {
+                use std::process::Command;
+                let output = Command::new(&qemu_img)
+                    .args(["convert", "-f", "qcow2", "-O", &fmt, &src, &dst])
+                    .output()
+                    .map_err(|e| format!("Failed to run qemu-img: {}", e))?;
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    let _ = std::fs::remove_file(&dst);
+                    Err(format!("Conversion failed: {}", stderr))
+                }
+            }).await;
+
+            match convert {
+                Ok(Ok(())) => {
+                    match actix_files::NamedFile::open_async(&tmp_file).await {
+                        Ok(f) => {
+                            // Schedule cleanup after response — use a spawned task
+                            let cleanup_path = tmp_file.clone();
+                            actix_web::rt::spawn(async move {
+                                // Wait a bit for the file to be fully sent
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                let _ = std::fs::remove_file(&cleanup_path);
+                            });
+                            f.set_content_disposition(actix_web::http::header::ContentDisposition {
+                                disposition: actix_web::http::header::DispositionType::Attachment,
+                                parameters: vec![
+                                    actix_web::http::header::DispositionParam::Filename(download_name),
+                                ],
+                            })
+                            .into_response(&req)
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_file(&tmp_file);
+                            HttpResponse::InternalServerError().json(ApiResponse {
+                                success: false,
+                                message: format!("Failed to open converted file: {}", e),
+                                output: None,
+                            })
+                        }
+                    }
+                }
+                Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: e,
+                    output: None,
+                }),
+                Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Internal error: {}", e),
+                    output: None,
+                }),
+            }
+        }
+        _ => HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Unsupported format '{}'. Use: qcow2, raw, vmdk, vdi, vhdx", format),
+            output: None,
+        }),
+    }
+}
+
 async fn list_backups_handler() -> HttpResponse {
     let live_path = get_conf("live_path");
     let _ = std::fs::create_dir_all(&live_path);
@@ -997,6 +1123,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/image/list", web::get().to(list_images_handler))
             .route("/api/image/upload", web::post().to(upload_image_handler))
             .route("/api/image/delete", web::post().to(delete_image_handler))
+            // Disk export route
+            .route("/api/disk/export/{name}", web::get().to(export_disk_handler))
             // ISO routes
             .route("/api/iso/list", web::get().to(list_isos_handler))
             .route("/api/iso/upload", web::post().to(upload_iso_handler))
