@@ -207,7 +207,7 @@ if exist "%PREBUILT_LOCAL%" (
             if !errorlevel! equ 0 (
                 echo [INFO] Installing Visual Studio Build Tools via winget...
                 echo [INFO] This may take several minutes. Please wait...
-                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
+                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
                 if !errorlevel! equ 0 (
                     echo [OK]   Visual Studio Build Tools installed ^(with ARM64 tools^)
                     echo [INFO] Switching to stable-msvc toolchain...
@@ -321,10 +321,10 @@ if exist "%PREBUILT_LOCAL%" (
                             set "VS_SETUP=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe"
                             if exist "!VS_SETUP!" (
                                 echo [INFO] Running: setup.exe modify --add VC.Tools.ARM64 + Windows SDK
-                                "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet
+                                "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet
                                 if !errorlevel! neq 0 (
                                     echo [WARN] setup.exe modify returned error, trying with Windows10 SDK...
-                                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.Windows10SDK.20348 --quiet
+                                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.Windows10SDK.20348 --quiet
                                 )
                                 echo [INFO] Retrying vcvarsall.bat arm64...
                                 call "!VCVARSALL!" arm64
@@ -360,6 +360,36 @@ if exist "%PREBUILT_LOCAL%" (
         )
     ) else (
         echo [OK]   link.exe already in PATH
+    )
+
+    :: --- Ensure clang is in PATH (needed by ring crate on ARM64) ---
+    where clang.exe >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo [INFO] clang.exe not in PATH -- searching VS LLVM directory...
+        :: Ensure VS_INSTALL_PATH is set (may not be if link.exe was already in PATH)
+        if not defined VS_INSTALL_PATH (
+            set "VSWHERE_CLK=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+            if exist "!VSWHERE_CLK!" (
+                for /f "delims=" %%P in ('"!VSWHERE_CLK!" -latest -products * -property installationPath 2^>nul') do set "VS_INSTALL_PATH=%%P"
+            )
+        )
+        if defined VS_INSTALL_PATH (
+            set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\ARM64\bin"
+            if not exist "!LLVM_BIN!" set "LLVM_BIN=!VS_INSTALL_PATH!\VC\Tools\Llvm\bin"
+            if exist "!LLVM_BIN!\clang.exe" (
+                set "PATH=!LLVM_BIN!;!PATH!"
+                set "LIBCLANG_PATH=!LLVM_BIN!"
+                echo [OK]   Added LLVM to PATH: !LLVM_BIN!
+            ) else (
+                echo [WARN] clang.exe not found in VS LLVM directory
+                echo        ring crate may fail to build on ARM64
+                echo        Install Clang via: Visual Studio Installer ^> Individual Components ^> "C++ Clang Compiler"
+            )
+        ) else (
+            echo [WARN] VS installation not found -- cannot locate clang
+        )
+    ) else (
+        echo [OK]   clang.exe found in PATH
     )
 
     echo [INFO] Building vm_ctl from source ^(release mode^)...
