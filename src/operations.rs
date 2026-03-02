@@ -377,9 +377,19 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
-    let output = send_cmd_pctl("powerdown", &cmd.smac);
-    // Set status to stopped
-    let _ = db::set_vm_status(&cmd.smac, "stopped");
+    let mut output = send_cmd_pctl("powerdown", &cmd.smac);
+    // ACPI powerdown is async — wait briefly then check if QEMU process exited
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let pctl_path = get_conf("pctl_path");
+    let sock_path = format!("{}/{}", pctl_path, cmd.smac);
+    if !std::path::Path::new(&sock_path).exists() {
+        // Monitor socket gone = QEMU exited
+        let _ = db::set_vm_status(&cmd.smac, "stopped");
+        output.push_str("VM stopped.\n");
+    } else {
+        // QEMU still running — guest is shutting down
+        output.push_str("ACPI powerdown sent. Guest OS is shutting down (status still 'running').\n");
+    }
     Ok(output)
 }
 

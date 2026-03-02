@@ -3,7 +3,7 @@ use crate::config::get_conf;
 use crate::db;
 use crate::mds;
 use crate::models::*;
-use crate::ssh::{send_cmd, run_cmd, sanitize_name, spawn_background, validate_port};
+use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
 /// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
 fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
@@ -412,9 +412,17 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
-    let output = send_cmd_pctl("powerdown", &cmd.smac);
-    // Set status to stopped + clear qemu_vnc_port
-    let _ = db::set_vm_status(&cmd.smac, "stopped");
+    let mut output = send_cmd_pctl("powerdown", &cmd.smac);
+    // ACPI powerdown is async — wait briefly then check if QEMU process exited
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let pctl_path = get_conf("pctl_path");
+    let sock_path = format!("{}\\{}", pctl_path, cmd.smac);
+    if !std::path::Path::new(&sock_path).exists() {
+        let _ = db::set_vm_status(&cmd.smac, "stopped");
+        output.push_str("VM stopped.\n");
+    } else {
+        output.push_str("ACPI powerdown sent. Guest OS is shutting down (status still 'running').\n");
+    }
     Ok(output)
 }
 

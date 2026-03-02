@@ -923,11 +923,10 @@ async fn export_disk_handler(
                 Ok(Ok(())) => {
                     match actix_files::NamedFile::open_async(&tmp_file).await {
                         Ok(f) => {
-                            // Schedule cleanup after response — use a spawned task
+                            // Schedule cleanup after response — allow 10 min for large file downloads
                             let cleanup_path = tmp_file.clone();
                             actix_web::rt::spawn(async move {
-                                // Wait a bit for the file to be fully sent
-                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                                tokio::time::sleep(std::time::Duration::from_secs(600)).await;
                                 let _ = std::fs::remove_file(&cleanup_path);
                             });
                             f.set_content_disposition(actix_web::http::header::ContentDisposition {

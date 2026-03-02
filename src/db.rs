@@ -94,11 +94,12 @@ fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Insert or replace a VM record with full config
+/// Insert a new VM record, or update config if it already exists (preserves group_name, created_at)
 pub fn insert_vm(smac: &str, mac: &str, disk_size: &str, config: &str) -> Result<(), String> {
     let conn = open_db()?;
     conn.execute(
-        "INSERT OR REPLACE INTO vms (smac, mac, disk_size, config, status) VALUES (?1, ?2, ?3, ?4, 'stopped')",
+        "INSERT INTO vms (smac, mac, disk_size, config, status) VALUES (?1, ?2, ?3, ?4, 'stopped')
+         ON CONFLICT(smac) DO UPDATE SET mac = ?2, disk_size = ?3, config = ?4, status = 'stopped'",
         params![smac, mac, disk_size, config],
     )
     .map_err(|e| format!("DB insert error: {}", e))?;

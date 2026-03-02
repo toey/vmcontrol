@@ -94,11 +94,12 @@ fn open_db() -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Insert or replace a VM record with full config
+/// Insert a new VM record, or update config if it already exists (preserves group_name, created_at)
 pub fn insert_vm(smac: &str, mac: &str, disk_size: &str, config: &str) -> Result<(), String> {
     let conn = open_db()?;
     conn.execute(
-        "INSERT OR REPLACE INTO vms (smac, mac, disk_size, config, status) VALUES (?1, ?2, ?3, ?4, 'stopped')",
+        "INSERT INTO vms (smac, mac, disk_size, config, status) VALUES (?1, ?2, ?3, ?4, 'stopped')
+         ON CONFLICT(smac) DO UPDATE SET mac = ?2, disk_size = ?3, config = ?4, status = 'stopped'",
         params![smac, mac, disk_size, config],
     )
     .map_err(|e| format!("DB insert error: {}", e))?;
@@ -363,6 +364,24 @@ pub fn get_switch_by_name(name: &str) -> Result<SwitchRecord, String> {
         },
     )
     .map_err(|e| format!("Switch '{}' not found: {}", name, e))
+}
+
+/// Get a switch by id
+pub fn get_switch_by_id(id: i64) -> Result<SwitchRecord, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT id, name, mcast_port, created_at FROM switches WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(SwitchRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mcast_port: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|e| format!("Switch ID {} not found: {}", id, e))
 }
 
 /// Delete a switch by id

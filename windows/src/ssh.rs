@@ -1,6 +1,7 @@
 use std::process::{Command, Stdio};
 
 /// Execute a shell command via cmd /C (UNSAFE with user input -- prefer run_cmd)
+#[allow(dead_code)]
 pub fn send_cmd(command: &str) -> Result<String, String> {
     let result = Command::new("cmd")
         .arg("/C")
