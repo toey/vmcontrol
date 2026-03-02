@@ -2,9 +2,9 @@ use crate::config::get_conf;
 use crate::ssh::{sanitize_name, validate_ip};
 
 pub fn curl_request(url: &str) {
-    match reqwest::blocking::get(url) {
+    match ureq::get(url).call() {
         Ok(resp) => {
-            let body = resp.text().unwrap_or_default();
+            let body = resp.into_body().read_to_string().unwrap_or_default();
             log::debug!("curl_request: size={} url={}", body.len(), url);
         }
         Err(e) => {
