@@ -201,8 +201,37 @@ if exist "%PREBUILT_LOCAL%" (
         ) else (
             echo [WARN] No MSVC Build Tools detected
             echo [INFO] ARM64 Windows requires MSVC toolchain ^(GNU is not available^)
-            echo [INFO] Attempting build with current toolchain...
-            set "USE_TOOLCHAIN=unknown"
+            echo.
+            :: Try auto-install via winget
+            where winget >nul 2>&1
+            if !errorlevel! equ 0 (
+                echo [INFO] Installing Visual Studio Build Tools via winget...
+                echo [INFO] This may take several minutes. Please wait...
+                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
+                if !errorlevel! equ 0 (
+                    echo [OK]   Visual Studio Build Tools installed
+                    echo [INFO] Switching to stable-msvc toolchain...
+                    rustup toolchain install stable-msvc >nul 2>&1
+                    rustup default stable-msvc >nul 2>&1
+                    echo [OK]   Switched to stable-msvc ^(aarch64-pc-windows-msvc^)
+                    set "USE_TOOLCHAIN=msvc"
+                ) else (
+                    echo [ERR] winget install failed. Please install manually:
+                    echo       https://visualstudio.microsoft.com/visual-cpp-build-tools/
+                    echo       Select "Desktop development with C++"
+                    echo       Then re-run install.bat
+                    pause
+                    exit /b 1
+                )
+            ) else (
+                echo [ERR] winget not available and no Build Tools found.
+                echo       Please install Visual Studio Build Tools manually:
+                echo       https://visualstudio.microsoft.com/visual-cpp-build-tools/
+                echo       Select "Desktop development with C++"
+                echo       Then re-run install.bat
+                pause
+                exit /b 1
+            )
         )
     ) else (
         :: x86_64: Try MSVC first, then GNU
@@ -236,8 +265,29 @@ if exist "%PREBUILT_LOCAL%" (
             set "USE_TOOLCHAIN=gnu"
         ) else (
             echo [WARN] No C linker detected ^(no cl.exe / no dlltool.exe^)
-            echo [INFO] Attempting build with current toolchain...
-            set "USE_TOOLCHAIN=unknown"
+            echo.
+            :: Try auto-install via winget
+            where winget >nul 2>&1
+            if !errorlevel! equ 0 (
+                echo [INFO] Installing Visual Studio Build Tools via winget...
+                echo [INFO] This may take several minutes. Please wait...
+                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
+                if !errorlevel! equ 0 (
+                    echo [OK]   Visual Studio Build Tools installed
+                    echo [INFO] Switching to stable-msvc toolchain...
+                    rustup toolchain install stable-msvc >nul 2>&1
+                    rustup default stable-msvc >nul 2>&1
+                    echo [OK]   Switched to stable-msvc
+                    set "USE_TOOLCHAIN=msvc"
+                ) else (
+                    echo [ERR] winget install failed.
+                    echo [INFO] Attempting build with current toolchain...
+                    set "USE_TOOLCHAIN=unknown"
+                )
+            ) else (
+                echo [INFO] Attempting build with current toolchain...
+                set "USE_TOOLCHAIN=unknown"
+            )
         )
     )
 
