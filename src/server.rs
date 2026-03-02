@@ -1083,11 +1083,19 @@ async fn create_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
         });
     }
     match crate::db::insert_switch(&name) {
-        Ok(id) => HttpResponse::Ok().json(ApiResponse {
-            success: true,
-            message: format!("Switch '{}' created (ID: {})", name, id),
-            output: Some(id.to_string()),
-        }),
+        Ok(id) => {
+            // Create OVS bridge
+            let bridge_name = format!("vs-{}", name);
+            let ovs = crate::config::get_conf("ovs_vsctl_path");
+            if !ovs.is_empty() {
+                let _ = crate::ssh::run_cmd(&ovs, &["--may-exist", "add-br", &bridge_name]);
+            }
+            HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                message: format!("Switch '{}' created (ID: {}, bridge: {})", name, id, bridge_name),
+                output: Some(id.to_string()),
+            })
+        }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
             message: e,
@@ -1107,6 +1115,14 @@ async fn delete_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
             });
         }
     };
+    // Delete OVS bridge before DB record
+    if let Ok(sw) = crate::db::get_switch_by_id(id) {
+        let bridge_name = format!("vs-{}", sw.name);
+        let ovs = crate::config::get_conf("ovs_vsctl_path");
+        if !ovs.is_empty() {
+            let _ = crate::ssh::run_cmd(&ovs, &["--if-exists", "del-br", &bridge_name]);
+        }
+    }
     match crate::db::delete_switch(id) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
             success: true,

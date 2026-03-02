@@ -224,22 +224,53 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-netdev".into());
 
         if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
-            match db::get_switch_by_name(&adapter.switch_name) {
-                Ok(sw) => {
-                    output_log.push_str(&format!("switch : {} (mcast port {})\n",
-                        adapter.switch_name, sw.mcast_port));
-                    qemu_args.push(format!(
-                        "socket,id=net{},mcast=230.0.0.1:{}",
-                        adapter.netid, sw.mcast_port
-                    ));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "Switch '{}' not found for adapter {}: {}",
-                        adapter.switch_name, adapter.netid, e
-                    ));
-                }
+            // Virtual switch mode — OVS bridge + TAP device (Linux)
+            let vlan_id: u16 = adapter.vlan.parse().unwrap_or(0);
+            if vlan_id > 4094 {
+                return Err(format!(
+                    "VLAN {} out of range (0-4094) for adapter {}",
+                    vlan_id, adapter.netid
+                ));
             }
+            // Verify switch exists in DB
+            if let Err(e) = db::get_switch_by_name(&adapter.switch_name) {
+                return Err(format!(
+                    "Switch '{}' not found for adapter {}: {}",
+                    adapter.switch_name, adapter.netid, e
+                ));
+            }
+
+            let bridge_name = format!("vs-{}", adapter.switch_name);
+            let mac_clean = adapter.mac.replace(":", "");
+            let tap_name = format!("vp{}", &mac_clean[mac_clean.len()-6..]);
+
+            // Ensure OVS bridge exists (auto-create if not yet)
+            let ovs = get_conf("ovs_vsctl_path");
+            let _ = run_cmd(&ovs, &["--may-exist", "add-br", &bridge_name]);
+
+            // Create TAP device
+            let _ = run_cmd("ip", &["tuntap", "add", "dev", &tap_name, "mode", "tap"]);
+            let _ = run_cmd("ip", &["link", "set", &tap_name, "up"]);
+
+            // Add TAP to OVS bridge with optional VLAN tag
+            if vlan_id > 0 {
+                run_cmd(&ovs, &["--may-exist", "add-port", &bridge_name, &tap_name,
+                    &format!("tag={}", vlan_id)])
+                    .map_err(|e| format!("OVS add-port error: {}", e))?;
+            } else {
+                run_cmd(&ovs, &["--may-exist", "add-port", &bridge_name, &tap_name])
+                    .map_err(|e| format!("OVS add-port error: {}", e))?;
+            }
+
+            output_log.push_str(&format!("switch : {} (OVS bridge {})\n",
+                adapter.switch_name, bridge_name));
+            output_log.push_str(&format!("tap    : {} (VLAN {})\n", tap_name, vlan_id));
+
+            // QEMU: use TAP device directly
+            qemu_args.push(format!(
+                "tap,id=net{},ifname={},script=no,downscript=no",
+                adapter.netid, tap_name
+            ));
         } else {
             qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
         }
@@ -338,12 +369,35 @@ pub fn start(json_str: &str) -> Result<String, String> {
     start_vm_with_config(&cmd.smac, &cfg)
 }
 
+/// Cleanup OVS ports and TAP devices created for a VM's switch-mode network adapters
+fn cleanup_ovs_ports(smac: &str, output: &mut String) {
+    if let Ok(vm) = db::get_vm(smac) {
+        if let Ok(cfg) = serde_json::from_str::<VmStartConfig>(&vm.config) {
+            let ovs = get_conf("ovs_vsctl_path");
+            if ovs.is_empty() { return; }
+            for adapter in &cfg.network_adapters {
+                if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
+                    let mac_clean = adapter.mac.replace(":", "");
+                    let tap_name = format!("vp{}", &mac_clean[mac_clean.len()-6..]);
+                    if let Ok(msg) = run_cmd(&ovs, &["--if-exists", "del-port", &tap_name]) {
+                        output.push_str(&format!("OVS del-port {}: {}\n", tap_name, msg.trim()));
+                    }
+                    // Also delete the TAP device
+                    let _ = run_cmd("ip", &["link", "del", &tap_name]);
+                }
+            }
+        }
+    }
+}
+
 pub fn stop(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
     output.push_str(&send_cmd_pctl("stop", &cmd.smac));
+    // Cleanup OVS ports for this VM
+    cleanup_ovs_ports(&cmd.smac, &mut output);
     // Set status to stopped
     if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
         output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
@@ -363,7 +417,9 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
-    let output = send_cmd_pctl("powerdown", &cmd.smac);
+    let mut output = send_cmd_pctl("powerdown", &cmd.smac);
+    // Cleanup OVS ports for this VM
+    cleanup_ovs_ports(&cmd.smac, &mut output);
     // Set status to stopped
     let _ = db::set_vm_status(&cmd.smac, "stopped");
     Ok(output)

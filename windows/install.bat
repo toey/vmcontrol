@@ -130,6 +130,30 @@ if not exist "%QEMU_IMG_PATH%" (
 
 echo.
 
+:: --- Step 2b: Stop old processes before build ---
+echo [INFO] Checking for running vm_ctl processes...
+where nssm >nul 2>&1
+if %errorlevel% equ 0 (
+    nssm status %SERVICE_NAME% >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [INFO] Stopping existing NSSM service...
+        nssm stop %SERVICE_NAME% >nul 2>&1
+        echo [OK]   Service stopped
+    )
+)
+:: Kill any stray vm_ctl.exe processes
+tasklist /fi "imagename eq vm_ctl.exe" 2>nul | find /i "vm_ctl.exe" >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [INFO] Killing stray vm_ctl.exe processes...
+    taskkill /f /im vm_ctl.exe >nul 2>&1
+    timeout /t 2 /nobreak >nul
+    echo [OK]   Stray processes killed
+) else (
+    echo [OK]   No running vm_ctl processes found
+)
+
+echo.
+
 :: --- Step 3: Build or locate binary ---
 set "SCRIPT_DIR=%~dp0"
 cd /d "%SCRIPT_DIR%"
@@ -476,13 +500,11 @@ if not exist "%STATIC_DIR%" mkdir "%STATIC_DIR%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 echo [OK]   Directories created
 
-:: --- Step 5: Stop existing service ---
+:: --- Step 5: Remove existing service (already stopped in Step 2b) ---
 where nssm >nul 2>&1
 if %errorlevel% equ 0 (
     nssm status %SERVICE_NAME% >nul 2>&1
     if !errorlevel! equ 0 (
-        echo [INFO] Stopping existing service...
-        nssm stop %SERVICE_NAME% >nul 2>&1
         nssm remove %SERVICE_NAME% confirm >nul 2>&1
     )
 )

@@ -320,6 +320,24 @@ pub fn get_switch_by_name(name: &str) -> Result<SwitchRecord, String> {
     .map_err(|e| format!("Switch '{}' not found: {}", name, e))
 }
 
+/// Get a switch by id
+pub fn get_switch_by_id(id: i64) -> Result<SwitchRecord, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT id, name, mcast_port, created_at FROM switches WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(SwitchRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mcast_port: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|e| format!("Switch ID {} not found: {}", id, e))
+}
+
 /// Delete a switch by id
 pub fn delete_switch(id: i64) -> Result<(), String> {
     let conn = open_db()?;

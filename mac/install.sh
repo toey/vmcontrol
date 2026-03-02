@@ -77,6 +77,29 @@ fi
 
 echo ""
 
+# --- Step 1b: Stop old processes before build ---
+info "Checking for running vm_ctl processes..."
+if launchctl list "$SERVICE_LABEL" &>/dev/null; then
+    info "Stopping existing launchd service..."
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    success "Service stopped"
+fi
+# Kill any stray vm_ctl processes not managed by launchd
+if pgrep -x vm_ctl &>/dev/null; then
+    info "Killing stray vm_ctl processes..."
+    pkill -x vm_ctl 2>/dev/null || true
+    sleep 1
+    # Force kill if still alive
+    if pgrep -x vm_ctl &>/dev/null; then
+        pkill -9 -x vm_ctl 2>/dev/null || true
+    fi
+    success "Stray processes killed"
+else
+    success "No running vm_ctl processes found"
+fi
+
+echo ""
+
 # --- Step 2: Build from source ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -104,12 +127,6 @@ success "Directories created"
 
 # --- Step 4: Copy binary & static files ---
 info "Installing binary and static files..."
-
-# Stop existing service before overwriting binary
-if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-    info "Stopping existing service..."
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
-fi
 
 cp "$BINARY" "$CTL_BIN/vm_ctl"
 chmod +x "$CTL_BIN/vm_ctl"

@@ -25,6 +25,7 @@ fn defaults() -> HashMap<String, String> {
     m.insert("qemu_machine".into(), "pc".into());
     m.insert("qemu_aarch64_path".into(), "/opt/homebrew/bin/qemu-system-aarch64".into());
     m.insert("edk2_aarch64_bios".into(), "/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into());
+    m.insert("ovs_vsctl_path".into(), "/opt/homebrew/bin/ovs-vsctl".into());
     m
 }
 

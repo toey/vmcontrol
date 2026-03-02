@@ -224,14 +224,26 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-netdev".into());
 
         if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
-            // Virtual switch mode — QEMU socket multicast
+            // Virtual switch mode — QEMU socket multicast with VLAN
+            // (macOS has no OVS kernel module, so we use multicast for L2 switching)
+            let vlan_id: u16 = adapter.vlan.parse().unwrap_or(0);
+            if vlan_id > 4094 {
+                return Err(format!(
+                    "VLAN {} out of range (0-4094) for adapter {}",
+                    vlan_id, adapter.netid
+                ));
+            }
+            let mcast_hi = vlan_id / 256;
+            let mcast_lo = vlan_id % 256;
             match db::get_switch_by_name(&adapter.switch_name) {
                 Ok(sw) => {
                     output_log.push_str(&format!("switch : {} (mcast port {})\n",
                         adapter.switch_name, sw.mcast_port));
+                    output_log.push_str(&format!("vlan   : {} (mcast 230.{}.{}.1:{})\n",
+                        vlan_id, mcast_hi, mcast_lo, sw.mcast_port));
                     qemu_args.push(format!(
-                        "socket,id=net{},mcast=230.0.0.1:{}",
-                        adapter.netid, sw.mcast_port
+                        "socket,id=net{},mcast=230.{}.{}.1:{}",
+                        adapter.netid, mcast_hi, mcast_lo, sw.mcast_port
                     ));
                 }
                 Err(e) => {

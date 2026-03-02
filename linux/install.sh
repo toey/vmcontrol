@@ -85,6 +85,37 @@ if ! command -v websockify &>/dev/null; then
     echo "       Install: pip3 install websockify"
 fi
 
+# Open vSwitch (required for virtual switches)
+if ! command -v ovs-vsctl &>/dev/null; then
+    warn "Open vSwitch not found (required for virtual switches)"
+    echo "       Install: sudo apt install openvswitch-switch"
+else
+    success "Open vSwitch found"
+fi
+
+echo ""
+
+# --- Step 1b: Stop old processes before build ---
+info "Checking for running vm_ctl processes..."
+if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    info "Stopping existing systemd service..."
+    systemctl stop "$SERVICE_NAME" || true
+    success "Service stopped"
+fi
+# Kill any stray vm_ctl processes not managed by systemd
+if pgrep -x vm_ctl &>/dev/null; then
+    info "Killing stray vm_ctl processes..."
+    pkill -x vm_ctl 2>/dev/null || true
+    sleep 1
+    # Force kill if still alive
+    if pgrep -x vm_ctl &>/dev/null; then
+        pkill -9 -x vm_ctl 2>/dev/null || true
+    fi
+    success "Stray processes killed"
+else
+    success "No running vm_ctl processes found"
+fi
+
 echo ""
 
 # --- Step 2: Build from source ---
@@ -114,12 +145,6 @@ success "Directories created"
 
 # --- Step 4: Copy binary & static files ---
 info "Installing binary and static files..."
-
-# Stop existing service before overwriting binary
-if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-    info "Stopping existing service..."
-    systemctl stop "$SERVICE_NAME" || true
-fi
 
 cp "$BINARY" "$CTL_BIN/vm_ctl"
 chmod +x "$CTL_BIN/vm_ctl"

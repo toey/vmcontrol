@@ -264,7 +264,7 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/')) ? '/api/' + operation : '/api/vm/' + operation;
+        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
         var response = await apiFetch(apiPath, {
             method: 'POST',
@@ -479,11 +479,12 @@ function addNetworkAdapter(existing) {
     var mode = (existing && existing.mode) || 'nat';
     var switchName = (existing && existing.switch_name) || '';
     var switchDisplay = mode === 'switch' ? '' : 'display:none;';
+    var vlanOpacity = mode === 'switch' ? '1' : '0.4';
 
     row.innerHTML =
         '<input class="adapter-netid" placeholder="Net ID" value="' + (existing ? existing.netid : count) + '">' +
         '<input class="adapter-mac" placeholder="MAC" value="' + (existing ? existing.mac : genMac()) + '">' +
-        '<input class="adapter-vlan" placeholder="VLAN" value="' + (existing ? (existing.vlan || '0') : '0') + '">' +
+        '<input class="adapter-vlan" placeholder="VLAN" style="opacity:' + vlanOpacity + '" value="' + (existing ? (existing.vlan || '0') : '0') + '">' +
         '<select class="adapter-mode" onchange="onNetModeChange(this)">' +
             '<option value="nat"' + (mode === 'nat' ? ' selected' : '') + '>NAT</option>' +
             '<option value="switch"' + (mode === 'switch' ? ' selected' : '') + '>Switch</option>' +
@@ -497,11 +498,14 @@ function addNetworkAdapter(existing) {
 function onNetModeChange(selectEl) {
     var row = selectEl.closest('.adapter-row');
     var switchSelect = row.querySelector('.adapter-switch');
+    var vlanInput = row.querySelector('.adapter-vlan');
     if (selectEl.value === 'switch') {
         switchSelect.style.display = '';
+        if (vlanInput) vlanInput.style.opacity = '1';
     } else {
         switchSelect.style.display = 'none';
         switchSelect.value = '';
+        if (vlanInput) vlanInput.style.opacity = '0.4';
     }
 }
 
@@ -728,6 +732,25 @@ async function loadSwitchList() {
         var response = await apiFetch('/api/switch/list');
         var switches = await safeJson(response);
         window._switchList = switches;
+
+        // Build map: switch_name -> [vm names]
+        var switchVmMap = {};
+        switches.forEach(function(sw) { switchVmMap[sw.name] = []; });
+        var vms = window._vmList || [];
+        vms.forEach(function(vm) {
+            var config = {};
+            try { config = JSON.parse(vm.config); } catch(e) {}
+            var adapters = config.network_adapters || [];
+            adapters.forEach(function(a) {
+                if (a.mode === 'switch' && a.switch_name && switchVmMap[a.switch_name] !== undefined) {
+                    var label = vm.smac + ':vlan' + (a.vlan || '0');
+                    if (switchVmMap[a.switch_name].indexOf(label) === -1) {
+                        switchVmMap[a.switch_name].push(label);
+                    }
+                }
+            });
+        });
+
         var listDiv = document.getElementById('switch-list');
         if (listDiv) {
             if (switches.length === 0) {
@@ -735,9 +758,14 @@ async function loadSwitchList() {
             } else {
                 listDiv.innerHTML = switches.map(function(sw) {
                     var safeName = sw.name.replace(/'/g, "\\'");
+                    var vmList = switchVmMap[sw.name] || [];
+                    var vmHtml = vmList.length > 0
+                        ? ' <small style="color:#3fb950;">(' + vmList.map(escapeHtml).join(', ') + ')</small>'
+                        : ' <small style="color:#8b949e;">(no VMs)</small>';
                     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                         '<span>' + escapeHtml(sw.name) +
-                        ' <small style="color:#58a6ff;">[mcast port ' + sw.mcast_port + ']</small></span>' +
+                        ' <small style="color:#58a6ff;">[mcast port ' + sw.mcast_port + ']</small>' +
+                        vmHtml + '</span>' +
                         '<span>' +
                         '<button class="btn-clone" onclick="renameSwitch(' + sw.id + ', \'' + safeName + '\')">Rename</button> ' +
                         '<button class="btn-remove" onclick="deleteSwitch(' + sw.id + ', \'' + safeName + '\')">X</button>' +
