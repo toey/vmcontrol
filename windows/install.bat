@@ -207,9 +207,9 @@ if exist "%PREBUILT_LOCAL%" (
             if !errorlevel! equ 0 (
                 echo [INFO] Installing Visual Studio Build Tools via winget...
                 echo [INFO] This may take several minutes. Please wait...
-                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
+                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
                 if !errorlevel! equ 0 (
-                    echo [OK]   Visual Studio Build Tools installed
+                    echo [OK]   Visual Studio Build Tools installed ^(with ARM64 tools^)
                     echo [INFO] Switching to stable-msvc toolchain...
                     rustup toolchain install stable-msvc >nul 2>&1
                     rustup default stable-msvc >nul 2>&1
@@ -219,6 +219,7 @@ if exist "%PREBUILT_LOCAL%" (
                     echo [ERR] winget install failed. Please install manually:
                     echo       https://visualstudio.microsoft.com/visual-cpp-build-tools/
                     echo       Select "Desktop development with C++"
+                    echo       Also check "ARM64/ARM64EC build tools" in Individual Components
                     echo       Then re-run install.bat
                     pause
                     exit /b 1
@@ -294,26 +295,59 @@ if exist "%PREBUILT_LOCAL%" (
     :: --- Load MSVC environment if needed (so link.exe is in PATH) ---
     where link.exe >nul 2>&1
     if !errorlevel! neq 0 (
-        if "!USE_TOOLCHAIN!"=="msvc" (
-            echo [INFO] Loading MSVC environment...
-            set "VSWHERE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-            if exist "!VSWHERE_EXE!" (
-                for /f "delims=" %%P in ('"!VSWHERE_EXE!" -latest -products * -property installationPath 2^>nul') do set "VS_INSTALL_PATH=%%P"
-                if defined VS_INSTALL_PATH (
-                    set "VCVARSALL=!VS_INSTALL_PATH!\VC\Auxiliary\Build\vcvarsall.bat"
-                    if exist "!VCVARSALL!" (
-                        if /I "%ARCH%"=="ARM64" (
-                            call "!VCVARSALL!" arm64 >nul 2>&1
-                        ) else (
-                            call "!VCVARSALL!" amd64 >nul 2>&1
-                        )
-                        echo [OK]   MSVC environment loaded
+        echo [INFO] link.exe not in PATH -- loading MSVC environment...
+        set "VSWHERE_EXE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+        if exist "!VSWHERE_EXE!" (
+            for /f "delims=" %%P in ('"!VSWHERE_EXE!" -latest -products * -property installationPath 2^>nul') do set "VS_INSTALL_PATH=%%P"
+            if defined VS_INSTALL_PATH (
+                echo [INFO] VS Install: !VS_INSTALL_PATH!
+                set "VCVARSALL=!VS_INSTALL_PATH!\VC\Auxiliary\Build\vcvarsall.bat"
+                if exist "!VCVARSALL!" (
+                    if /I "%ARCH%"=="ARM64" (
+                        echo [INFO] Running: vcvarsall.bat arm64
+                        call "!VCVARSALL!" arm64
                     ) else (
-                        echo [WARN] vcvarsall.bat not found at !VCVARSALL!
+                        echo [INFO] Running: vcvarsall.bat amd64
+                        call "!VCVARSALL!" amd64
                     )
+                    :: Verify link.exe is now available
+                    where link.exe >nul 2>&1
+                    if !errorlevel! equ 0 (
+                        echo [OK]   MSVC environment loaded -- link.exe found
+                    ) else (
+                        echo [WARN] vcvarsall.bat ran but link.exe still not found
+                        if /I "%ARCH%"=="ARM64" (
+                            echo [INFO] ARM64 build tools may be missing. Installing...
+                            where winget >nul 2>&1
+                            if !errorlevel! equ 0 (
+                                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --quiet --wait" --accept-package-agreements --accept-source-agreements
+                                echo [INFO] Retrying vcvarsall.bat arm64...
+                                call "!VCVARSALL!" arm64
+                                where link.exe >nul 2>&1
+                                if !errorlevel! equ 0 (
+                                    echo [OK]   ARM64 tools installed -- link.exe found
+                                ) else (
+                                    echo [ERR] link.exe still not found after installing ARM64 tools.
+                                    echo       Open "Visual Studio Installer" and manually add:
+                                    echo       Individual Components ^> "MSVC ARM64/ARM64EC build tools"
+                                    echo       Then re-run install.bat
+                                    pause
+                                    exit /b 1
+                                )
+                            )
+                        )
+                    )
+                ) else (
+                    echo [WARN] vcvarsall.bat not found at !VCVARSALL!
                 )
+            ) else (
+                echo [WARN] vswhere found no VS installations
             )
+        ) else (
+            echo [WARN] vswhere.exe not found
         )
+    ) else (
+        echo [OK]   link.exe already in PATH
     )
 
     echo [INFO] Building vm_ctl from source ^(release mode^)...
