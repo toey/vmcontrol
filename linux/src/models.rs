@@ -25,6 +25,8 @@ pub struct MemoryInfo {
     pub size: String,
 }
 
+fn default_net_mode() -> String { "nat".into() }
+fn default_switch_name() -> String { String::new() }
 fn default_arch() -> String { "x86_64".into() }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -39,6 +41,10 @@ pub struct NetworkAdapter {
     pub netid: String,
     pub mac: String,
     pub vlan: String,
+    #[serde(default = "default_net_mode")]
+    pub mode: String,
+    #[serde(default = "default_switch_name")]
+    pub switch_name: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

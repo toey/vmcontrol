@@ -227,6 +227,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
         if (tab.dataset.tab === 'backup') { loadBackupList(); }
+        // Auto-load switch list when switching to switches tab
+        if (tab.dataset.tab === 'switches') { loadSwitchList(); }
     });
 });
 
@@ -367,6 +369,8 @@ function collectVmConfig() {
             netid: row.querySelector('.adapter-netid').value,
             mac: row.querySelector('.adapter-mac').value,
             vlan: row.querySelector('.adapter-vlan').value,
+            mode: row.querySelector('.adapter-mode').value,
+            switch_name: row.querySelector('.adapter-switch') ? row.querySelector('.adapter-switch').value : '',
         };
     });
 
@@ -466,17 +470,39 @@ function genMac() {
 }
 
 // Dynamic rows - Network Adapter
-function addNetworkAdapter() {
+function addNetworkAdapter(existing) {
     var container = document.getElementById('start-network-adapters');
     var count = container.querySelectorAll('.adapter-row').length;
     var row = document.createElement('div');
     row.className = 'adapter-row';
+
+    var mode = (existing && existing.mode) || 'nat';
+    var switchName = (existing && existing.switch_name) || '';
+    var switchDisplay = mode === 'switch' ? '' : 'display:none;';
+
     row.innerHTML =
-        '<input class="adapter-netid" placeholder="Net ID" value="' + count + '">' +
-        '<input class="adapter-mac" placeholder="MAC" value="' + genMac() + '">' +
-        '<input class="adapter-vlan" placeholder="VLAN" value="0">' +
+        '<input class="adapter-netid" placeholder="Net ID" value="' + (existing ? existing.netid : count) + '">' +
+        '<input class="adapter-mac" placeholder="MAC" value="' + (existing ? existing.mac : genMac()) + '">' +
+        '<input class="adapter-vlan" placeholder="VLAN" value="' + (existing ? (existing.vlan || '0') : '0') + '">' +
+        '<select class="adapter-mode" onchange="onNetModeChange(this)">' +
+            '<option value="nat"' + (mode === 'nat' ? ' selected' : '') + '>NAT</option>' +
+            '<option value="switch"' + (mode === 'switch' ? ' selected' : '') + '>Switch</option>' +
+        '</select>' +
+        '<select class="adapter-switch" style="' + switchDisplay + '"><option value="">-- switch --</option></select>' +
         '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
     container.appendChild(row);
+    populateSwitchSelect(row.querySelector('.adapter-switch'), switchName);
+}
+
+function onNetModeChange(selectEl) {
+    var row = selectEl.closest('.adapter-row');
+    var switchSelect = row.querySelector('.adapter-switch');
+    if (selectEl.value === 'switch') {
+        switchSelect.style.display = '';
+    } else {
+        switchSelect.style.display = 'none';
+        switchSelect.value = '';
+    }
 }
 
 // Dynamic rows - Disk (with dropdown for disk name)
@@ -694,6 +720,77 @@ document.addEventListener('click', function(e) {
         document.querySelectorAll('.export-dropdown.open').forEach(function(el) { el.classList.remove('open'); });
     }
 });
+
+// ======== Switch Management ========
+
+async function loadSwitchList() {
+    try {
+        var response = await apiFetch('/api/switch/list');
+        var switches = await safeJson(response);
+        window._switchList = switches;
+        var listDiv = document.getElementById('switch-list');
+        if (listDiv) {
+            if (switches.length === 0) {
+                listDiv.innerHTML = '<em>No switches created. Create one to enable inter-VM networking.</em>';
+            } else {
+                listDiv.innerHTML = switches.map(function(sw) {
+                    var safeName = sw.name.replace(/'/g, "\\'");
+                    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
+                        '<span>' + escapeHtml(sw.name) +
+                        ' <small style="color:#58a6ff;">[mcast port ' + sw.mcast_port + ']</small></span>' +
+                        '<span>' +
+                        '<button class="btn-clone" onclick="renameSwitch(' + sw.id + ', \'' + safeName + '\')">Rename</button> ' +
+                        '<button class="btn-remove" onclick="deleteSwitch(' + sw.id + ', \'' + safeName + '\')">X</button>' +
+                        '</span></div>';
+                }).join('');
+            }
+        }
+        refreshAllSwitchSelects();
+    } catch (err) {
+        console.error('Failed to load switch list:', err);
+    }
+}
+
+async function executeCreateSwitch() {
+    var name = val('switch-name').trim();
+    if (!name) { alert('Please enter a Switch Name'); return; }
+    var ok = await apiCall('switch/create', { name: name });
+    if (ok) {
+        document.getElementById('switch-name').value = '';
+        loadSwitchList();
+    }
+}
+
+async function deleteSwitch(id, name) {
+    if (!confirm('Delete switch "' + name + '"?')) return;
+    var ok = await apiCall('switch/delete', { id: id });
+    if (ok) loadSwitchList();
+}
+
+async function renameSwitch(id, currentName) {
+    var newName = prompt('Rename switch "' + currentName + '" to:', currentName);
+    if (!newName || newName === currentName) return;
+    var ok = await apiCall('switch/rename', { id: id, name: newName.trim() });
+    if (ok) loadSwitchList();
+}
+
+function populateSwitchSelect(selectEl, selectedValue) {
+    var switches = window._switchList || [];
+    var current = selectedValue || selectEl.value;
+    selectEl.innerHTML = '<option value="">-- switch --</option>';
+    switches.forEach(function(sw) {
+        var opt = document.createElement('option');
+        opt.value = sw.name;
+        opt.textContent = sw.name + ' (port ' + sw.mcast_port + ')';
+        selectEl.appendChild(opt);
+    });
+    if (current) selectEl.value = current;
+}
+
+function refreshAllSwitchSelects() {
+    var selects = document.querySelectorAll('#start-network-adapters .adapter-switch');
+    selects.forEach(function(sel) { populateSwitchSelect(sel); });
+}
 
 // ======== Image Management ========
 
@@ -1313,14 +1410,7 @@ async function editVm(smac) {
             adapterContainer.innerHTML = '';
             if (config.network_adapters && config.network_adapters.length > 0) {
                 config.network_adapters.forEach(function(adapter) {
-                    var row = document.createElement('div');
-                    row.className = 'adapter-row';
-                    row.innerHTML =
-                        '<input class="adapter-netid" placeholder="Net ID" value="' + (adapter.netid || '0') + '">' +
-                        '<input class="adapter-mac" placeholder="MAC" value="' + (adapter.mac || '') + '">' +
-                        '<input class="adapter-vlan" placeholder="VLAN" value="' + (adapter.vlan || '0') + '">' +
-                        '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
-                    adapterContainer.appendChild(row);
+                    addNetworkAdapter(adapter);
                 });
             } else {
                 addNetworkAdapter();
@@ -1372,4 +1462,5 @@ window.addEventListener('DOMContentLoaded', function() {
     loadVmList();
     loadIsoList();
     loadVmListTable();
+    loadSwitchList();
 });

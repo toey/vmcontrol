@@ -1050,6 +1050,119 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 }
 
+// ======== Switch Management ========
+
+async fn list_switches_handler() -> HttpResponse {
+    match crate::db::list_switches() {
+        Ok(switches) => HttpResponse::Ok().json(switches),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list switches: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn create_switch_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+    // Sanitize: alphanumeric, dash, underscore only
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Switch name must be alphanumeric, dash, or underscore only".into(),
+            output: None,
+        });
+    }
+    match crate::db::insert_switch(&name) {
+        Ok(id) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Switch '{}' created (ID: {})", name, id),
+            output: Some(id.to_string()),
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+async fn delete_switch_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let id = match body.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'id' field".into(),
+                output: None,
+            });
+        }
+    };
+    match crate::db::delete_switch(id) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Switch {} deleted", id),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+async fn rename_switch_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let id = match body.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'id' field".into(),
+                output: None,
+            });
+        }
+    };
+    let new_name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+    if !new_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Switch name must be alphanumeric, dash, or underscore only".into(),
+            output: None,
+        });
+    }
+    match crate::db::rename_switch(id, &new_name) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Switch {} renamed to '{}'", id, new_name),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -1132,6 +1245,11 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Backup routes
             .route("/api/backup/list", web::get().to(list_backups_handler))
             .route("/api/backup/delete", web::post().to(delete_backup_handler))
+            // Switch routes
+            .route("/api/switch/list", web::get().to(list_switches_handler))
+            .route("/api/switch/create", web::post().to(create_switch_handler))
+            .route("/api/switch/delete", web::post().to(delete_switch_handler))
+            .route("/api/switch/rename", web::post().to(rename_switch_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

@@ -219,9 +219,31 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         output_log.push_str(&format!("netid : {}\n", adapter.netid));
         output_log.push_str(&format!("mac : {}\n", adapter.mac));
         output_log.push_str(&format!("vlanid : {}\n", adapter.vlan));
+        output_log.push_str(&format!("mode : {}\n", adapter.mode));
 
         qemu_args.push("-netdev".into());
-        qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
+
+        if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
+            match db::get_switch_by_name(&adapter.switch_name) {
+                Ok(sw) => {
+                    output_log.push_str(&format!("switch : {} (mcast port {})\n",
+                        adapter.switch_name, sw.mcast_port));
+                    qemu_args.push(format!(
+                        "socket,id=net{},mcast=230.0.0.1:{}",
+                        adapter.netid, sw.mcast_port
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Switch '{}' not found for adapter {}: {}",
+                        adapter.switch_name, adapter.netid, e
+                    ));
+                }
+            }
+        } else {
+            qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
+        }
+
         qemu_args.push("-device".into());
         qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
     }

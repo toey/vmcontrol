@@ -176,6 +176,12 @@ textarea:focus {
     min-width: 100px;
 }
 
+.adapter-row select, .disk-row select {
+    max-width: 140px;
+    flex: 1;
+    min-width: 90px;
+}
+
 .btn-remove {
     padding: 6px 10px;
     background: #da3633;

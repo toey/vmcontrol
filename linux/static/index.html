@@ -21,6 +21,7 @@
         <button class="tab" data-tab="livemigrate">Live Migrate</button>
         <button class="tab" data-tab="backup">Backup</button>
         <button class="tab" data-tab="metadata">Metadata</button>
+        <button class="tab" data-tab="switches">Switches</button>
     </nav>
 
     <main>
@@ -216,6 +217,17 @@
             <div class="btn-group">
                 <button class="execute-btn" onclick="saveMdsConfig()">Save Config</button>
             </div>
+        </div>
+        <!-- Virtual Network Switches -->
+        <div id="tab-switches" class="tab-panel">
+            <h2>Virtual Network Switches</h2>
+            <p class="form-desc">Create virtual switches for inter-VM communication. VMs on the same switch can talk to each other at Layer 2 (no NAT, no DHCP — VMs must configure their own IPs).</p>
+            <label>Switch Name <input type="text" id="switch-name" placeholder="my-switch-01"></label>
+            <button class="execute-btn" onclick="executeCreateSwitch()">Create Switch</button>
+            <fieldset style="margin-top:16px;">
+                <legend>Existing Switches</legend>
+                <div id="switch-list" style="font-size:0.9em;"></div>
+            </fieldset>
         </div>
     </main>
 

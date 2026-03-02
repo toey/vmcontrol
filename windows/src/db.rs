@@ -53,6 +53,16 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB disks table init error: {}", e))?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS switches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            mcast_port INTEGER NOT NULL UNIQUE,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .map_err(|e| format!("DB switches table init error: {}", e))?;
+
     // Migration: add config column if not exists
     let has_config: bool = conn
         .prepare("SELECT config FROM vms LIMIT 0")
@@ -238,5 +248,97 @@ pub fn clear_disk_owner_by_vm(smac: &str) -> Result<(), String> {
         params![smac],
     )
     .map_err(|e| format!("DB clear disk owner error: {}", e))?;
+    Ok(())
+}
+
+// ======== Switch operations ========
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SwitchRecord {
+    pub id: i64,
+    pub name: String,
+    pub mcast_port: i64,
+    pub created_at: String,
+}
+
+/// Insert a new switch with auto-assigned multicast port
+pub fn insert_switch(name: &str) -> Result<i64, String> {
+    let conn = open_db()?;
+    let next_port: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(mcast_port), 10000) + 1 FROM switches",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(10001);
+    conn.execute(
+        "INSERT INTO switches (name, mcast_port) VALUES (?1, ?2)",
+        params![name, next_port],
+    )
+    .map_err(|e| format!("DB insert switch error: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// List all switches
+pub fn list_switches() -> Result<Vec<SwitchRecord>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, mcast_port, created_at FROM switches ORDER BY id")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SwitchRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mcast_port: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let mut switches = Vec::new();
+    for row in rows {
+        switches.push(row.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(switches)
+}
+
+/// Get a switch by name
+pub fn get_switch_by_name(name: &str) -> Result<SwitchRecord, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT id, name, mcast_port, created_at FROM switches WHERE name = ?1",
+        params![name],
+        |row| {
+            Ok(SwitchRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                mcast_port: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|e| format!("Switch '{}' not found: {}", name, e))
+}
+
+/// Delete a switch by id
+pub fn delete_switch(id: i64) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM switches WHERE id = ?1", params![id])
+        .map_err(|e| format!("DB delete switch error: {}", e))?;
+    Ok(())
+}
+
+/// Rename a switch
+pub fn rename_switch(id: i64, new_name: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    let updated = conn
+        .execute(
+            "UPDATE switches SET name = ?2 WHERE id = ?1",
+            params![id, new_name],
+        )
+        .map_err(|e| format!("DB rename switch error: {}", e))?;
+    if updated == 0 {
+        return Err(format!("Switch ID {} not found", id));
+    }
     Ok(())
 }
