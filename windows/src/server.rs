@@ -546,6 +546,13 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
             output: None,
         });
     }
+    if let Err(e) = operations::check_disk_not_in_use(&source) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        });
+    }
     if std::path::Path::new(&dst_file).exists() {
         return HttpResponse::BadRequest().json(ApiResponse {
             success: false,
@@ -865,6 +872,14 @@ async fn export_disk_handler(
         return HttpResponse::NotFound().json(ApiResponse {
             success: false,
             message: format!("Disk '{}' not found", name),
+            output: None,
+        });
+    }
+
+    if let Err(e) = operations::check_disk_not_in_use(&name) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: e,
             output: None,
         });
     }

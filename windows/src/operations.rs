@@ -5,6 +5,25 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
+/// Check if a disk is owned by a running VM — returns Err if so
+pub fn check_disk_not_in_use(disk_name: &str) -> Result<(), String> {
+    if let Ok(disks) = db::list_disks() {
+        for d in &disks {
+            if d.name == disk_name && !d.owner.is_empty() {
+                if let Ok(vm) = db::get_vm(&d.owner) {
+                    if vm.status == "running" {
+                        return Err(format!(
+                            "Disk '{}' is in use by running VM '{}' — stop the VM first",
+                            disk_name, d.owner
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
 fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     let pctl_path = get_conf("pctl_path");
@@ -867,6 +886,8 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
     if !std::path::Path::new(&disk_file).exists() {
         return Err(format!("Disk '{}' not found", name));
     }
+
+    check_disk_not_in_use(&name)?;
 
     let mut output = format!("Resizing disk: {} -> {}\n", disk_file, size);
     match run_cmd(&qemu_img, &["resize", "-f", "qcow2", &disk_file, &size]) {
