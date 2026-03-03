@@ -10,6 +10,9 @@ fn validate_vm_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("VM name is required".into());
     }
+    if !name.chars().next().unwrap().is_ascii_alphabetic() {
+        return Err("VM name must start with an English letter (a-z, A-Z)".into());
+    }
     if name.len() > 255 {
         return Err("VM name too long (max 255 chars)".into());
     }
