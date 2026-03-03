@@ -198,10 +198,18 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 output_log.push_str(&out);
             }
         }
+        let drive_id = format!("hd{}", disk.diskid);
         qemu_args.push("-drive".into());
         qemu_args.push(format!(
-            "file={},format=qcow2,if=virtio,index={}",
-            disk_file, disk.diskid
+            "file={},format=qcow2,if=none,id={}",
+            disk_file, drive_id
+        ));
+        qemu_args.push("-device".into());
+        // bootindex=1+ so disk boots after CD-ROM (bootindex=0)
+        let bootidx = disk.diskid.parse::<u32>().unwrap_or(0) + 1;
+        qemu_args.push(format!(
+            "virtio-blk-pci,drive={},bootindex={}",
+            drive_id, bootidx
         ));
     }
 
@@ -298,40 +306,55 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
 
-    // CDROM -- aarch64 virt has no IDE, use virtio (but only when ISO mounted;
-    // virtio-blk-pci requires media, so skip empty cdrom for aarch64)
-    if !is_aarch64 {
+    // CDROM -- named drive "cd0" for runtime ISO mount/unmount via monitor
+    // bootindex=0 so UEFI/BIOS tries CD first, then falls through to disk
+    if is_aarch64 {
+        // aarch64 virt has no IDE -- use virtio-scsi controller + scsi-cd
+        qemu_args.push("-device".into());
+        qemu_args.push("virtio-scsi-pci,id=scsi0".into());
         qemu_args.push("-drive".into());
-        qemu_args.push("if=ide,index=0,media=cdrom".into());
+        qemu_args.push("if=none,id=cd0,media=cdrom".into());
+        qemu_args.push("-device".into());
+        qemu_args.push("scsi-cd,drive=cd0,bootindex=0".into());
+    } else {
+        qemu_args.push("-drive".into());
+        qemu_args.push("if=none,id=cd0,media=cdrom".into());
+        qemu_args.push("-device".into());
+        qemu_args.push("ide-cd,drive=cd0,bootindex=0".into());
     }
 
-    // Generate cloud-init seed ISO from MDS config
-    match generate_seed_iso(&ismac) {
-        Ok(seed_iso_path) => {
-            output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
-            if is_aarch64 {
-                qemu_args.push("-drive".into());
-                qemu_args.push(format!(
-                    "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
-                ));
-                qemu_args.push("-device".into());
-                qemu_args.push("virtio-blk-pci,drive=seed0".into());
-            } else {
-                qemu_args.push("-drive".into());
-                qemu_args.push(format!(
-                    "file={},if=ide,index=1,media=cdrom,readonly=on", seed_iso_path
-                ));
+    // Generate cloud-init seed ISO from MDS config (skip if cloud-init disabled)
+    let cloudinit_enabled = cfg.features.cloudinit != "0";
+    if cloudinit_enabled {
+        match generate_seed_iso(&ismac) {
+            Ok(seed_iso_path) => {
+                output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
+                if is_aarch64 {
+                    qemu_args.push("-drive".into());
+                    qemu_args.push(format!(
+                        "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
+                    ));
+                    qemu_args.push("-device".into());
+                    qemu_args.push("virtio-blk-pci,drive=seed0".into());
+                } else {
+                    qemu_args.push("-drive".into());
+                    qemu_args.push(format!(
+                        "file={},if=ide,index=1,media=cdrom,readonly=on", seed_iso_path
+                    ));
+                }
             }
-        }
-        Err(e) => {
-            output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
-        }
-    };
+            Err(e) => {
+                output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
+            }
+        };
 
-    // SMBIOS cloud-init hint (x86_64 only -- aarch64 virt doesn't support SMBIOS)
-    if !is_aarch64 {
-        qemu_args.push("-smbios".into());
-        qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
+        // SMBIOS cloud-init hint (x86_64 only -- aarch64 virt doesn't support SMBIOS)
+        if !is_aarch64 {
+            qemu_args.push("-smbios".into());
+            qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
+        }
+    } else {
+        output_log.push_str("cloud-init: disabled\n");
     }
 
     // USB tablet (for mouse) -- aarch64 already has xhci+kbd+tablet from above

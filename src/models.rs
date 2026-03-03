@@ -28,12 +28,15 @@ pub struct MemoryInfo {
 fn default_net_mode() -> String { "nat".into() }
 fn default_switch_name() -> String { String::new() }
 fn default_arch() -> String { "x86_64".into() }
+fn default_cloudinit() -> String { "1".into() }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Features {
     pub is_windows: String,
     #[serde(default = "default_arch")]
     pub arch: String,
+    #[serde(default = "default_cloudinit")]
+    pub cloudinit: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

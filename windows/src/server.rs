@@ -1200,6 +1200,152 @@ async fn rename_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 }
 
+// ======== DHCP Lease Management ========
+
+async fn list_dhcp_handler() -> HttpResponse {
+    // Collect DHCP leases from DB
+    let leases = crate::db::list_dhcp_leases().unwrap_or_default();
+
+    // Also collect VM MAC/IP info from MDS configs for a merged view
+    let vms = crate::db::list_vms().unwrap_or_default();
+    let mut vm_entries: Vec<serde_json::Value> = Vec::new();
+    for vm in &vms {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+            let mds = cfg.get("mds");
+            let ip = mds.and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()).unwrap_or("");
+            let hostname = mds.and_then(|m| m.get("hostname_prefix")).and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(adapters) = cfg.get("network_adapters").and_then(|v| v.as_array()) {
+                for adapter in adapters {
+                    let mac = adapter.get("mac").and_then(|v| v.as_str()).unwrap_or("");
+                    let vlan = adapter.get("vlan").and_then(|v| v.as_str()).unwrap_or("0");
+                    if !mac.is_empty() {
+                        vm_entries.push(serde_json::json!({
+                            "mac": mac,
+                            "ip": ip,
+                            "hostname": hostname,
+                            "vm_name": vm.smac,
+                            "vlan": vlan,
+                            "source": "vm",
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Merge: DB leases + VM-derived entries
+    let lease_json: Vec<serde_json::Value> = leases.iter().map(|l| {
+        serde_json::json!({
+            "mac": l.mac,
+            "ip": l.ip,
+            "hostname": l.hostname,
+            "vm_name": l.vm_name,
+            "vlan": "",
+            "source": "static",
+            "created_at": l.created_at,
+        })
+    }).collect();
+
+    // Combine: static leases first, then VM-derived (skip duplicates by MAC)
+    let mut seen_macs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut result: Vec<serde_json::Value> = Vec::new();
+    for entry in &lease_json {
+        let mac = entry["mac"].as_str().unwrap_or("").to_string();
+        seen_macs.insert(mac);
+        result.push(entry.clone());
+    }
+    for entry in &vm_entries {
+        let mac = entry["mac"].as_str().unwrap_or("").to_string();
+        if !seen_macs.contains(&mac) {
+            seen_macs.insert(mac);
+            result.push(entry.clone());
+        }
+    }
+
+    HttpResponse::Ok().json(result)
+}
+
+async fn add_dhcp_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let mac = match body.get("mac").and_then(|v| v.as_str()) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'mac' field".into(),
+                output: None,
+            });
+        }
+    };
+    let ip = body.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let hostname = body.get("hostname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let vm_name = body.get("vm_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    match crate::db::upsert_dhcp_lease(&mac, &ip, &hostname, &vm_name) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("DHCP lease saved: {} -> {}", mac, ip),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+async fn delete_dhcp_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let mac = match body.get("mac").and_then(|v| v.as_str()) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'mac' field".into(),
+                output: None,
+            });
+        }
+    };
+    match crate::db::delete_dhcp_lease(&mac) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("DHCP lease deleted: {}", mac),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+/// Auto-populate DHCP leases from all VM network adapters + MDS config
+async fn sync_dhcp_handler() -> HttpResponse {
+    let vms = crate::db::list_vms().unwrap_or_default();
+    let mut count = 0;
+    for vm in &vms {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+            let mds = cfg.get("mds");
+            let ip = mds.and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()).unwrap_or("");
+            let hostname = mds.and_then(|m| m.get("hostname_prefix")).and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(adapters) = cfg.get("network_adapters").and_then(|v| v.as_array()) {
+                for adapter in adapters {
+                    let mac = adapter.get("mac").and_then(|v| v.as_str()).unwrap_or("");
+                    if !mac.is_empty() && !ip.is_empty() {
+                        let _ = crate::db::upsert_dhcp_lease(mac, ip, hostname, &vm.smac);
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        message: format!("Synced {} DHCP leases from VM configs", count),
+        output: None,
+    })
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -1285,6 +1431,11 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Group routes
             .route("/api/group/list", web::get().to(list_groups_handler))
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))
+            // DHCP routes
+            .route("/api/dhcp/list", web::get().to(list_dhcp_handler))
+            .route("/api/dhcp/add", web::post().to(add_dhcp_handler))
+            .route("/api/dhcp/delete", web::post().to(delete_dhcp_handler))
+            .route("/api/dhcp/sync", web::post().to(sync_dhcp_handler))
             // Switch routes
             .route("/api/switch/list", web::get().to(list_switches_handler))
             .route("/api/switch/create", web::post().to(create_switch_handler))

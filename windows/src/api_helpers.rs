@@ -105,11 +105,11 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
                 return format!("Error: invalid ISO name: {}\n", e);
             }
             let iso_path = get_conf("iso_path");
-            let cmd = format!("change ide0-cd0 {}\\{}", iso_path, iso);
+            let cmd = format!("change cd0 {}\\{}", iso_path, iso);
             (vm, cmd)
         }
         "unmountiso" => {
-            (smac.to_string(), "eject ide0-cd0".to_string())
+            (smac.to_string(), "eject cd0".to_string())
         }
         "livemigrate" => {
             let parts: Vec<&str> = smac.splitn(2, ' ').collect();

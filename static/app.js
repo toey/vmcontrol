@@ -227,6 +227,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
         if (tab.dataset.tab === 'backup') { loadBackupList(); }
+        // Auto-load DHCP table when switching to dhcp tab
+        if (tab.dataset.tab === 'dhcp') { loadDhcpTable(); }
         // Auto-load switch list when switching to switches tab
         if (tab.dataset.tab === 'switches') { loadSwitchList(); }
     });
@@ -392,7 +394,7 @@ function collectVmConfig() {
             threads: val('start-cpu-threads'),
         },
         memory: { size: val('start-memory-size') },
-        features: { is_windows: val('start-is-windows'), arch: val('start-arch') },
+        features: { is_windows: val('start-is-windows'), arch: val('start-arch'), cloudinit: val('start-cloudinit') },
         network_adapters: network_adapters,
         disks: disks,
     };
@@ -1491,6 +1493,7 @@ async function editVm(smac) {
             if (config.features) {
                 document.getElementById('start-is-windows').value = config.features.is_windows || '0';
                 document.getElementById('start-arch').value = config.features.arch || 'x86_64';
+                document.getElementById('start-cloudinit').value = config.features.cloudinit || '1';
             }
 
             // Fill Network Adapters
@@ -1615,6 +1618,111 @@ function getCreateFormGroup() {
     var newGroup = (document.getElementById('create-group-new').value || '').trim();
     if (newGroup) return newGroup;
     return document.getElementById('create-group').value || '';
+}
+
+// ──────────────────────────────────────────
+// DHCP Table
+// ──────────────────────────────────────────
+
+async function loadDhcpTable() {
+    var tbody = document.getElementById('dhcp-table-body');
+    if (!tbody) return;
+    try {
+        var response = await apiFetch('/api/dhcp/list');
+        var leases = await safeJson(response);
+        if (leases.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6"><em>No DHCP leases. Click "Sync from VMs" or add manually.</em></td></tr>';
+            return;
+        }
+        var html = '';
+        leases.forEach(function(l) {
+            var sourceLabel = l.source === 'static'
+                ? '<span style="color:#3fb950;">static</span>'
+                : '<span style="color:#8b949e;">vm-config</span>';
+            var actions = '';
+            if (l.source === 'static') {
+                actions = '<button class="btn-vm-action btn-vm-delete" onclick="deleteDhcpLease(\'' + escapeHtml(l.mac).replace(/'/g, "\\'") + '\')">Delete</button>';
+            } else {
+                actions = '<button class="btn-vm-action btn-vm-edit" onclick="promoteDhcpLease(\'' + escapeHtml(l.mac).replace(/'/g, "\\'") + '\',\'' + escapeHtml(l.ip).replace(/'/g, "\\'") + '\',\'' + escapeHtml(l.hostname).replace(/'/g, "\\'") + '\',\'' + escapeHtml(l.vm_name).replace(/'/g, "\\'") + '\')">Save as Static</button>';
+            }
+            html += '<tr>' +
+                '<td><code>' + escapeHtml(l.mac) + '</code></td>' +
+                '<td>' + escapeHtml(l.ip || '-') + '</td>' +
+                '<td>' + escapeHtml(l.hostname || '-') + '</td>' +
+                '<td>' + escapeHtml(l.vm_name || '-') + '</td>' +
+                '<td>' + sourceLabel + '</td>' +
+                '<td>' + actions + '</td>' +
+                '</tr>';
+        });
+        tbody.innerHTML = html;
+    } catch (err) {
+        tbody.innerHTML = '<tr><td colspan="6">Error loading DHCP table</td></tr>';
+    }
+}
+
+async function addDhcpLease() {
+    var mac = document.getElementById('dhcp-mac').value.trim();
+    var ip = document.getElementById('dhcp-ip').value.trim();
+    var hostname = document.getElementById('dhcp-hostname').value.trim();
+    var vmName = document.getElementById('dhcp-vm-name').value.trim();
+    if (!mac) { alert('MAC address is required'); return; }
+    if (!ip) { alert('IP address is required'); return; }
+    try {
+        var response = await apiFetch('/api/dhcp/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mac: mac, ip: ip, hostname: hostname, vm_name: vmName })
+        });
+        var result = await safeJson(response);
+        showOutput(result);
+        if (result.success) {
+            document.getElementById('dhcp-mac').value = '';
+            document.getElementById('dhcp-ip').value = '';
+            document.getElementById('dhcp-hostname').value = '';
+            document.getElementById('dhcp-vm-name').value = '';
+            loadDhcpTable();
+        }
+    } catch (err) {
+        showOutput({ success: false, message: err.message });
+    }
+}
+
+async function deleteDhcpLease(mac) {
+    if (!confirm('Delete DHCP lease for ' + mac + '?')) return;
+    try {
+        var response = await apiFetch('/api/dhcp/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mac: mac })
+        });
+        var result = await safeJson(response);
+        showOutput(result);
+        loadDhcpTable();
+    } catch (err) {
+        showOutput({ success: false, message: err.message });
+    }
+}
+
+function promoteDhcpLease(mac, ip, hostname, vmName) {
+    document.getElementById('dhcp-mac').value = mac;
+    document.getElementById('dhcp-ip').value = ip;
+    document.getElementById('dhcp-hostname').value = hostname;
+    document.getElementById('dhcp-vm-name').value = vmName;
+}
+
+async function syncDhcpFromVms() {
+    try {
+        var response = await apiFetch('/api/dhcp/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+        });
+        var result = await safeJson(response);
+        showOutput(result);
+        loadDhcpTable();
+    } catch (err) {
+        showOutput({ success: false, message: err.message });
+    }
 }
 
 // Init

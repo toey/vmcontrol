@@ -21,6 +21,7 @@
         <button class="tab" data-tab="livemigrate">Live Migrate</button>
         <button class="tab" data-tab="backup">Backup</button>
         <button class="tab" data-tab="metadata">Metadata</button>
+        <button class="tab" data-tab="dhcp">DHCP</button>
         <button class="tab" data-tab="switches">Switches</button>
     </nav>
 
@@ -106,6 +107,12 @@
                         <select id="start-is-windows">
                             <option value="0">No</option>
                             <option value="1">Yes</option>
+                        </select>
+                    </label>
+                    <label>Cloud-Init
+                        <select id="start-cloudinit">
+                            <option value="1">Enabled</option>
+                            <option value="0">Disabled (ISO install)</option>
                         </select>
                     </label>
                 </fieldset>
@@ -228,6 +235,44 @@
             <div class="btn-group">
                 <button class="execute-btn" onclick="saveMdsConfig()">Save Config</button>
             </div>
+        </div>
+        <!-- DHCP Table -->
+        <div id="tab-dhcp" class="tab-panel">
+            <h2>DHCP Table</h2>
+            <p class="form-desc">Manage static IP assignments for VMs. Sync from VM configs or add manually.</p>
+            <div class="btn-group" style="margin-bottom:12px;">
+                <button class="execute-btn" onclick="syncDhcpFromVms()">Sync from VMs</button>
+            </div>
+            <fieldset>
+                <legend>Add / Edit Lease</legend>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                    <label>MAC <input type="text" id="dhcp-mac" placeholder="52:54:00:00:00:01" style="width:160px;"></label>
+                    <label>IP <input type="text" id="dhcp-ip" placeholder="10.0.1.10" style="width:130px;"></label>
+                    <label>Hostname <input type="text" id="dhcp-hostname" placeholder="vm-01" style="width:130px;"></label>
+                    <label>VM Name <input type="text" id="dhcp-vm-name" placeholder="(optional)" style="width:130px;"></label>
+                    <button class="execute-btn" onclick="addDhcpLease()" style="height:36px;">Add</button>
+                </div>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>Lease Table</legend>
+                <div id="dhcp-table-wrap">
+                    <table id="dhcp-table" style="width:100%;">
+                        <thead>
+                            <tr>
+                                <th>MAC</th>
+                                <th>IP</th>
+                                <th>Hostname</th>
+                                <th>VM Name</th>
+                                <th>Source</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dhcp-table-body">
+                            <tr><td colspan="6"><em>Loading...</em></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </fieldset>
         </div>
         <!-- Virtual Network Switches -->
         <div id="tab-switches" class="tab-panel">

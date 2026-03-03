@@ -91,6 +91,17 @@ fn open_db() -> Result<Connection, String> {
             .map_err(|e| format!("DB migrate group error: {}", e))?;
     }
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dhcp_leases (
+            mac TEXT PRIMARY KEY,
+            ip TEXT NOT NULL DEFAULT '',
+            hostname TEXT NOT NULL DEFAULT '',
+            vm_name TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .map_err(|e| format!("DB dhcp_leases table init error: {}", e))?;
+
     Ok(conn)
 }
 
@@ -404,5 +415,60 @@ pub fn rename_switch(id: i64, new_name: &str) -> Result<(), String> {
     if updated == 0 {
         return Err(format!("Switch ID {} not found", id));
     }
+    Ok(())
+}
+
+// ======== DHCP Lease operations ========
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DhcpLease {
+    pub mac: String,
+    pub ip: String,
+    pub hostname: String,
+    pub vm_name: String,
+    pub created_at: String,
+}
+
+/// Insert or update a DHCP lease
+pub fn upsert_dhcp_lease(mac: &str, ip: &str, hostname: &str, vm_name: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO dhcp_leases (mac, ip, hostname, vm_name) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(mac) DO UPDATE SET ip = ?2, hostname = ?3, vm_name = ?4",
+        params![mac, ip, hostname, vm_name],
+    )
+    .map_err(|e| format!("DB upsert dhcp lease error: {}", e))?;
+    Ok(())
+}
+
+/// List all DHCP leases
+pub fn list_dhcp_leases() -> Result<Vec<DhcpLease>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT mac, ip, hostname, vm_name, created_at FROM dhcp_leases ORDER BY ip ASC")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(DhcpLease {
+                mac: row.get(0)?,
+                ip: row.get(1)?,
+                hostname: row.get(2)?,
+                vm_name: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let mut leases = Vec::new();
+    for row in rows {
+        leases.push(row.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(leases)
+}
+
+/// Delete a DHCP lease by MAC
+pub fn delete_dhcp_lease(mac: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM dhcp_leases WHERE mac = ?1", params![mac])
+        .map_err(|e| format!("DB delete dhcp lease error: {}", e))?;
     Ok(())
 }
