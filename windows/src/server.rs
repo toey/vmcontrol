@@ -1394,6 +1394,28 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
         println!("API key authentication enabled");
     }
 
+    // Cleanup stale VM statuses — if DB says "running" but QEMU is not actually running, set to "stopped"
+    {
+        let pctl_path = get_conf("pctl_path");
+        if let Ok(vms) = crate::db::list_vms() {
+            for vm in &vms {
+                if vm.status == "running" {
+                    let port_file = format!(r"{}\{}.port", pctl_path, vm.smac);
+                    let alive = if let Ok(port_str) = std::fs::read_to_string(&port_file) {
+                        let addr = format!("127.0.0.1:{}", port_str.trim());
+                        std::net::TcpStream::connect(&addr).is_ok()
+                    } else {
+                        false
+                    };
+                    if !alive {
+                        println!("Stale VM '{}': marked running but QEMU not found — setting to stopped", vm.smac);
+                        let _ = crate::db::set_vm_status(&vm.smac, "stopped");
+                    }
+                }
+            }
+        }
+    }
+
     let static_path = get_conf("static_path");
     let mds_bind = "169.254.169.254:80";
 
