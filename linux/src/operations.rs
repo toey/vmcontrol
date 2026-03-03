@@ -232,7 +232,8 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-netdev".into());
 
         if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
-            // Virtual switch mode — OVS bridge + TAP device (Linux)
+            // Virtual switch mode — QEMU socket multicast with VLAN
+            // (macOS has no OVS kernel module, so we use multicast for L2 switching)
             let vlan_id: u16 = adapter.vlan.parse().unwrap_or(0);
             if vlan_id > 4094 {
                 return Err(format!(
@@ -240,46 +241,28 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     vlan_id, adapter.netid
                 ));
             }
-            // Verify switch exists in DB
-            if let Err(e) = db::get_switch_by_name(&adapter.switch_name) {
-                return Err(format!(
-                    "Switch '{}' not found for adapter {}: {}",
-                    adapter.switch_name, adapter.netid, e
-                ));
+            let mcast_hi = vlan_id / 256;
+            let mcast_lo = vlan_id % 256;
+            match db::get_switch_by_name(&adapter.switch_name) {
+                Ok(sw) => {
+                    output_log.push_str(&format!("switch : {} (mcast port {})\n",
+                        adapter.switch_name, sw.mcast_port));
+                    output_log.push_str(&format!("vlan   : {} (mcast 230.{}.{}.1:{})\n",
+                        vlan_id, mcast_hi, mcast_lo, sw.mcast_port));
+                    qemu_args.push(format!(
+                        "socket,id=net{},mcast=230.{}.{}.1:{}",
+                        adapter.netid, mcast_hi, mcast_lo, sw.mcast_port
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Switch '{}' not found for adapter {}: {}",
+                        adapter.switch_name, adapter.netid, e
+                    ));
+                }
             }
-
-            let bridge_name = format!("vs-{}", adapter.switch_name);
-            let mac_clean = adapter.mac.replace(":", "");
-            let tap_name = format!("vp{}", &mac_clean[mac_clean.len()-6..]);
-
-            // Ensure OVS bridge exists (auto-create if not yet)
-            let ovs = get_conf("ovs_vsctl_path");
-            let _ = run_cmd(&ovs, &["--may-exist", "add-br", &bridge_name]);
-
-            // Create TAP device
-            let _ = run_cmd("ip", &["tuntap", "add", "dev", &tap_name, "mode", "tap"]);
-            let _ = run_cmd("ip", &["link", "set", &tap_name, "up"]);
-
-            // Add TAP to OVS bridge with optional VLAN tag
-            if vlan_id > 0 {
-                run_cmd(&ovs, &["--may-exist", "add-port", &bridge_name, &tap_name,
-                    &format!("tag={}", vlan_id)])
-                    .map_err(|e| format!("OVS add-port error: {}", e))?;
-            } else {
-                run_cmd(&ovs, &["--may-exist", "add-port", &bridge_name, &tap_name])
-                    .map_err(|e| format!("OVS add-port error: {}", e))?;
-            }
-
-            output_log.push_str(&format!("switch : {} (OVS bridge {})\n",
-                adapter.switch_name, bridge_name));
-            output_log.push_str(&format!("tap    : {} (VLAN {})\n", tap_name, vlan_id));
-
-            // QEMU: use TAP device directly
-            qemu_args.push(format!(
-                "tap,id=net{},ifname={},script=no,downscript=no",
-                adapter.netid, tap_name
-            ));
         } else {
+            // Default: NAT (user-mode/SLIRP) networking
             qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
         }
 
@@ -392,35 +375,12 @@ pub fn start(json_str: &str) -> Result<String, String> {
     start_vm_with_config(&cmd.smac, &cfg)
 }
 
-/// Cleanup OVS ports and TAP devices created for a VM's switch-mode network adapters
-fn cleanup_ovs_ports(smac: &str, output: &mut String) {
-    if let Ok(vm) = db::get_vm(smac) {
-        if let Ok(cfg) = serde_json::from_str::<VmStartConfig>(&vm.config) {
-            let ovs = get_conf("ovs_vsctl_path");
-            if ovs.is_empty() { return; }
-            for adapter in &cfg.network_adapters {
-                if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
-                    let mac_clean = adapter.mac.replace(":", "");
-                    let tap_name = format!("vp{}", &mac_clean[mac_clean.len()-6..]);
-                    if let Ok(msg) = run_cmd(&ovs, &["--if-exists", "del-port", &tap_name]) {
-                        output.push_str(&format!("OVS del-port {}: {}\n", tap_name, msg.trim()));
-                    }
-                    // Also delete the TAP device
-                    let _ = run_cmd("ip", &["link", "del", &tap_name]);
-                }
-            }
-        }
-    }
-}
-
 pub fn stop(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
     output.push_str(&send_cmd_pctl("stop", &cmd.smac));
-    // Cleanup OVS ports for this VM
-    cleanup_ovs_ports(&cmd.smac, &mut output);
     // Set status to stopped
     if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
         output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
@@ -446,11 +406,11 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let pctl_path = get_conf("pctl_path");
     let sock_path = format!("{}/{}", pctl_path, cmd.smac);
     if !std::path::Path::new(&sock_path).exists() {
-        // Cleanup OVS ports for this VM
-        cleanup_ovs_ports(&cmd.smac, &mut output);
+        // Monitor socket gone = QEMU exited
         let _ = db::set_vm_status(&cmd.smac, "stopped");
         output.push_str("VM stopped.\n");
     } else {
+        // QEMU still running — guest is shutting down
         output.push_str("ACPI powerdown sent. Guest OS is shutting down (status still 'running').\n");
     }
     Ok(output)
@@ -584,6 +544,71 @@ fn next_ipv4() -> String {
     "10.0.1.10".to_string()
 }
 
+/// Collect all MAC addresses used by all VMs in DB.
+/// Returns Vec<(mac, vm_name)> for error reporting.
+fn used_macs(exclude_smac: Option<&str>) -> Vec<(String, String)> {
+    let mut macs = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Some(exc) = exclude_smac {
+                if vm.smac == exc { continue; }
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(adapters) = cfg.get("network_adapters").and_then(|a| a.as_array()) {
+                    for adapter in adapters {
+                        if let Some(mac) = adapter.get("mac").and_then(|m| m.as_str()) {
+                            if !mac.is_empty() {
+                                macs.push((mac.to_lowercase(), vm.smac.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    macs
+}
+
+/// Validate that MAC addresses in a config are unique across all VMs.
+/// exclude_smac: if updating a VM, exclude its own MACs from the check.
+fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str>) -> Result<(), String> {
+    let new_macs: Vec<String> = config
+        .get("network_adapters")
+        .and_then(|a| a.as_array())
+        .map(|adapters| {
+            adapters.iter()
+                .filter_map(|a| a.get("mac").and_then(|m| m.as_str()))
+                .filter(|m| !m.is_empty())
+                .map(|m| m.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if new_macs.is_empty() { return Ok(()); }
+
+    // Check for duplicates within the new config itself
+    let mut seen = std::collections::HashSet::new();
+    for mac in &new_macs {
+        if !seen.insert(mac.clone()) {
+            return Err(format!("Duplicate MAC address '{}' within this VM config", mac));
+        }
+    }
+
+    // Check against existing VMs
+    let existing = used_macs(exclude_smac);
+    for mac in &new_macs {
+        for (existing_mac, vm_name) in &existing {
+            if mac == existing_mac {
+                return Err(format!(
+                    "MAC address '{}' is already used by VM '{}'", mac, vm_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Find next available VNC port starting from 12001, step by 2
 fn next_vnc_port() -> u16 {
     let used = used_vnc_ports();
@@ -625,6 +650,9 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
             config["mds"]["local_ipv4"] = serde_json::json!(ip);
         }
     }
+    // Validate MAC address uniqueness before saving
+    validate_mac_uniqueness(&config, None)?;
+
     let config_str = serde_json::to_string(&config).unwrap_or_default();
 
     let mut output = String::new();
@@ -661,6 +689,10 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
 
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
     let config = val.get("config").unwrap_or(&empty_obj);
+
+    // Validate MAC address uniqueness (exclude this VM's own MACs)
+    validate_mac_uniqueness(config, Some(&smac))?;
+
     let config_str = serde_json::to_string(config).unwrap_or_default();
 
     db::update_vm(&smac, &config_str)?;

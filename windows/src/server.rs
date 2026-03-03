@@ -1346,6 +1346,28 @@ async fn sync_dhcp_handler() -> HttpResponse {
     })
 }
 
+// ── MAC address listing ──
+async fn list_macs_handler() -> HttpResponse {
+    let vms = crate::db::list_vms().unwrap_or_default();
+    let mut macs: Vec<serde_json::Value> = Vec::new();
+    for vm in &vms {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+            if let Some(adapters) = cfg.get("network_adapters").and_then(|v| v.as_array()) {
+                for adapter in adapters {
+                    let mac = adapter.get("mac").and_then(|v| v.as_str()).unwrap_or("");
+                    if !mac.is_empty() {
+                        macs.push(serde_json::json!({
+                            "mac": mac.to_lowercase(),
+                            "vm_name": vm.smac,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    HttpResponse::Ok().json(serde_json::json!({ "macs": macs }))
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -1431,6 +1453,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Group routes
             .route("/api/group/list", web::get().to(list_groups_handler))
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))
+            // MAC address routes
+            .route("/api/mac/list", web::get().to(list_macs_handler))
             // DHCP routes
             .route("/api/dhcp/list", web::get().to(list_dhcp_handler))
             .route("/api/dhcp/add", web::post().to(add_dhcp_handler))

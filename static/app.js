@@ -412,11 +412,15 @@ async function executeCreateVm() {
     if (config.disks.length > 0 && !config.disks[0].diskname) {
         config.disks[0].diskname = vmName;
     }
+    // Frontend MAC uniqueness check
+    var macErr = validateMacUniqueness(config, null);
+    if (macErr) { alert(macErr); return; }
     var ok = await apiCall('create-config', {
         smac: vmName,
         config: config,
     });
     if (ok) {
+        loadUsedMacs(); // refresh MAC cache
         // Set group if specified
         var groupName = getCreateFormGroup();
         if (groupName) {
@@ -450,11 +454,15 @@ async function executeUpdateVm() {
     if (config.disks.length > 0 && !config.disks[0].diskname) {
         config.disks[0].diskname = vmName;
     }
+    // Frontend MAC uniqueness check (exclude this VM)
+    var macErr = validateMacUniqueness(config, vmName);
+    if (macErr) { alert(macErr); return; }
     var ok = await apiCall('update-config', {
         smac: vmName,
         config: config,
     });
     if (ok) {
+        loadUsedMacs(); // refresh MAC cache
         // Set group
         var groupName = getCreateFormGroup();
         await setVmGroup(vmName, groupName);
@@ -472,17 +480,72 @@ async function executeUpdateVm() {
         document.getElementById('template-info').innerHTML = '';
         document.getElementById('create-group').value = '';
         document.getElementById('create-group-new').value = '';
+        // Switch to VM List tab after saving
+        switchTab('vmlist');
     }
 }
 
-// Generate random MAC address (52:54:00:xx:xx:xx)
+// ──────────────────────────────────────────
+// MAC Address Uniqueness
+// ──────────────────────────────────────────
+var _allUsedMacs = []; // [{mac, vm_name}]
+
+async function loadUsedMacs() {
+    try {
+        var res = await apiFetch('/api/mac/list');
+        var data = await safeJson(res);
+        _allUsedMacs = (data && data.macs) ? data.macs : [];
+    } catch (e) {
+        _allUsedMacs = [];
+    }
+}
+
+// Generate random MAC address (52:54:00:xx:xx:xx) — avoids collisions with existing MACs
 function genMac() {
     var hex = '0123456789abcdef';
-    var mac = '52:54:00';
-    for (var i = 0; i < 3; i++) {
-        mac += ':' + hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+    var usedSet = {};
+    for (var i = 0; i < _allUsedMacs.length; i++) {
+        usedSet[_allUsedMacs[i].mac] = true;
     }
-    return mac;
+    // Also collect MACs already in the current form
+    var formMacs = document.querySelectorAll('#start-network-adapters .adapter-mac');
+    for (var j = 0; j < formMacs.length; j++) {
+        usedSet[formMacs[j].value.toLowerCase()] = true;
+    }
+    for (var attempt = 0; attempt < 1000; attempt++) {
+        var mac = '52:54:00';
+        for (var k = 0; k < 3; k++) {
+            mac += ':' + hex[Math.floor(Math.random() * 16)] + hex[Math.floor(Math.random() * 16)];
+        }
+        if (!usedSet[mac]) return mac;
+    }
+    // Fallback (extremely unlikely)
+    return '52:54:00:ff:ff:ff';
+}
+
+// Validate MAC uniqueness before submit.
+// excludeVm: when editing, exclude this VM's MACs from the check.
+function validateMacUniqueness(config, excludeVm) {
+    var adapters = config.network_adapters || [];
+    var newMacs = [];
+    for (var i = 0; i < adapters.length; i++) {
+        var mac = (adapters[i].mac || '').toLowerCase().trim();
+        if (!mac) continue;
+        // Check for duplicates within the form
+        if (newMacs.indexOf(mac) !== -1) {
+            return 'Duplicate MAC address "' + mac + '" within this VM config';
+        }
+        newMacs.push(mac);
+    }
+    // Check against all existing VMs
+    for (var j = 0; j < newMacs.length; j++) {
+        for (var k = 0; k < _allUsedMacs.length; k++) {
+            if (newMacs[j] === _allUsedMacs[k].mac && _allUsedMacs[k].vm_name !== excludeVm) {
+                return 'MAC address "' + newMacs[j] + '" is already used by VM "' + _allUsedMacs[k].vm_name + '"';
+            }
+        }
+    }
+    return null; // OK
 }
 
 // Dynamic rows - Network Adapter
@@ -949,11 +1012,15 @@ async function deleteImage(name) {
 }
 
 // Mount ISO
-function executeMountIso() {
-    apiCall('mountiso', {
-        smac: val('mountiso-smac'),
+async function executeMountIso() {
+    var smac = val('mountiso-smac');
+    var ok = await apiCall('mountiso', {
+        smac: smac,
         isoname: val('mountiso-isoname'),
     });
+    if (ok) {
+        await apiCall('reset', { smac: smac });
+    }
 }
 
 // Unmount ISO
@@ -1727,7 +1794,9 @@ async function syncDhcpFromVms() {
 
 // Init
 window.addEventListener('DOMContentLoaded', function() {
-    addNetworkAdapter();
+    loadUsedMacs().then(function() {
+        addNetworkAdapter(); // genMac() now avoids collisions
+    });
     // Load disk list first, then add default disk row (so dropdown is populated)
     loadDiskList().then(function() {
         addDisk();

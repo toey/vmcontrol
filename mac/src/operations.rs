@@ -262,6 +262,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 }
             }
         } else {
+            // Default: NAT (user-mode/SLIRP) networking
             qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
         }
 
@@ -299,7 +300,6 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("ide-cd,drive=cd0,bootindex=0".into());
     }
 
-    // Generate cloud-init seed ISO from MDS config
     // Generate cloud-init seed ISO from MDS config (skip if cloud-init disabled)
     let cloudinit_enabled = cfg.features.cloudinit != "0";
     if cloudinit_enabled {
@@ -406,9 +406,11 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     let pctl_path = get_conf("pctl_path");
     let sock_path = format!("{}/{}", pctl_path, cmd.smac);
     if !std::path::Path::new(&sock_path).exists() {
+        // Monitor socket gone = QEMU exited
         let _ = db::set_vm_status(&cmd.smac, "stopped");
         output.push_str("VM stopped.\n");
     } else {
+        // QEMU still running — guest is shutting down
         output.push_str("ACPI powerdown sent. Guest OS is shutting down (status still 'running').\n");
     }
     Ok(output)
@@ -542,6 +544,71 @@ fn next_ipv4() -> String {
     "10.0.1.10".to_string()
 }
 
+/// Collect all MAC addresses used by all VMs in DB.
+/// Returns Vec<(mac, vm_name)> for error reporting.
+fn used_macs(exclude_smac: Option<&str>) -> Vec<(String, String)> {
+    let mut macs = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Some(exc) = exclude_smac {
+                if vm.smac == exc { continue; }
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(adapters) = cfg.get("network_adapters").and_then(|a| a.as_array()) {
+                    for adapter in adapters {
+                        if let Some(mac) = adapter.get("mac").and_then(|m| m.as_str()) {
+                            if !mac.is_empty() {
+                                macs.push((mac.to_lowercase(), vm.smac.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    macs
+}
+
+/// Validate that MAC addresses in a config are unique across all VMs.
+/// exclude_smac: if updating a VM, exclude its own MACs from the check.
+fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str>) -> Result<(), String> {
+    let new_macs: Vec<String> = config
+        .get("network_adapters")
+        .and_then(|a| a.as_array())
+        .map(|adapters| {
+            adapters.iter()
+                .filter_map(|a| a.get("mac").and_then(|m| m.as_str()))
+                .filter(|m| !m.is_empty())
+                .map(|m| m.to_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if new_macs.is_empty() { return Ok(()); }
+
+    // Check for duplicates within the new config itself
+    let mut seen = std::collections::HashSet::new();
+    for mac in &new_macs {
+        if !seen.insert(mac.clone()) {
+            return Err(format!("Duplicate MAC address '{}' within this VM config", mac));
+        }
+    }
+
+    // Check against existing VMs
+    let existing = used_macs(exclude_smac);
+    for mac in &new_macs {
+        for (existing_mac, vm_name) in &existing {
+            if mac == existing_mac {
+                return Err(format!(
+                    "MAC address '{}' is already used by VM '{}'", mac, vm_name
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Find next available VNC port starting from 12001, step by 2
 fn next_vnc_port() -> u16 {
     let used = used_vnc_ports();
@@ -583,6 +650,9 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
             config["mds"]["local_ipv4"] = serde_json::json!(ip);
         }
     }
+    // Validate MAC address uniqueness before saving
+    validate_mac_uniqueness(&config, None)?;
+
     let config_str = serde_json::to_string(&config).unwrap_or_default();
 
     let mut output = String::new();
@@ -619,6 +689,10 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
 
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
     let config = val.get("config").unwrap_or(&empty_obj);
+
+    // Validate MAC address uniqueness (exclude this VM's own MACs)
+    validate_mac_uniqueness(config, Some(&smac))?;
+
     let config_str = serde_json::to_string(config).unwrap_or_default();
 
     db::update_vm(&smac, &config_str)?;
