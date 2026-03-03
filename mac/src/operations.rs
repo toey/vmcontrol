@@ -5,6 +5,27 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
+/// Check if an ISO is mounted by any running VM — returns Err with VM name if so
+pub fn check_iso_not_mounted(iso_name: &str) -> Result<(), String> {
+    use crate::api_helpers::qemu_monitor_cmd;
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if vm.status != "running" {
+                continue;
+            }
+            if let Ok(info) = qemu_monitor_cmd(&vm.smac, "info block") {
+                if info.contains(iso_name) {
+                    return Err(format!(
+                        "ISO '{}' is currently mounted on running VM '{}' — unmount it first",
+                        iso_name, vm.smac
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate VM name — only alphanumeric, underscore, dash allowed
 fn validate_vm_name(name: &str) -> Result<(), String> {
     if name.is_empty() {

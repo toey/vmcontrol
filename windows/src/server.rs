@@ -621,6 +621,15 @@ async fn delete_iso_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
         });
     }
 
+    // Check if ISO is mounted by any running VM
+    if let Err(e) = operations::check_iso_not_mounted(name) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        });
+    }
+
     let iso_path = get_conf("iso_path");
     let path = format!("{}\\{}", iso_path, name);
 
