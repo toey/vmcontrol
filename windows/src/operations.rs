@@ -5,6 +5,22 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
+/// Validate VM name — only alphanumeric, underscore, dash allowed
+fn validate_vm_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("VM name is required".into());
+    }
+    if name.len() > 255 {
+        return Err("VM name too long (max 255 chars)".into());
+    }
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
+            return Err(format!("Invalid character '{}' in VM name — only English letters, numbers, underscore and dash allowed", c));
+        }
+    }
+    Ok(())
+}
+
 /// Check if a disk is owned by a running VM — returns Err if so
 pub fn check_disk_not_in_use(disk_name: &str) -> Result<(), String> {
     if let Ok(disks) = db::list_disks() {
@@ -705,7 +721,12 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
     if smac.is_empty() {
         return Err("VM-NAME is required".into());
     }
-    sanitize_name(&smac)?;
+    validate_vm_name(&smac)?;
+
+    // Check VM name uniqueness
+    if db::get_vm(&smac).is_ok() {
+        return Err(format!("VM name '{}' already exists", smac));
+    }
 
     // Extract the VM config + auto-assign VNC port
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
@@ -763,7 +784,7 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
     if smac.is_empty() {
         return Err("VM-NAME is required".into());
     }
-    sanitize_name(&smac)?;
+    validate_vm_name(&smac)?;
 
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
     let config = val.get("config").unwrap_or(&empty_obj);
