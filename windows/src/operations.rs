@@ -472,6 +472,14 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
+
+    // Must stop VM before deleting
+    if let Ok(vm) = db::get_vm(&cmd.smac) {
+        if vm.status == "running" {
+            return Err(format!("VM '{}' is running — stop the VM first", cmd.smac));
+        }
+    }
+
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);
     // Clear disk owners for this VM (disks remain, just unassigned)
