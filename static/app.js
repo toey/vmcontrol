@@ -1882,6 +1882,7 @@ async function addDhcpLease() {
     var vmName = document.getElementById('dhcp-vm-name').value.trim();
     if (!mac) { alert('MAC address is required'); return; }
     if (!ip) { alert('IP address is required'); return; }
+    var statusEl = document.getElementById('status-indicator');
     try {
         var response = await apiFetch('/api/dhcp/add', {
             method: 'POST',
@@ -1889,7 +1890,8 @@ async function addDhcpLease() {
             body: JSON.stringify({ mac: mac, ip: ip, hostname: hostname, vm_name: vmName })
         });
         var result = await safeJson(response);
-        showOutput(result);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
         if (result.success) {
             document.getElementById('dhcp-mac').value = '';
             document.getElementById('dhcp-ip').value = '';
@@ -1898,12 +1900,14 @@ async function addDhcpLease() {
             loadDhcpTable();
         }
     } catch (err) {
-        showOutput({ success: false, message: err.message });
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
     }
 }
 
 async function deleteDhcpLease(mac) {
     if (!confirm('Delete DHCP lease for ' + mac + '?')) return;
+    var statusEl = document.getElementById('status-indicator');
     try {
         var response = await apiFetch('/api/dhcp/delete', {
             method: 'POST',
@@ -1911,10 +1915,12 @@ async function deleteDhcpLease(mac) {
             body: JSON.stringify({ mac: mac })
         });
         var result = await safeJson(response);
-        showOutput(result);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
         loadDhcpTable();
     } catch (err) {
-        showOutput({ success: false, message: err.message });
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
     }
 }
 
@@ -1926,6 +1932,9 @@ function promoteDhcpLease(mac, ip, hostname, vmName) {
 }
 
 async function syncDhcpFromVms() {
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Syncing DHCP leases from VM configs...';
     try {
         var response = await apiFetch('/api/dhcp/sync', {
             method: 'POST',
@@ -1933,10 +1942,12 @@ async function syncDhcpFromVms() {
             body: '{}'
         });
         var result = await safeJson(response);
-        showOutput(result);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
         loadDhcpTable();
     } catch (err) {
-        showOutput({ success: false, message: err.message });
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
     }
 }
 
