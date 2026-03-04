@@ -120,6 +120,7 @@
 
         let rfb = null;
         window._rfb = null;  // expose for debugging/paste
+        window._vncSmac = null;  // resolved VM name (from token or smac param)
 
         // API key helper — read from localStorage (shared with main app)
         function getApiKey() {
@@ -218,8 +219,7 @@
         };
 
         window.doReset = async function() {
-            var params = new URLSearchParams(window.location.search);
-            var smac = params.get('smac');
+            var smac = window._vncSmac;
             if (!smac) {
                 smac = prompt('Enter VM-NAME:');
                 if (!smac) return;
@@ -260,8 +260,7 @@
         };
 
         window.doMountIso = async function() {
-            var params = new URLSearchParams(window.location.search);
-            var smac = params.get('smac');
+            var smac = window._vncSmac;
             if (!smac) { alert('No VM-NAME'); return; }
             var iso = document.getElementById('iso-select').value;
             if (!iso) { alert('Select an ISO first'); return; }
@@ -284,8 +283,7 @@
         };
 
         window.doUnmountIso = async function() {
-            var params = new URLSearchParams(window.location.search);
-            var smac = params.get('smac');
+            var smac = window._vncSmac;
             if (!smac) { alert('No VM-NAME'); return; }
             setStatus('Unmounting...', 'status-connecting');
             try {
@@ -312,25 +310,58 @@
             setTimeout(function() { if (rfb) rfb.focus(); }, 150);
         });
 
+        // Helper: set up VNC page after resolving VM info
+        function setupVm(smac, vncPort, vmStatus) {
+            window._vncSmac = smac;
+            document.getElementById('vnc-vm-name').textContent = smac;
+            document.title = smac + ' — VM Console';
+            if (vncPort) {
+                document.getElementById('vnc-port').textContent = vncPort;
+            }
+            if (vmStatus === 'running' && vncPort) {
+                setTimeout(doConnect, 300);
+            } else if (!vncPort) {
+                setStatus('No VNC port for ' + smac, 'status-disconnected');
+            } else {
+                setStatus('VM is stopped', 'status-disconnected');
+            }
+        }
+
         // Load ISO list on page load
         loadIsoList();
 
         // Set VNC host to current page hostname
         document.getElementById('vnc-host').textContent = window.location.hostname || 'localhost';
 
-        // Fetch VNC port from smac, then auto-connect
+        // Parse URL params
         var params = new URLSearchParams(window.location.search);
+        var token = params.get('token');
         var smac = params.get('smac');
 
         if (params.get('host')) {
             document.getElementById('vnc-host').textContent = params.get('host');
         }
 
-        if (smac) {
-            document.getElementById('vnc-vm-name').textContent = smac;
-            document.title = smac + ' — VM Console';
-
-            // Fetch VM config to get vnc_port
+        if (token) {
+            // --- Token flow: resolve one-time token (no API key needed) ---
+            (async function() {
+                try {
+                    setStatus('Resolving token...', 'status-connecting');
+                    var res = await fetch('/api/vnc/resolve/' + encodeURIComponent(token));
+                    if (!res.ok) {
+                        var err = await res.json().catch(function() { return {}; });
+                        setStatus('Token invalid or expired: ' + (err.message || res.status), 'status-disconnected');
+                        return;
+                    }
+                    var data = await res.json();
+                    // data = { smac, vnc_port, status }
+                    setupVm(data.smac, data.vnc_port, data.status);
+                } catch(e) {
+                    setStatus('Token error: ' + e.message, 'status-disconnected');
+                }
+            })();
+        } else if (smac) {
+            // --- Legacy smac flow: fetch VM info with API key ---
             (async function() {
                 try {
                     setStatus('Loading VM info...', 'status-connecting');
@@ -347,16 +378,7 @@
                             port = cfg.vnc_port || 0;
                         } catch(e) {}
                     }
-                    if (!port) {
-                        setStatus('No VNC port for ' + smac, 'status-disconnected');
-                        return;
-                    }
-                    document.getElementById('vnc-port').textContent = port;
-                    if (vm.status === 'running') {
-                        setTimeout(doConnect, 300);
-                    } else {
-                        setStatus('VM is stopped', 'status-disconnected');
-                    }
+                    setupVm(smac, port, vm.status);
                 } catch(e) {
                     setStatus('Error: ' + e.message, 'status-disconnected');
                 }

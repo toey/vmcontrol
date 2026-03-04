@@ -1468,7 +1468,22 @@ function getVmVncPort(smac) {
 async function vmVncStart(smac) {
     var port = getVmVncPort(smac);
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
-    // QEMU has built-in WebSocket VNC — just open the console directly
+    // Generate one-time VNC token
+    try {
+        var response = await apiFetch('/api/vnc/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ smac: smac }),
+        });
+        var data = await safeJson(response);
+        if (data && data.success && data.token) {
+            window._vncActive[smac] = true;
+            loadVmListTable();
+            window.open('/vnc.html?token=' + encodeURIComponent(data.token), '_blank');
+            return;
+        }
+    } catch (e) {}
+    // Fallback if token generation fails
     window._vncActive[smac] = true;
     loadVmListTable();
     window.open('/vnc.html?smac=' + encodeURIComponent(smac), '_blank');
@@ -1859,7 +1874,7 @@ async function loadVmListTable() {
                 actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
 
                 var nameCell = vm.status === 'running'
-                    ? '<a href="/vnc.html?smac=' + encodeURIComponent(vm.smac) + '" class="vm-name-link" target="_blank">' + escapeHtml(vm.smac) + '</a>'
+                    ? '<a href="javascript:void(0)" class="vm-name-link" onclick="vmVncStart(\'' + vm.smac.replace(/'/g, "\\'") + '\')">' + escapeHtml(vm.smac) + '</a>'
                     : escapeHtml(vm.smac);
 
                 html += '<tr>' +

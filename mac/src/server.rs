@@ -1,6 +1,7 @@
 use actix_files as fs;
 use actix_web::{dev, middleware, web, App, HttpResponse, HttpServer};
 use actix_web::web::Bytes;
+use std::collections::HashMap;
 use std::future::{ready, Future, Ready};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -13,6 +14,16 @@ use crate::operations;
 
 /// Shared API key state for runtime updates
 pub type SharedApiKey = Arc<Mutex<String>>;
+
+/// One-time VNC access token
+#[derive(Clone)]
+pub struct VncToken {
+    smac: String,
+    created: std::time::Instant,
+}
+
+/// Shared VNC token store
+pub type VncTokenStore = Arc<Mutex<HashMap<String, VncToken>>>;
 
 // ──────────────────────────────────────────
 // API Key Authentication Middleware
@@ -69,9 +80,12 @@ where
                 return svc.call(req).await;
             }
 
-            // Skip auth for static files and EC2 metadata endpoints
+            // Skip auth for static files, EC2 metadata endpoints, and VNC token resolve
             let path = req.path().to_string();
             if !path.starts_with("/api/") {
+                return svc.call(req).await;
+            }
+            if path.starts_with("/api/vnc/resolve/") {
                 return svc.call(req).await;
             }
 
@@ -333,6 +347,124 @@ async fn vnc_start_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
 
 async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "vnc_stop", operations::vnc_stop).await
+}
+
+/// Generate a one-time VNC access token for a VM
+async fn vnc_token_handler(
+    body: web::Json<serde_json::Value>,
+    store: web::Data<VncTokenStore>,
+) -> HttpResponse {
+    let smac = match body.get("smac").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'smac' field".into(),
+                output: None,
+            });
+        }
+    };
+
+    // Verify VM exists
+    if let Err(e) = crate::db::get_vm(&smac) {
+        return HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        });
+    }
+
+    // Generate random token
+    let token = {
+        use std::io::Read;
+        let mut bytes = [0u8; 24];
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let _ = f.read_exact(&mut bytes);
+        } else {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            bytes[..16].copy_from_slice(&ts.to_le_bytes());
+        }
+        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    };
+
+    // Purge expired tokens (older than 5 minutes) and store new one
+    {
+        let mut map = store.lock().unwrap();
+        let now = std::time::Instant::now();
+        map.retain(|_, v| now.duration_since(v.created).as_secs() < 300);
+        map.insert(token.clone(), VncToken {
+            smac: smac.clone(),
+            created: now,
+        });
+    }
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "token": token,
+    }))
+}
+
+/// Resolve and consume a one-time VNC token — returns VM info for connecting
+async fn vnc_resolve_handler(
+    path: web::Path<String>,
+    store: web::Data<VncTokenStore>,
+) -> HttpResponse {
+    let token = path.into_inner();
+
+    // Remove token (one-time use)
+    let vnc_token = {
+        let mut map = store.lock().unwrap();
+        map.remove(&token)
+    };
+
+    let vnc_token = match vnc_token {
+        Some(t) => {
+            // Check expiry (5 minutes)
+            if t.created.elapsed().as_secs() > 300 {
+                return HttpResponse::Unauthorized().json(ApiResponse {
+                    success: false,
+                    message: "Token expired".into(),
+                    output: None,
+                });
+            }
+            t
+        }
+        None => {
+            return HttpResponse::Unauthorized().json(ApiResponse {
+                success: false,
+                message: "Invalid or already used token".into(),
+                output: None,
+            });
+        }
+    };
+
+    // Get VM info
+    let vm = match crate::db::get_vm(&vnc_token.smac) {
+        Ok(v) => v,
+        Err(e) => {
+            return HttpResponse::NotFound().json(ApiResponse {
+                success: false,
+                message: e,
+                output: None,
+            });
+        }
+    };
+
+    let vnc_port = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+        cfg.get("vnc_port").and_then(|v| v.as_u64()).unwrap_or(0)
+    } else {
+        0
+    };
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "smac": vnc_token.smac,
+        "vnc_port": vnc_port,
+        "status": vm.status,
+    }))
 }
 
 /// List VMs — auto-backfill VNC ports in a single pass
@@ -1912,6 +2044,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     // Shared API key state for runtime updates
     let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));
 
+    // Shared VNC token store (one-time tokens)
+    let vnc_tokens: VncTokenStore = Arc::new(Mutex::new(HashMap::new()));
+
     // Cleanup stale VM statuses — if DB says "running" but QEMU is not actually running, set to "stopped"
     {
         let pctl_path = get_conf("pctl_path");
@@ -1958,11 +2093,13 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
 
     // Main control panel + MDS on main port
     let api_key_for_server = shared_api_key.clone();
+    let vnc_tokens_for_server = vnc_tokens.clone();
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .wrap(ApiKeyAuth(api_key_for_server.clone()))
             .app_data(web::Data::new(api_key_for_server.clone()))
+            .app_data(web::Data::new(vnc_tokens_for_server.clone()))
             // Allow up to 4GB uploads for ISO files
             .app_data(web::PayloadConfig::new(4_294_967_296))
             // API key management routes
@@ -2039,6 +2176,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))
+            .route("/api/vnc/token", web::post().to(vnc_token_handler))
+            .route("/api/vnc/resolve/{token}", web::get().to(vnc_resolve_handler))
             // MDS routes
             .configure(mds::configure_mds_routes)
             // Static files (must be last - catch-all)
