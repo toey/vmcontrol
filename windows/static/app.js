@@ -383,7 +383,7 @@ function collectVmConfig() {
             'iops-total-max': row.querySelector('.disk-iops-total-max').value,
             'iops-total-max-length': row.querySelector('.disk-iops-total-max-length').value,
         };
-    });
+    }).filter(function(d) { return d.diskname; }); // filter out empty disk selections
 
     return {
         cpu: {
@@ -405,10 +405,6 @@ async function executeCreateVm() {
         return;
     }
     var config = collectVmConfig();
-    // Set first disk's diskname to vmName if empty
-    if (config.disks.length > 0 && !config.disks[0].diskname) {
-        config.disks[0].diskname = vmName;
-    }
     // Frontend MAC uniqueness check
     var macErr = validateMacUniqueness(config, null);
     if (macErr) { alert(macErr); return; }
@@ -455,9 +451,6 @@ async function executeUpdateVm() {
         return;
     }
     var config = collectVmConfig();
-    if (config.disks.length > 0 && !config.disks[0].diskname) {
-        config.disks[0].diskname = vmName;
-    }
     // Frontend MAC uniqueness check (exclude this VM)
     var macErr = validateMacUniqueness(config, vmName);
     if (macErr) { alert(macErr); return; }
@@ -571,7 +564,7 @@ function addNetworkAdapter(existing) {
     var vlanOpacity = mode === 'switch' ? '1' : '0.4';
 
     row.innerHTML =
-        '<input class="adapter-netid" placeholder="Net ID" value="' + (existing ? existing.netid : count) + '">' +
+        '<input class="adapter-netid" placeholder="Net ID" value="' + (existing ? existing.netid : count) + '" readonly style="opacity:0.6;cursor:default;">' +
         '<input class="adapter-mac" placeholder="MAC" value="' + (existing ? existing.mac : genMac()) + '">' +
         '<input class="adapter-vlan" placeholder="VLAN" style="opacity:' + vlanOpacity + '" value="' + (existing ? (existing.vlan || '0') : '0') + '">' +
         '<select class="adapter-mode" onchange="onNetModeChange(this)">' +
@@ -605,7 +598,7 @@ function addDisk(selectedValue) {
     var row = document.createElement('div');
     row.className = 'disk-row';
     row.innerHTML =
-        '<input class="disk-diskid" placeholder="Disk ID" value="' + count + '">' +
+        '<input class="disk-diskid" placeholder="Disk ID" value="' + count + '" readonly style="opacity:0.6;cursor:default;">' +
         '<select class="disk-diskname"><option value="">-- select disk --</option></select>' +
         '<input class="disk-iops-total" placeholder="IOPS Total" value="9600">' +
         '<input class="disk-iops-total-max" placeholder="IOPS Max" value="11520">' +
@@ -1600,7 +1593,7 @@ async function editVm(smac) {
                     var row = document.createElement('div');
                     row.className = 'disk-row';
                     row.innerHTML =
-                        '<input class="disk-diskid" placeholder="Disk ID" value="' + (disk.diskid || '0') + '">' +
+                        '<input class="disk-diskid" placeholder="Disk ID" value="' + (disk.diskid || '0') + '" readonly style="opacity:0.6;cursor:default;">' +
                         '<select class="disk-diskname"><option value="">-- select disk --</option></select>' +
                         '<input class="disk-iops-total" placeholder="IOPS Total" value="' + (disk['iops-total'] || '9600') + '">' +
                         '<input class="disk-iops-total-max" placeholder="IOPS Max" value="' + (disk['iops-total-max'] || '11520') + '">' +
