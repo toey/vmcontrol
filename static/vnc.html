@@ -120,6 +120,22 @@
         let rfb = null;
         window._rfb = null;  // expose for debugging/paste
 
+        // API key helper — read from localStorage (shared with main app)
+        function getApiKey() {
+            return localStorage.getItem('vmcontrol_api_key') || '';
+        }
+        function authHeaders(extra) {
+            var h = extra || {};
+            var key = getApiKey();
+            if (key) h['X-API-Key'] = key;
+            return h;
+        }
+        async function apiFetch(url, opts) {
+            opts = opts || {};
+            opts.headers = authHeaders(opts.headers || {});
+            return fetch(url, opts);
+        }
+
         function setStatus(text, cls) {
             var el = document.getElementById('status');
             el.textContent = text;
@@ -210,7 +226,7 @@
             if (!confirm('Reset VM "' + smac + '"?')) return;
             setStatus('Resetting...', 'status-connecting');
             try {
-                var res = await fetch('/api/vm/reset', {
+                var res = await apiFetch('/api/vm/reset', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ smac: smac }),
@@ -229,7 +245,7 @@
         // ISO mount/unmount
         window.loadIsoList = async function() {
             try {
-                var res = await fetch('/api/iso/list');
+                var res = await apiFetch('/api/iso/list');
                 var isos = await res.json();
                 var sel = document.getElementById('iso-select');
                 sel.innerHTML = '<option value="">-- ISO --</option>';
@@ -250,7 +266,7 @@
             if (!iso) { alert('Select an ISO first'); return; }
             setStatus('Mounting ' + iso + '...', 'status-connecting');
             try {
-                var res = await fetch('/api/vm/mountiso', {
+                var res = await apiFetch('/api/vm/mountiso', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ smac: smac, isoname: iso }),
@@ -272,7 +288,7 @@
             if (!smac) { alert('No VM-NAME'); return; }
             setStatus('Unmounting...', 'status-connecting');
             try {
-                var res = await fetch('/api/vm/unmountiso', {
+                var res = await apiFetch('/api/vm/unmountiso', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ smac: smac }),
