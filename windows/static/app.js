@@ -376,12 +376,15 @@ function collectVmConfig() {
 
     var diskRows = document.querySelectorAll('#start-disks .disk-row');
     var disks = Array.from(diskRows).map(function(row) {
+        var presetSel = row.querySelector('.disk-iops-preset');
+        var presetKey = presetSel ? presetSel.value : 'standard';
+        var p = IOPS_PRESETS[presetKey];
         return {
             diskid: row.querySelector('.disk-diskid').value,
             diskname: row.querySelector('.disk-diskname').value,
-            'iops-total': row.querySelector('.disk-iops-total').value,
-            'iops-total-max': row.querySelector('.disk-iops-total-max').value,
-            'iops-total-max-length': row.querySelector('.disk-iops-total-max-length').value,
+            'iops-total': p ? p.total : row.querySelector('.disk-iops-total').value,
+            'iops-total-max': p ? p.max : row.querySelector('.disk-iops-total-max').value,
+            'iops-total-max-length': p ? p.length : row.querySelector('.disk-iops-total-max-length').value,
         };
     }).filter(function(d) { return d.diskname; }); // filter out empty disk selections
 
@@ -405,6 +408,11 @@ async function executeCreateVm() {
         return;
     }
     var config = collectVmConfig();
+    // Require at least one disk
+    if (!config.disks || config.disks.length === 0) {
+        alert('Please select at least one disk');
+        return;
+    }
     // Frontend MAC uniqueness check
     var macErr = validateMacUniqueness(config, null);
     if (macErr) { alert(macErr); return; }
@@ -451,6 +459,11 @@ async function executeUpdateVm() {
         return;
     }
     var config = collectVmConfig();
+    // Require at least one disk
+    if (!config.disks || config.disks.length === 0) {
+        alert('Please select at least one disk');
+        return;
+    }
     // Frontend MAC uniqueness check (exclude this VM)
     var macErr = validateMacUniqueness(config, vmName);
     if (macErr) { alert(macErr); return; }
@@ -591,18 +604,70 @@ function onNetModeChange(selectEl) {
     }
 }
 
+// IOPS Presets — total, max, max_length
+var IOPS_PRESETS = {
+    'low':      { total: '3200',  max: '3840',  length: '60', label: 'Low (3.2K)' },
+    'standard': { total: '9600',  max: '11520', length: '60', label: 'Standard (9.6K)' },
+    'high':     { total: '19200', max: '23040', length: '60', label: 'High (19.2K)' },
+    'ultra':    { total: '38400', max: '46080', length: '60', label: 'Ultra (38.4K)' },
+    'max':      { total: '76800', max: '92160', length: '60', label: 'Max (76.8K)' },
+    'unlimited':{ total: '0',     max: '0',     length: '0',  label: 'Unlimited' },
+};
+
+// Match existing IOPS values to a preset key, or 'custom'
+function matchIopsPreset(total, max, length) {
+    for (var key in IOPS_PRESETS) {
+        var p = IOPS_PRESETS[key];
+        if (p.total === total && p.max === max && p.length === length) return key;
+    }
+    return 'custom';
+}
+
+// Build IOPS select HTML with optional selected key
+function buildIopsSelect(selectedKey) {
+    var html = '';
+    for (var key in IOPS_PRESETS) {
+        html += '<option value="' + key + '"' + (key === selectedKey ? ' selected' : '') + '>' + IOPS_PRESETS[key].label + '</option>';
+    }
+    html += '<option value="custom"' + (selectedKey === 'custom' ? ' selected' : '') + '>Custom...</option>';
+    return html;
+}
+
+// Handle IOPS preset change — show/hide custom inputs
+function onIopsPresetChange(selectEl) {
+    var row = selectEl.closest('.disk-row');
+    var customDiv = row.querySelector('.disk-iops-custom');
+    if (selectEl.value === 'custom') {
+        customDiv.style.display = '';
+    } else {
+        customDiv.style.display = 'none';
+        var p = IOPS_PRESETS[selectEl.value];
+        if (p) {
+            row.querySelector('.disk-iops-total').value = p.total;
+            row.querySelector('.disk-iops-total-max').value = p.max;
+            row.querySelector('.disk-iops-total-max-length').value = p.length;
+        }
+    }
+}
+
 // Dynamic rows - Disk (with dropdown for disk name)
-function addDisk(selectedValue) {
+function addDisk(selectedValue, iopsKey) {
     var container = document.getElementById('start-disks');
     var count = container.querySelectorAll('.disk-row').length;
+    var presetKey = iopsKey || 'standard';
+    var preset = IOPS_PRESETS[presetKey] || IOPS_PRESETS['standard'];
+    var customDisplay = presetKey === 'custom' ? '' : 'display:none;';
     var row = document.createElement('div');
     row.className = 'disk-row';
     row.innerHTML =
         '<input class="disk-diskid" placeholder="Disk ID" value="' + count + '" readonly style="opacity:0.6;cursor:default;">' +
         '<select class="disk-diskname"><option value="">-- select disk --</option></select>' +
-        '<input class="disk-iops-total" placeholder="IOPS Total" value="9600">' +
-        '<input class="disk-iops-total-max" placeholder="IOPS Max" value="11520">' +
-        '<input class="disk-iops-total-max-length" placeholder="Max Length" value="60">' +
+        '<select class="disk-iops-preset" onchange="onIopsPresetChange(this)">' + buildIopsSelect(presetKey) + '</select>' +
+        '<span class="disk-iops-custom" style="' + customDisplay + '">' +
+        '<input class="disk-iops-total" placeholder="IOPS" value="' + preset.total + '" style="width:70px;">' +
+        '<input class="disk-iops-total-max" placeholder="Max" value="' + preset.max + '" style="width:70px;">' +
+        '<input class="disk-iops-total-max-length" placeholder="Len" value="' + preset.length + '" style="width:50px;">' +
+        '</span>' +
         '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
     container.appendChild(row);
     populateDiskSelect(row.querySelector('.disk-diskname'), selectedValue || '');
@@ -1590,14 +1655,22 @@ async function editVm(smac) {
             diskContainer.innerHTML = '';
             if (config.disks && config.disks.length > 0) {
                 config.disks.forEach(function(disk) {
+                    var iTotal = disk['iops-total'] || '9600';
+                    var iMax = disk['iops-total-max'] || '11520';
+                    var iLen = disk['iops-total-max-length'] || '60';
+                    var presetKey = matchIopsPreset(iTotal, iMax, iLen);
+                    var customDisplay = presetKey === 'custom' ? '' : 'display:none;';
                     var row = document.createElement('div');
                     row.className = 'disk-row';
                     row.innerHTML =
                         '<input class="disk-diskid" placeholder="Disk ID" value="' + (disk.diskid || '0') + '" readonly style="opacity:0.6;cursor:default;">' +
                         '<select class="disk-diskname"><option value="">-- select disk --</option></select>' +
-                        '<input class="disk-iops-total" placeholder="IOPS Total" value="' + (disk['iops-total'] || '9600') + '">' +
-                        '<input class="disk-iops-total-max" placeholder="IOPS Max" value="' + (disk['iops-total-max'] || '11520') + '">' +
-                        '<input class="disk-iops-total-max-length" placeholder="Max Length" value="' + (disk['iops-total-max-length'] || '60') + '">' +
+                        '<select class="disk-iops-preset" onchange="onIopsPresetChange(this)">' + buildIopsSelect(presetKey) + '</select>' +
+                        '<span class="disk-iops-custom" style="' + customDisplay + '">' +
+                        '<input class="disk-iops-total" placeholder="IOPS" value="' + iTotal + '" style="width:70px;">' +
+                        '<input class="disk-iops-total-max" placeholder="Max" value="' + iMax + '" style="width:70px;">' +
+                        '<input class="disk-iops-total-max-length" placeholder="Len" value="' + iLen + '" style="width:50px;">' +
+                        '</span>' +
                         '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
                     diskContainer.appendChild(row);
                     populateDiskSelect(row.querySelector('.disk-diskname'), disk.diskname || '');
