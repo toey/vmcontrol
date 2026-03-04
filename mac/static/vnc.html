@@ -100,6 +100,12 @@
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
         <button class="btn-reset" onclick="doReset()">Reset VM</button>
+        <select id="vnc-drive-select" style="min-width:60px;">
+            <option value="cd0">cd0</option>
+            <option value="cd1">cd1</option>
+            <option value="cd2">cd2</option>
+            <option value="cd3">cd3</option>
+        </select>
         <select id="iso-select"><option value="">-- ISO --</option></select>
         <button class="btn-action" onclick="doMountIso()">Mount</button>
         <button class="btn-unmount" onclick="doUnmountIso()">Unmount</button>
@@ -264,12 +270,13 @@
             if (!smac) { alert('No VM-NAME'); return; }
             var iso = document.getElementById('iso-select').value;
             if (!iso) { alert('Select an ISO first'); return; }
-            setStatus('Mounting ' + iso + '...', 'status-connecting');
+            var drive = document.getElementById('vnc-drive-select').value;
+            setStatus('Mounting ' + iso + ' on ' + drive + '...', 'status-connecting');
             try {
                 var res = await apiFetch('/api/vm/mountiso', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ smac: smac, isoname: iso }),
+                    body: JSON.stringify({ smac: smac, isoname: iso, drive: drive }),
                 });
                 var data = await res.json();
                 if (data.success) {
@@ -285,12 +292,13 @@
         window.doUnmountIso = async function() {
             var smac = window._vncSmac;
             if (!smac) { alert('No VM-NAME'); return; }
-            setStatus('Unmounting...', 'status-connecting');
+            var drive = document.getElementById('vnc-drive-select').value;
+            setStatus('Unmounting ' + drive + '...', 'status-connecting');
             try {
                 var res = await apiFetch('/api/vm/unmountiso', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ smac: smac }),
+                    body: JSON.stringify({ smac: smac, drive: drive }),
                 });
                 var data = await res.json();
                 if (data.success) {

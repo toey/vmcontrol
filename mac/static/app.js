@@ -1293,6 +1293,7 @@ async function executeMountIso() {
     var ok = await apiCall('mountiso', {
         smac: smac,
         isoname: val('mountiso-isoname'),
+        drive: val('mountiso-drive'),
     });
     if (ok) {
         await apiCall('reset', { smac: smac });
@@ -1303,6 +1304,7 @@ async function executeMountIso() {
 function executeUnmountIso() {
     apiCall('unmountiso', {
         smac: val('mountiso-smac'),
+        drive: val('mountiso-drive'),
     });
 }
 

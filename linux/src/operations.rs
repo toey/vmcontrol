@@ -618,21 +618,21 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
 
-    // CDROM — named drive "cd0" for runtime ISO mount/unmount via monitor
-    // bootindex=0 so UEFI/BIOS tries CD first, then falls through to disk
-    if is_aarch64 {
-        // aarch64 virt has no IDE — use virtio-scsi controller + scsi-cd
-        qemu_args.push("-device".into());
-        qemu_args.push("virtio-scsi-pci,id=scsi0".into());
+    // CDROM — 4 named drives "cd0"–"cd3" for runtime ISO mount/unmount via monitor
+    // bootindex=0 on cd0 so UEFI/BIOS tries CD first, then falls through to disk
+    // Use virtio-scsi controller for both architectures (avoids IDE slot limits)
+    qemu_args.push("-device".into());
+    qemu_args.push("virtio-scsi-pci,id=scsi0".into());
+    for i in 0..4u8 {
+        let drive_id = format!("cd{}", i);
         qemu_args.push("-drive".into());
-        qemu_args.push("if=none,id=cd0,media=cdrom".into());
+        qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
         qemu_args.push("-device".into());
-        qemu_args.push("scsi-cd,drive=cd0,bootindex=0".into());
-    } else {
-        qemu_args.push("-drive".into());
-        qemu_args.push("if=none,id=cd0,media=cdrom".into());
-        qemu_args.push("-device".into());
-        qemu_args.push("ide-cd,drive=cd0,bootindex=0".into());
+        if i == 0 {
+            qemu_args.push(format!("scsi-cd,drive={},bootindex=0", drive_id));
+        } else {
+            qemu_args.push(format!("scsi-cd,drive={}", drive_id));
+        }
     }
 
     // Generate cloud-init seed ISO from MDS config (skip if cloud-init disabled)
@@ -1255,15 +1255,15 @@ pub fn mountiso(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     sanitize_name(&cmd.isoname)?;
-    let output = send_cmd_pctl("mountiso", &format!("{} {}", cmd.smac, cmd.isoname));
+    let output = send_cmd_pctl("mountiso", &format!("{} {} {}", cmd.smac, cmd.isoname, cmd.drive));
     Ok(output)
 }
 
 pub fn unmountiso(json_str: &str) -> Result<String, String> {
-    let cmd: SimpleCmd =
+    let cmd: UnmountIsoCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
-    let output = send_cmd_pctl("unmountiso", &cmd.smac);
+    let output = send_cmd_pctl("unmountiso", &format!("{} {}", cmd.smac, cmd.drive));
     Ok(output)
 }
 

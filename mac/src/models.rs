@@ -79,10 +79,21 @@ pub struct SimpleCmd {
     pub smac: String,
 }
 
+fn default_cd0() -> String { "cd0".into() }
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MountIsoCmd {
     pub smac: String,
     pub isoname: String,
+    #[serde(default = "default_cd0")]
+    pub drive: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UnmountIsoCmd {
+    pub smac: String,
+    #[serde(default = "default_cd0")]
+    pub drive: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

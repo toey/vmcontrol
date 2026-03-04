@@ -89,23 +89,36 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
         "reset" => (smac.to_string(), "system_reset".to_string()),
         "powerdown" => (smac.to_string(), "system_powerdown".to_string()),
         "mountiso" => {
-            // smac is "vmname isoname" for mountiso
-            let parts: Vec<&str> = smac.splitn(2, ' ').collect();
+            // smac is "vmname isoname drive" for mountiso
+            let parts: Vec<&str> = smac.splitn(3, ' ').collect();
             if parts.len() < 2 {
                 return "Error: mountiso requires smac and isoname\n".to_string();
             }
             let vm = parts[0].to_string();
             let iso = parts[1];
+            let drive = if parts.len() >= 3 { parts[2] } else { "cd0" };
+            // Validate drive name (cd0–cd3)
+            if !matches!(drive, "cd0" | "cd1" | "cd2" | "cd3") {
+                return format!("Error: invalid drive '{}', must be cd0–cd3\n", drive);
+            }
             // Validate ISO name to prevent monitor command injection
             if let Err(e) = sanitize_name(iso) {
                 return format!("Error: invalid ISO name: {}\n", e);
             }
             let iso_path = get_conf("iso_path");
-            let cmd = format!("change cd0 {}/{}", iso_path, iso);
+            let cmd = format!("change {} {}/{}", drive, iso_path, iso);
             (vm, cmd)
         }
         "unmountiso" => {
-            (smac.to_string(), "eject cd0".to_string())
+            // smac is "vmname drive" for unmountiso
+            let parts: Vec<&str> = smac.splitn(2, ' ').collect();
+            let vm = parts[0].to_string();
+            let drive = if parts.len() >= 2 { parts[1] } else { "cd0" };
+            // Validate drive name (cd0–cd3)
+            if !matches!(drive, "cd0" | "cd1" | "cd2" | "cd3") {
+                return format!("Error: invalid drive '{}', must be cd0–cd3\n", drive);
+            }
+            (vm, format!("eject {}", drive))
         }
         "livemigrate" => {
             let parts: Vec<&str> = smac.splitn(2, ' ').collect();

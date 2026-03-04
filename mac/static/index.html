@@ -169,6 +169,12 @@
         <div id="tab-mountiso" class="tab-panel">
             <h2>Mount ISO</h2>
             <label>VM-NAME <select id="mountiso-smac"><option value="">-- select VM --</option></select></label>
+            <label>Drive <select id="mountiso-drive">
+                <option value="cd0">cd0</option>
+                <option value="cd1">cd1</option>
+                <option value="cd2">cd2</option>
+                <option value="cd3">cd3</option>
+            </select></label>
             <label>ISO <select id="mountiso-isoname"><option value="">-- select ISO --</option></select></label>
             <div class="btn-group">
                 <button class="execute-btn" onclick="executeMountIso()">Mount ISO</button>
