@@ -4,11 +4,15 @@ use actix_web::web::Bytes;
 use std::future::{ready, Future, Ready};
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::config::get_conf;
 use crate::mds;
 use crate::models::ApiResponse;
 use crate::operations;
+
+/// Shared API key state for runtime updates
+pub type SharedApiKey = Arc<Mutex<String>>;
 
 // ──────────────────────────────────────────
 // API Key Authentication Middleware
@@ -16,7 +20,7 @@ use crate::operations;
 
 /// Optional API key authentication.
 /// Set env VMCONTROL_API_KEY to enable. If unset, all requests are allowed.
-pub struct ApiKeyAuth(pub String);
+pub struct ApiKeyAuth(pub SharedApiKey);
 
 impl<S, B> dev::Transform<S, dev::ServiceRequest> for ApiKeyAuth
 where
@@ -39,7 +43,7 @@ where
 
 pub struct ApiKeyAuthMiddleware<S> {
     service: Rc<S>,
-    api_key: String,
+    api_key: SharedApiKey,
 }
 
 impl<S, B> dev::Service<dev::ServiceRequest> for ApiKeyAuthMiddleware<S>
@@ -55,9 +59,11 @@ where
 
     fn call(&self, req: dev::ServiceRequest) -> Self::Future {
         let svc = self.service.clone();
-        let api_key = self.api_key.clone();
+        let api_key_lock = self.api_key.clone();
 
         Box::pin(async move {
+            let api_key = api_key_lock.lock().unwrap().clone();
+
             // No API key configured = no auth required
             if api_key.is_empty() {
                 return svc.call(req).await;
@@ -1827,16 +1833,84 @@ async fn host_ram_handler() -> HttpResponse {
     }))
 }
 
+// ──────────────────────────────────────────
+// API Key Management Handlers
+// ──────────────────────────────────────────
+
+async fn get_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
+    let key = key_state.lock().unwrap().clone();
+    HttpResponse::Ok().json(serde_json::json!({
+        "api_key": key,
+        "enabled": !key.is_empty(),
+    }))
+}
+
+async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
+    // Generate 64-char hex key
+    use std::io::Read;
+    let mut bytes = [0u8; 32];
+    let new_key = if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut bytes);
+        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    } else {
+        // Fallback: use timestamp + random-ish data
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!("{:064x}", ts)
+    };
+
+    // Update shared state
+    {
+        let mut key = key_state.lock().unwrap();
+        *key = new_key.clone();
+    }
+
+    // Save to .api_key file
+    let pctl_path = get_conf("pctl_path");
+    let key_file = format!("{}/.api_key", pctl_path);
+    if let Err(e) = std::fs::write(&key_file, &new_key) {
+        eprintln!("Failed to save API key to {}: {}", key_file, e);
+    }
+
+    // Also update env var for this process
+    std::env::set_var("VMCONTROL_API_KEY", &new_key);
+
+    println!("API key regenerated");
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "api_key": new_key,
+        "message": "API key generated. Update your client with the new key.",
+    }))
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
-    // Read API key from environment (optional authentication)
-    let api_key = std::env::var("VMCONTROL_API_KEY").unwrap_or_default();
+    // Read API key from environment or .api_key file
+    let mut api_key = std::env::var("VMCONTROL_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        // Try reading from .api_key file
+        let pctl_path = get_conf("pctl_path");
+        let key_file = format!("{}/.api_key", pctl_path);
+        if let Ok(key) = std::fs::read_to_string(&key_file) {
+            let key = key.trim().to_string();
+            if !key.is_empty() {
+                api_key = key;
+                println!("API key loaded from {}", key_file);
+            }
+        }
+    }
     if api_key.is_empty() {
         println!("WARNING: No VMCONTROL_API_KEY set — API is unauthenticated");
     } else {
         println!("API key authentication enabled");
     }
+
+    // Shared API key state for runtime updates
+    let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));
 
     // Cleanup stale VM statuses — if DB says "running" but QEMU is not actually running, set to "stopped"
     {
@@ -1883,13 +1957,17 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     }
 
     // Main control panel + MDS on main port
-    let api_key_clone = api_key.clone();
+    let api_key_for_server = shared_api_key.clone();
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
-            .wrap(ApiKeyAuth(api_key_clone.clone()))
+            .wrap(ApiKeyAuth(api_key_for_server.clone()))
+            .app_data(web::Data::new(api_key_for_server.clone()))
             // Allow up to 4GB uploads for ISO files
             .app_data(web::PayloadConfig::new(4_294_967_296))
+            // API key management routes
+            .route("/api/apikey", web::get().to(get_apikey_handler))
+            .route("/api/apikey/generate", web::post().to(generate_apikey_handler))
             // API routes
             .route("/api/vm/start", web::post().to(start_vm))
             .route("/api/vm/stop", web::post().to(stop_vm))

@@ -30,6 +30,84 @@ async function apiFetch(url, opts) {
     return res;
 }
 
+// ──────────────────────────────────────────
+// API Key Management UI
+// ──────────────────────────────────────────
+async function loadApikey() {
+    try {
+        var response = await apiFetch('/api/apikey');
+        var data = await safeJson(response);
+        if (data && data.api_key) {
+            document.getElementById('apikey-display').value = data.api_key;
+            // Sync to localStorage
+            setApiKey(data.api_key);
+        } else {
+            document.getElementById('apikey-display').value = '';
+            document.getElementById('apikey-display').placeholder = '(not set)';
+        }
+    } catch (e) {
+        console.error('Failed to load API key:', e);
+    }
+}
+
+function toggleApikeyVisibility() {
+    var inp = document.getElementById('apikey-display');
+    var btn = document.getElementById('apikey-toggle-btn');
+    if (inp.type === 'password') {
+        inp.type = 'text';
+        btn.textContent = 'Hide';
+    } else {
+        inp.type = 'password';
+        btn.textContent = 'Show';
+    }
+}
+
+function copyApikey() {
+    var inp = document.getElementById('apikey-display');
+    var key = inp.value;
+    if (!key) return;
+    navigator.clipboard.writeText(key).then(function() {
+        var statusEl = document.getElementById('status-indicator');
+        statusEl.className = 'success';
+        statusEl.textContent = 'API key copied to clipboard';
+    }).catch(function() {
+        // Fallback
+        inp.type = 'text';
+        inp.select();
+        document.execCommand('copy');
+        inp.type = 'password';
+    });
+}
+
+async function generateApikey() {
+    if (!confirm('Generate a new API key? The current key will be replaced.\n\nYou will need to update all clients with the new key.')) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Generating new API key...';
+    try {
+        var response = await apiFetch('/api/apikey/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+        });
+        var data = await safeJson(response);
+        if (data && data.success) {
+            // Update localStorage with new key
+            setApiKey(data.api_key);
+            // Update display
+            document.getElementById('apikey-display').value = data.api_key;
+            statusEl.className = 'success';
+            statusEl.textContent = 'API key generated successfully';
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + (data ? data.message : 'Unknown error');
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
+    }
+}
+
 // HTML entity escaping to prevent XSS when inserting server data into innerHTML
 function escapeHtml(str) {
     if (str == null) return '';
@@ -2132,4 +2210,5 @@ window.addEventListener('DOMContentLoaded', function() {
     loadSwitchList();
     loadGroupList();
     loadImageMappings();
+    loadApikey();
 });
