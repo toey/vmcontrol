@@ -5,6 +5,69 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
+/// Get total physical RAM of the host in MB
+pub fn host_total_ram_mb() -> u64 {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: sysctl hw.memsize returns bytes
+        if let Ok(output) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    return bytes / (1024 * 1024);
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: read /proc/meminfo
+        if let Ok(content) = std::fs::read_to_string("/proc/meminfo") {
+            for line in content.lines() {
+                if line.starts_with("MemTotal:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if let Ok(kb) = parts[1].parse::<u64>() {
+                            return kb / 1024;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Fallback / Windows: return 0 (skip validation)
+    0
+}
+
+/// Get total RAM allocated by running VMs (in MB)
+pub fn running_vms_ram_mb(exclude_smac: Option<&str>) -> u64 {
+    let mut total: u64 = 0;
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if vm.status != "running" {
+                continue;
+            }
+            if let Some(exc) = exclude_smac {
+                if vm.smac == exc {
+                    continue;
+                }
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(size) = cfg
+                    .get("memory")
+                    .and_then(|m| m.get("size"))
+                    .and_then(|v| v.as_str())
+                {
+                    total += size.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+    }
+    total
+}
+
 /// VNC port range constants
 pub const VNC_PORT_MIN: u16 = 12001;
 pub const VNC_PORT_MAX: u16 = 13000;
@@ -253,7 +316,32 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push("-display".into());
     qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, vnc_port));
 
-    // Memory
+    // Memory — validate against host RAM
+    let vm_ram: u64 = cfg.memory.size.parse().unwrap_or(0);
+    let host_ram = host_total_ram_mb();
+    if host_ram > 0 && vm_ram > 0 {
+        let used_ram = running_vms_ram_mb(Some(smac));
+        let available = host_ram.saturating_sub(used_ram);
+        if vm_ram > host_ram {
+            return Err(format!(
+                "VM requires {} MB but host only has {} MB total RAM",
+                vm_ram, host_ram
+            ));
+        }
+        // Reserve 1024 MB (1 GB) for host OS
+        let reserved: u64 = 1024;
+        let usable = host_ram.saturating_sub(reserved);
+        if used_ram + vm_ram > usable {
+            return Err(format!(
+                "Not enough RAM: VM needs {} MB, running VMs use {} MB, host has {} MB (reserved {} MB for OS, available {} MB)",
+                vm_ram, used_ram, host_ram, reserved, usable.saturating_sub(used_ram)
+            ));
+        }
+        output_log.push_str(&format!(
+            "ram: {} MB (host {} MB, used {} MB, available {} MB)\n",
+            vm_ram, host_ram, used_ram, available
+        ));
+    }
     qemu_args.push("-m".into());
     qemu_args.push(format!("{}M", cfg.memory.size));
 

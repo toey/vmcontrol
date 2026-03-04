@@ -1686,6 +1686,22 @@ async fn list_internal_network_handler() -> HttpResponse {
     }))
 }
 
+async fn host_ram_handler() -> HttpResponse {
+    let host_ram = operations::host_total_ram_mb();
+    let used_ram = operations::running_vms_ram_mb(None);
+    let reserved: u64 = 1024;
+    let usable = host_ram.saturating_sub(reserved);
+    let available = usable.saturating_sub(used_ram);
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "host_total_mb": host_ram,
+        "reserved_mb": reserved,
+        "usable_mb": usable,
+        "running_vms_mb": used_ram,
+        "available_mb": available,
+    }))
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -1798,6 +1814,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/ip/list", web::get().to(list_ip_pool_handler))
             // Internal network routes (VM-to-VM in NAT)
             .route("/api/internal-network", web::get().to(list_internal_network_handler))
+            // Host resource info
+            .route("/api/host/ram", web::get().to(host_ram_handler))
             // DHCP routes
             .route("/api/dhcp/list", web::get().to(list_dhcp_handler))
             .route("/api/dhcp/add", web::post().to(add_dhcp_handler))
