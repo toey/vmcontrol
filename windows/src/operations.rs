@@ -608,9 +608,41 @@ fn used_ipv4s() -> Vec<String> {
     ips
 }
 
+/// Check that an IP is not already used by another VM.
+/// Pass exclude_smac to skip a specific VM (e.g. when updating its own IP).
+pub fn validate_ip_unique(ip: &str, exclude_smac: Option<&str>) -> Result<(), String> {
+    if ip.is_empty() {
+        return Ok(());
+    }
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Some(exc) = exclude_smac {
+                if vm.smac == exc {
+                    continue;
+                }
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(existing_ip) = cfg
+                    .get("mds")
+                    .and_then(|m| m.get("local_ipv4"))
+                    .and_then(|v| v.as_str())
+                {
+                    if existing_ip == ip {
+                        return Err(format!(
+                            "IP '{}' is already assigned to VM '{}'",
+                            ip, vm.smac
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Find next available Local IPv4: 10.0.{subnet}.10
 /// Supports up to 10.0.254.10 (254 subnets) then wraps to 10.1.x.10, etc.
-fn next_ipv4() -> String {
+pub fn next_ipv4() -> String {
     let used = used_ipv4s();
     for major in 0u8..=10 {
         let start_minor = if major == 0 { 1u8 } else { 0u8 };
@@ -738,6 +770,10 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
             }
             config["mds"]["local_ipv4"] = serde_json::json!(ip);
         }
+    }
+    // Validate IP uniqueness
+    if let Some(ip) = config.get("mds").and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()) {
+        validate_ip_unique(ip, None)?;
     }
     // Validate MAC address uniqueness before saving
     validate_mac_uniqueness(&config, None)?;

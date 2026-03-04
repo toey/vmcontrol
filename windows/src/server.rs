@@ -218,6 +218,14 @@ async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json
                         output: None,
                     });
                 }
+                // Check IP uniqueness (exclude this VM)
+                if let Err(e) = operations::validate_ip_unique(new_ip, Some(&smac)) {
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: e,
+                        output: None,
+                    });
+                }
             }
 
             // Validate root_password minimum length (if provided)
@@ -1432,6 +1440,51 @@ async fn list_macs_handler() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "macs": macs }))
 }
 
+// ── IP Pool ──
+async fn list_ip_pool_handler() -> HttpResponse {
+    let vms = crate::db::list_vms().unwrap_or_default();
+    let mut assignments: Vec<serde_json::Value> = Vec::new();
+    for vm in &vms {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+            let ip = cfg.get("mds")
+                .and_then(|m| m.get("local_ipv4"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let hostname = cfg.get("mds")
+                .and_then(|m| m.get("hostname_prefix"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !ip.is_empty() {
+                assignments.push(serde_json::json!({
+                    "ip": ip,
+                    "vm_name": vm.smac,
+                    "hostname": hostname,
+                    "status": vm.status,
+                }));
+            }
+        }
+    }
+    // Sort by IP numerically
+    assignments.sort_by(|a, b| {
+        let ip_a = a["ip"].as_str().unwrap_or("");
+        let ip_b = b["ip"].as_str().unwrap_or("");
+        let parse_ip = |ip: &str| -> u32 {
+            ip.split('.').enumerate().fold(0u32, |acc, (i, p)| {
+                acc | ((p.parse::<u32>().unwrap_or(0)) << (8 * (3 - i)))
+            })
+        };
+        parse_ip(ip_a).cmp(&parse_ip(ip_b))
+    });
+
+    let next = operations::next_ipv4();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "assignments": assignments,
+        "total_assigned": assignments.len(),
+        "next_available": next,
+    }))
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -1536,6 +1589,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))
             // MAC address routes
             .route("/api/mac/list", web::get().to(list_macs_handler))
+            // IP pool routes
+            .route("/api/ip/list", web::get().to(list_ip_pool_handler))
             // DHCP routes
             .route("/api/dhcp/list", web::get().to(list_dhcp_handler))
             .route("/api/dhcp/add", web::post().to(add_dhcp_handler))
