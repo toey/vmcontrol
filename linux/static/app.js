@@ -227,6 +227,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'backup') { loadBackupList(); }
         // Auto-load DHCP table when switching to dhcp tab
         if (tab.dataset.tab === 'dhcp') { loadDhcpTable(); }
+        // Auto-load internal network when switching to internal-net tab
+        if (tab.dataset.tab === 'internal-net') { loadInternalNetwork(); }
         // Auto-load switch list when switching to switches tab
         if (tab.dataset.tab === 'switches') { loadSwitchList(); }
     });
@@ -967,6 +969,40 @@ function refreshAllSwitchSelects() {
     selects.forEach(function(sel) { populateSwitchSelect(sel); });
 }
 
+// ======== Internal Network (VM-to-VM) ========
+
+async function loadInternalNetwork() {
+    var infoEl = document.getElementById('internal-net-info');
+    var tbody = document.querySelector('#internal-net-table tbody');
+    if (!infoEl || !tbody) return;
+    infoEl.textContent = 'Loading...';
+    tbody.innerHTML = '';
+    try {
+        var response = await apiFetch('/api/internal-network');
+        var data = await safeJson(response);
+        var members = data.members || [];
+        var total = data.total || 0;
+        var nextIp = data.next_available || '';
+        infoEl.innerHTML = '<strong>Used:</strong> ' + total + ' / 245 &nbsp;&nbsp; <strong>Next available:</strong> ' + (nextIp || 'none') + ' &nbsp;&nbsp; <strong>Subnet:</strong> 192.168.100.0/24';
+        if (members.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;opacity:0.6;">No VMs with internal IP assigned</td></tr>';
+        } else {
+            members.forEach(function(m) {
+                var statusClass = m.status === 'running' ? 'success' : '';
+                var tr = document.createElement('tr');
+                tr.innerHTML = '<td>' + (m.vm_name || '') + '</td>'
+                    + '<td><code>' + (m.internal_ip || '') + '</code></td>'
+                    + '<td><code style="font-size:0.85em;">' + (m.internal_mac || '') + '</code></td>'
+                    + '<td>' + (m.hostname || '') + '</td>'
+                    + '<td><span class="' + statusClass + '">' + (m.status || 'stopped') + '</span></td>';
+                tbody.appendChild(tr);
+            });
+        }
+    } catch (err) {
+        infoEl.textContent = 'Error: ' + err.message;
+    }
+}
+
 // ======== Image Management ========
 
 // Load image list
@@ -1308,6 +1344,32 @@ function getUsedIpv4s(excludeSmac) {
     return used;
 }
 
+// Collect all used Internal IPs (VM-to-VM) from all VMs
+function getUsedInternalIps(excludeSmac) {
+    var used = [];
+    var vms = window._vmList || [];
+    vms.forEach(function(vm) {
+        if (vm.smac === excludeSmac) return;
+        try {
+            var cfg = typeof vm.config === 'string' ? JSON.parse(vm.config) : vm.config;
+            if (cfg && cfg.mds && cfg.mds.internal_ip) {
+                used.push(cfg.mds.internal_ip);
+            }
+        } catch (e) {}
+    });
+    return used;
+}
+
+// Generate a unique Internal IP: 192.168.100.{N} where N starts from 10
+function genUniqueInternalIp(excludeSmac) {
+    var used = getUsedInternalIps(excludeSmac);
+    for (var n = 10; n <= 254; n++) {
+        var ip = '192.168.100.' + n;
+        if (used.indexOf(ip) === -1) return ip;
+    }
+    return '192.168.100.10';
+}
+
 // Generate a unique Local IPv4: 10.0.{N}.10 where N starts from 1
 function genUniqueIpv4(excludeSmac) {
     var used = getUsedIpv4s(excludeSmac);
@@ -1342,7 +1404,9 @@ async function loadMdsConfig() {
             // Auto-generate unique IPv4 if empty or default
             var ipv4 = config.local_ipv4;
             document.getElementById('mds-local-ipv4').value = (!ipv4 || ipv4 === '10.0.0.1') ? genUniqueIpv4(smac) : ipv4;
-            document.getElementById('mds-internal-ip').value = config.internal_ip || '';
+            // Auto-generate unique Internal IP if empty
+            var intIp = config.internal_ip;
+            document.getElementById('mds-internal-ip').value = (!intIp) ? genUniqueInternalIp(smac) : intIp;
             document.getElementById('mds-vlan').value = config.vlan || '0';
             // Default MAC: pull from VM's Network Adapter 0
             var vmMac = '';

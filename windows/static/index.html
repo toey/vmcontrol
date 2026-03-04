@@ -22,6 +22,7 @@
         <button class="tab" data-tab="backup">Backup</button>
         <button class="tab" data-tab="metadata">Metadata</button>
         <button class="tab" data-tab="dhcp">DHCP</button>
+        <button class="tab" data-tab="internal-net">Internal Net</button>
         <button class="tab" data-tab="switches">Switches</button>
     </nav>
 
@@ -273,6 +274,30 @@
                 </div>
             </fieldset>
         </div>
+        <!-- Internal Network (VM-to-VM) -->
+        <div id="tab-internal-net" class="tab-panel">
+            <h2>Internal Network (VM-to-VM)</h2>
+            <p class="form-desc">Shared L2 network (192.168.100.0/24) for NAT VMs to communicate with each other. Each VM automatically gets an internal IP when created.</p>
+            <div class="btn-group" style="margin-bottom:12px;">
+                <button class="execute-btn" onclick="loadInternalNetwork()">Refresh</button>
+            </div>
+            <fieldset>
+                <legend>IP Pool — 192.168.100.0/24</legend>
+                <div id="internal-net-info" style="font-size:0.9em;margin-bottom:8px;"></div>
+                <table id="internal-net-table" style="width:100%;">
+                    <thead>
+                        <tr>
+                            <th>VM Name</th>
+                            <th>Internal IP</th>
+                            <th>MAC</th>
+                            <th>Hostname</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </fieldset>
+        </div>
         <!-- Virtual Network Switches -->
         <div id="tab-switches" class="tab-panel">
             <h2>Virtual Network Switches</h2>
@@ -292,6 +317,6 @@
         <pre id="output">Ready.</pre>
     </section>
 
-    <script src="/app.js?v=8"></script>
+    <script src="/app.js?v=9"></script>
 </body>
 </html>
