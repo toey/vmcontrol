@@ -119,6 +119,7 @@
             <fieldset>
                 <legend>Network Adapters</legend>
                 <div id="start-network-adapters"></div>
+                <div id="bridge-sudo-warning" style="display:none; background:#3d2a00; border:1px solid #7a5500; border-radius:6px; padding:8px 12px; margin:8px 0; font-size:0.85rem; color:#ffcc00;">&#9888; Bridge mode requires elevated privileges (sudo). macOS: vmnet-shared (auto DHCP on 192.168.64.0/24). Linux: tap device.</div>
                 <button type="button" class="btn-add" onclick="addNetworkAdapter()">+ Add Adapter</button>
             </fieldset>
             <fieldset>
@@ -317,6 +318,6 @@
         <pre id="output">Ready.</pre>
     </section>
 
-    <script src="/app.js?v=10"></script>
+    <script src="/app.js?v=11"></script>
 </body>
 </html>

@@ -496,6 +496,65 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     ));
                 }
             }
+        } else if adapter.mode == "bridge" {
+            // Bridge/tap mode — host↔VM bidirectional connectivity (requires sudo)
+            // Validate bridge_iface to prevent command injection
+            if !adapter.bridge_iface.is_empty() {
+                for c in adapter.bridge_iface.chars() {
+                    if !c.is_alphanumeric() && c != '-' && c != '_' {
+                        return Err(format!(
+                            "Invalid bridge interface name '{}' for adapter {}",
+                            adapter.bridge_iface, adapter.netid
+                        ));
+                    }
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                if adapter.bridge_iface.is_empty() {
+                    // vmnet-shared: macOS built-in DHCP (192.168.64.x), host↔VM bidirectional
+                    qemu_args.push(format!("vmnet-shared,id=net{}", adapter.netid));
+                    output_log.push_str("bridge : vmnet-shared (macOS)\n");
+                } else {
+                    // vmnet-bridged: bridge to physical interface (e.g. en0)
+                    qemu_args.push(format!(
+                        "vmnet-bridged,id=net{},ifname={}",
+                        adapter.netid, adapter.bridge_iface
+                    ));
+                    output_log.push_str(&format!(
+                        "bridge : vmnet-bridged ifname={} (macOS)\n",
+                        adapter.bridge_iface
+                    ));
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if adapter.bridge_iface.is_empty() {
+                    let tap_name = format!("tap{}", adapter.netid);
+                    qemu_args.push(format!(
+                        "tap,id=net{},ifname={},script=no,downscript=no",
+                        adapter.netid, tap_name
+                    ));
+                    output_log.push_str(&format!("bridge : tap ifname={} (Linux)\n", tap_name));
+                } else {
+                    qemu_args.push(format!(
+                        "bridge,id=net{},br={}",
+                        adapter.netid, adapter.bridge_iface
+                    ));
+                    output_log.push_str(&format!(
+                        "bridge : bridge br={} (Linux)\n",
+                        adapter.bridge_iface
+                    ));
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            {
+                return Err(format!(
+                    "Bridge networking not supported on this platform for adapter {}",
+                    adapter.netid
+                ));
+            }
         } else {
             // Default: NAT (user-mode/SLIRP) networking with port forwarding
             qemu_args.push(format!("user,id=net{}{}{}", adapter.netid, slirp_opts, hostfwd_opts));
@@ -606,10 +665,25 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("unix:{}/{},server,nowait", pctl_path, ismac));
 
     // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
-    let args_ref: Vec<&str> = qemu_args.iter().map(|s| s.as_str()).collect();
-    output_log.push_str(&format!("QEMU: {} {}\n", qemu_path, qemu_args.join(" ")));
-    let (pid, log_path) = spawn_background(&qemu_path, &args_ref)
-        .map_err(|e| format!("QEMU start error: {}", e))?;
+    // Bridge mode requires sudo for vmnet (macOS) / tap (Linux)
+    let needs_sudo = cfg.network_adapters.iter().any(|a| a.mode == "bridge");
+    let use_sudo = needs_sudo && get_conf_or("bridge_sudo", "true") == "true";
+
+    let (pid, log_path) = if use_sudo {
+        let sudo_path = get_conf_or("bridge_sudo_path", "/usr/bin/sudo");
+        output_log.push_str("SUDO: bridge mode requires elevated privileges\n");
+        let mut sudo_args: Vec<String> = vec![qemu_path.clone()];
+        sudo_args.extend(qemu_args.iter().cloned());
+        output_log.push_str(&format!("QEMU: {} {} {}\n", sudo_path, qemu_path, qemu_args.join(" ")));
+        let sudo_args_ref: Vec<&str> = sudo_args.iter().map(|s| s.as_str()).collect();
+        spawn_background(&sudo_path, &sudo_args_ref)
+            .map_err(|e| format!("QEMU start error (sudo): {}", e))?
+    } else {
+        output_log.push_str(&format!("QEMU: {} {}\n", qemu_path, qemu_args.join(" ")));
+        let args_ref: Vec<&str> = qemu_args.iter().map(|s| s.as_str()).collect();
+        spawn_background(&qemu_path, &args_ref)
+            .map_err(|e| format!("QEMU start error: {}", e))?
+    };
     output_log.push_str(&format!("QEMU started (PID {})\n", pid));
     output_log.push_str(&format!("QEMU log: {}\n", log_path));
 

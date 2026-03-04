@@ -36,6 +36,7 @@ pub struct MemoryInfo {
 
 fn default_net_mode() -> String { "nat".into() }
 fn default_switch_name() -> String { String::new() }
+fn default_bridge_iface() -> String { String::new() }
 fn default_arch() -> String { "x86_64".into() }
 fn default_cloudinit() -> String { "1".into() }
 
@@ -57,6 +58,8 @@ pub struct NetworkAdapter {
     pub mode: String,
     #[serde(default = "default_switch_name")]
     pub switch_name: String,
+    #[serde(default = "default_bridge_iface")]
+    pub bridge_iface: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

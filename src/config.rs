@@ -27,6 +27,8 @@ fn defaults() -> HashMap<String, String> {
     m.insert("edk2_aarch64_bios".into(), "/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into());
     m.insert("ovs_vsctl_path".into(), "/opt/homebrew/bin/ovs-vsctl".into());
     m.insert("internal_mcast_port".into(), "11111".into());
+    m.insert("bridge_sudo".into(), "true".into());
+    m.insert("bridge_sudo_path".into(), "/usr/bin/sudo".into());
     m
 }
 

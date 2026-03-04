@@ -373,6 +373,7 @@ function collectVmConfig() {
             vlan: row.querySelector('.adapter-vlan').value,
             mode: row.querySelector('.adapter-mode').value,
             switch_name: row.querySelector('.adapter-switch') ? row.querySelector('.adapter-switch').value : '',
+            bridge_iface: row.querySelector('.adapter-bridge-iface') ? row.querySelector('.adapter-bridge-iface').value : '',
         };
     });
 
@@ -575,7 +576,9 @@ function addNetworkAdapter(existing) {
 
     var mode = (existing && existing.mode) || 'nat';
     var switchName = (existing && existing.switch_name) || '';
+    var bridgeIface = (existing && existing.bridge_iface) || '';
     var switchDisplay = mode === 'switch' ? '' : 'display:none;';
+    var bridgeDisplay = mode === 'bridge' ? '' : 'display:none;';
     var vlanOpacity = mode === 'switch' ? '1' : '0.4';
 
     row.innerHTML =
@@ -585,25 +588,48 @@ function addNetworkAdapter(existing) {
         '<select class="adapter-mode" onchange="onNetModeChange(this)">' +
             '<option value="nat"' + (mode === 'nat' ? ' selected' : '') + '>NAT</option>' +
             '<option value="switch"' + (mode === 'switch' ? ' selected' : '') + '>Switch</option>' +
+            '<option value="bridge"' + (mode === 'bridge' ? ' selected' : '') + '>Bridge</option>' +
         '</select>' +
         '<select class="adapter-switch" style="' + switchDisplay + '"><option value="">-- switch --</option></select>' +
+        '<input class="adapter-bridge-iface" placeholder="Interface (optional)" style="' + bridgeDisplay + 'max-width:140px;" value="' + escapeHtml(bridgeIface) + '">' +
         '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
     container.appendChild(row);
     populateSwitchSelect(row.querySelector('.adapter-switch'), switchName);
+    updateBridgeWarning();
 }
 
 function onNetModeChange(selectEl) {
     var row = selectEl.closest('.adapter-row');
     var switchSelect = row.querySelector('.adapter-switch');
+    var bridgeInput = row.querySelector('.adapter-bridge-iface');
     var vlanInput = row.querySelector('.adapter-vlan');
     if (selectEl.value === 'switch') {
         switchSelect.style.display = '';
+        if (bridgeInput) bridgeInput.style.display = 'none';
         if (vlanInput) vlanInput.style.opacity = '1';
-    } else {
+    } else if (selectEl.value === 'bridge') {
         switchSelect.style.display = 'none';
         switchSelect.value = '';
+        if (bridgeInput) bridgeInput.style.display = '';
+        if (vlanInput) vlanInput.style.opacity = '0.4';
+    } else {
+        // NAT
+        switchSelect.style.display = 'none';
+        switchSelect.value = '';
+        if (bridgeInput) bridgeInput.style.display = 'none';
         if (vlanInput) vlanInput.style.opacity = '0.4';
     }
+    updateBridgeWarning();
+}
+
+function updateBridgeWarning() {
+    var adapters = document.querySelectorAll('#start-network-adapters .adapter-mode');
+    var hasBridge = false;
+    adapters.forEach(function(sel) {
+        if (sel.value === 'bridge') hasBridge = true;
+    });
+    var warn = document.getElementById('bridge-sudo-warning');
+    if (warn) warn.style.display = hasBridge ? '' : 'none';
 }
 
 // IOPS Presets — total, max, max_length
