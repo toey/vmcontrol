@@ -340,6 +340,7 @@ function populateTplImageSelect(selectedValue) {
     var current = selectedValue !== undefined ? selectedValue : sel.value;
     sel.innerHTML = '<option value="">-- no image --</option>';
     disks.forEach(function(d) {
+        if (d.name.indexOf('template-') !== 0) return; // only show template images
         var opt = document.createElement('option');
         opt.value = d.name;
         var sizeInfo = d.disk_size || formatSize(d.size);
@@ -365,7 +366,9 @@ window.uploadTemplateImage = function() {
     xhr.open('POST', '/api/image/upload', true);
     var key = localStorage.getItem('vmcontrol_api_key') || '';
     if (key) xhr.setRequestHeader('X-API-Key', key);
-    xhr.setRequestHeader('X-Filename', file.name.replace(/[^a-zA-Z0-9._-]/g, '_'));
+    var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    if (safeName.indexOf('template-') !== 0) safeName = 'template-' + safeName;
+    xhr.setRequestHeader('X-Filename', safeName);
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
             var pct = Math.round(e.loaded / e.total * 100);
@@ -1041,6 +1044,7 @@ function populateDiskSelect(selectEl, selectedValue) {
     var current = selectedValue || selectEl.value;
     selectEl.innerHTML = '<option value="">-- select disk --</option>';
     disks.forEach(function(d) {
+        if (d.name.indexOf('template-') === 0) return; // skip template images
         // Show disk if: free (no owner) OR owned by the VM being edited OR matches current selection
         if (!d.owner || d.owner === editingVm || d.name === current) {
             var opt = document.createElement('option');
