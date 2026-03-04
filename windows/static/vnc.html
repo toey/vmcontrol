@@ -87,14 +87,7 @@
         .placeholder { text-align: center; color: #484f58; }
         .placeholder h2 { font-size: 24px; margin-bottom: 8px; }
         .placeholder p { font-size: 14px; }
-        .cd-row {
-            display: flex; align-items: center; gap: 6px; padding: 2px 0;
-            font-size: 13px;
-        }
-        .cd-label { color: #8b949e; font-weight: 600; min-width: 30px; }
-        .cd-file { color: #3fb950; font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .cd-row select { min-width: 100px; font-size: 12px; padding: 2px 4px; }
-        .cd-row button { font-size: 11px; padding: 2px 8px; }
+        .cd-file { color: #3fb950; font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
     </style>
 </head>
 <body>
@@ -108,7 +101,10 @@
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
         <button class="btn-reset" onclick="doReset()">Reset VM</button>
-        <div id="cd-drives" style="display:flex;flex-direction:column;gap:2px;"></div>
+        <select id="cd-drive-sel" style="min-width:60px;" onchange="window.onDriveSelChange()">
+            <option value="cd0">cd0</option><option value="cd1">cd1</option><option value="cd2">cd2</option><option value="cd3">cd3</option>
+        </select>
+        <span id="cd-drive-action"></span>
         <button onclick="doSendCtrlAltDel()" style="background:#6e40c9;color:#fff;">Ctrl+Alt+Del</button>
         <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
@@ -268,25 +264,27 @@
             return html;
         }
 
-        // Render per-drive rows based on block info
-        window.renderCdDrives = function(blockInfo) {
-            var container = document.getElementById('cd-drives');
-            var html = '';
-            for (var i = 0; i < 4; i++) {
-                var drive = 'cd' + i;
-                var info = (blockInfo && blockInfo[drive]) || { mounted: false, file: '' };
-                html += '<div class="cd-row">';
-                html += '<span class="cd-label">' + drive + '</span>';
-                if (info.mounted) {
-                    html += '<span class="cd-file" title="' + info.file + '">' + info.file + '</span>';
-                    html += '<button class="btn-unmount" onclick="doUnmountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Unmount</button>';
-                } else {
-                    html += '<select id="iso-sel-' + drive + '" style="min-width:100px;font-size:12px;padding:2px 4px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;">' + isoOptionsHtml() + '</select>';
-                    html += '<button class="btn-action" onclick="doMountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Mount</button>';
-                }
-                html += '</div>';
+        // Store block info globally for drive selector
+        window._blockInfo = null;
+
+        // Update the action area for the currently selected drive
+        window.onDriveSelChange = function() {
+            var drive = document.getElementById('cd-drive-sel').value;
+            var actionSpan = document.getElementById('cd-drive-action');
+            var info = (window._blockInfo && window._blockInfo[drive]) || { mounted: false, file: '' };
+            if (info.mounted) {
+                actionSpan.innerHTML = '<span class="cd-file" title="' + info.file + '">' + info.file + '</span> ' +
+                    '<button class="btn-unmount" onclick="doUnmountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Unmount</button>';
+            } else {
+                actionSpan.innerHTML = '<select id="iso-sel-active" style="min-width:120px;font-size:12px;padding:2px 4px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;">' + isoOptionsHtml() + '</select> ' +
+                    '<button class="btn-action" onclick="doMountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Mount</button>';
             }
-            container.innerHTML = html;
+        };
+
+        // Render drives — save block info and refresh current drive view
+        window.renderCdDrives = function(blockInfo) {
+            window._blockInfo = blockInfo;
+            window.onDriveSelChange();
         };
 
         // Load block info from QEMU and render
@@ -310,7 +308,7 @@
         window.doMountDrive = async function(drive) {
             var smac = window._vncSmac;
             if (!smac) { alert('No VM-NAME'); return; }
-            var sel = document.getElementById('iso-sel-' + drive);
+            var sel = document.getElementById('iso-sel-active');
             var iso = sel ? sel.value : '';
             if (!iso) { alert('Select an ISO for ' + drive); return; }
             setStatus('Mounting ' + iso + ' on ' + drive + '...', 'status-connecting');
@@ -381,8 +379,8 @@
             }
         }
 
-        // Load ISO list on page load, then render empty drives
-        loadIsoList().then(function() { renderCdDrives(null); });
+        // Load ISO list on page load, then render initial drive view
+        loadIsoList().then(function() { onDriveSelChange(); });
 
         // Set VNC host to current page hostname
         document.getElementById('vnc-host').textContent = window.location.hostname || 'localhost';
