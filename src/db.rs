@@ -102,6 +102,16 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB dhcp_leases table init error: {}", e))?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ssh_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            pubkey TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .map_err(|e| format!("DB ssh_keys table init error: {}", e))?;
+
     Ok(conn)
 }
 
@@ -470,5 +480,54 @@ pub fn delete_dhcp_lease(mac: &str) -> Result<(), String> {
     let conn = open_db()?;
     conn.execute("DELETE FROM dhcp_leases WHERE mac = ?1", params![mac])
         .map_err(|e| format!("DB delete dhcp lease error: {}", e))?;
+    Ok(())
+}
+
+// ── SSH Keys ──
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SshKeyRecord {
+    pub id: i64,
+    pub name: String,
+    pub pubkey: String,
+    pub created_at: String,
+}
+
+pub fn insert_ssh_key(name: &str, pubkey: &str) -> Result<i64, String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO ssh_keys (name, pubkey) VALUES (?1, ?2)",
+        params![name, pubkey],
+    )
+    .map_err(|e| format!("DB insert ssh key error: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_ssh_keys() -> Result<Vec<SshKeyRecord>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, pubkey, created_at FROM ssh_keys ORDER BY name ASC")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SshKeyRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                pubkey: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let mut keys = Vec::new();
+    for row in rows {
+        keys.push(row.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(keys)
+}
+
+pub fn delete_ssh_key(id: i64) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM ssh_keys WHERE id = ?1", params![id])
+        .map_err(|e| format!("DB delete ssh key error: {}", e))?;
     Ok(())
 }

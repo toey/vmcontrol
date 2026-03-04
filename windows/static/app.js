@@ -213,8 +213,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-        // Auto-load MDS config when switching to metadata tab
-        if (tab.dataset.tab === 'metadata') { loadMdsConfig(); }
+        // Auto-load MDS config + SSH key list when switching to metadata tab
+        if (tab.dataset.tab === 'metadata') { loadSshKeyList(); loadMdsConfig(); }
         // Auto-load ISO list when switching to mountiso tab
         if (tab.dataset.tab === 'mountiso') { loadIsoList(); }
         // Auto-load VM list when switching to vmlist tab
@@ -266,7 +266,7 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/') || operation.startsWith('group/')) ? '/api/' + operation : '/api/vm/' + operation;
+        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/') || operation.startsWith('group/') || operation.startsWith('sshkey/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
         var response = await apiFetch(apiPath, {
             method: 'POST',
@@ -1408,6 +1408,76 @@ function genUniqueIpv4(excludeSmac) {
     return '10.0.1.10';
 }
 
+// ======== SSH Key Management ========
+
+async function loadSshKeyList() {
+    try {
+        var response = await apiFetch('/api/sshkey/list');
+        var keys = await safeJson(response);
+        window._sshKeyList = keys;
+        var select = document.getElementById('mds-ssh-key-select');
+        if (!select) return;
+        var currentVal = select.value;
+        select.innerHTML = '<option value="">-- paste or select saved key --</option>';
+        keys.forEach(function(k) {
+            var opt = document.createElement('option');
+            opt.value = k.id;
+            opt.textContent = k.name;
+            opt.dataset.pubkey = k.pubkey;
+            select.appendChild(opt);
+        });
+        if (currentVal) select.value = currentVal;
+    } catch (err) {
+        console.error('Failed to load SSH keys:', err);
+    }
+}
+
+function onSshKeySelect() {
+    var select = document.getElementById('mds-ssh-key-select');
+    var input = document.getElementById('mds-ssh-pubkey');
+    if (!select || !input) return;
+    var opt = select.options[select.selectedIndex];
+    if (opt && opt.dataset.pubkey) {
+        input.value = opt.dataset.pubkey;
+    }
+}
+
+function matchSshKeyByPubkey(pubkey) {
+    if (!pubkey || !window._sshKeyList) return '';
+    for (var i = 0; i < window._sshKeyList.length; i++) {
+        if (window._sshKeyList[i].pubkey.trim() === pubkey.trim()) {
+            return String(window._sshKeyList[i].id);
+        }
+    }
+    return '';
+}
+
+async function saveSshKey() {
+    var pubkey = val('mds-ssh-pubkey').trim();
+    if (!pubkey) { alert('Please enter an SSH Public Key first'); return; }
+    var name = prompt('Enter a name for this SSH key:');
+    if (!name || !name.trim()) return;
+    var ok = await apiCall('sshkey/create', { name: name.trim(), pubkey: pubkey });
+    if (ok) {
+        await loadSshKeyList();
+        // Auto-select the newly saved key
+        var matched = matchSshKeyByPubkey(pubkey);
+        if (matched) document.getElementById('mds-ssh-key-select').value = matched;
+    }
+}
+
+async function deleteSshKey() {
+    var select = document.getElementById('mds-ssh-key-select');
+    if (!select || !select.value) { alert('Please select an SSH key to delete'); return; }
+    var name = select.options[select.selectedIndex].textContent;
+    if (!confirm('Delete SSH key "' + name + '"?')) return;
+    var ok = await apiCall('sshkey/delete', { id: parseInt(select.value) });
+    if (ok) {
+        document.getElementById('mds-ssh-pubkey').value = '';
+        await loadSshKeyList();
+    }
+}
+
 async function loadMdsConfig() {
     var smac = val('metadata-smac');
     if (!smac) return;
@@ -1450,6 +1520,10 @@ async function loadMdsConfig() {
             var defMac = config.default_mac;
             document.getElementById('mds-default-mac').value = vmMac || defMac || '';
             document.getElementById('mds-ssh-pubkey').value = config.ssh_pubkey || '';
+            // Auto-match SSH key from saved keys dropdown
+            var matchedKey = matchSshKeyByPubkey(config.ssh_pubkey);
+            var keySelect = document.getElementById('mds-ssh-key-select');
+            if (keySelect) keySelect.value = matchedKey;
             // Don't show saved password — leave field empty (enter new to change)
             document.getElementById('mds-root-password').value = '';
             document.getElementById('mds-userdata-extra').value = config.userdata_extra || '';

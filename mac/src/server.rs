@@ -1296,6 +1296,79 @@ async fn rename_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 }
 
+// ======== SSH Key Management ========
+
+async fn list_ssh_keys_handler() -> HttpResponse {
+    match crate::db::list_ssh_keys() {
+        Ok(keys) => HttpResponse::Ok().json(keys),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list SSH keys: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn create_ssh_key_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'name' field".into(),
+                output: None,
+            });
+        }
+    };
+    let pubkey = match body.get("pubkey").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'pubkey' field".into(),
+                output: None,
+            });
+        }
+    };
+    match crate::db::insert_ssh_key(&name, &pubkey) {
+        Ok(id) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("SSH key '{}' saved (ID: {})", name, id),
+            output: Some(id.to_string()),
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+async fn delete_ssh_key_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let id = match body.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'id' field".into(),
+                output: None,
+            });
+        }
+    };
+    match crate::db::delete_ssh_key(id) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("SSH key {} deleted", id),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
 // ======== DHCP Lease Management ========
 
 async fn list_dhcp_handler() -> HttpResponse {
@@ -1826,6 +1899,10 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/switch/create", web::post().to(create_switch_handler))
             .route("/api/switch/delete", web::post().to(delete_switch_handler))
             .route("/api/switch/rename", web::post().to(rename_switch_handler))
+            // SSH key routes
+            .route("/api/sshkey/list", web::get().to(list_ssh_keys_handler))
+            .route("/api/sshkey/create", web::post().to(create_ssh_key_handler))
+            .route("/api/sshkey/delete", web::post().to(delete_ssh_key_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))
