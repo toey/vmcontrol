@@ -29,21 +29,17 @@ pub fn set_update_status(mode: &str, smac: &str) {
     ));
 }
 
-/// Send a command to QEMU monitor via TCP socket (Windows)
+/// Send a command to QEMU monitor via Unix socket (native Rust)
 pub fn qemu_monitor_cmd(smac: &str, command: &str) -> Result<String, String> {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::os::unix::net::UnixStream;
     use std::time::Duration;
 
     let pctl_path = get_conf("pctl_path");
-    // On Windows, QEMU uses TCP monitor: read port from file
-    let port_file = format!(r"{}\{}.port", pctl_path, smac);
-    let port_str = std::fs::read_to_string(&port_file)
-        .map_err(|e| format!("Monitor port file not found ({}): {}", port_file, e))?;
-    let addr = format!("127.0.0.1:{}", port_str.trim());
+    let sock_path = format!("{}/{}", pctl_path, smac);
 
-    let mut stream = TcpStream::connect(&addr)
-        .map_err(|e| format!("Monitor TCP connect failed ({}): {}", addr, e))?;
+    let mut stream = UnixStream::connect(&sock_path)
+        .map_err(|e| format!("Monitor socket connect failed ({}): {}", sock_path, e))?;
 
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
@@ -105,7 +101,7 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
                 return format!("Error: invalid ISO name: {}\n", e);
             }
             let iso_path = get_conf("iso_path");
-            let cmd = format!("change cd0 {}\\{}", iso_path, iso);
+            let cmd = format!("change cd0 {}/{}", iso_path, iso);
             (vm, cmd)
         }
         "unmountiso" => {
@@ -133,7 +129,7 @@ pub fn send_cmd_pctl(mode: &str, smac: &str) -> String {
             let now = chrono::Local::now();
             let ts = now.format("%Y%m%d_%H%M%S");
             let cmd = format!(
-                "migrate \"exec: {} -c > {}\\{}_{}.gz\"",
+                "migrate \"exec: {} -c > {}/{}_{}.gz\"",
                 gzip_path, live_path, smac, ts
             );
             (smac.to_string(), cmd)

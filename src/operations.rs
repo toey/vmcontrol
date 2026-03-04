@@ -5,6 +5,12 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
+/// VNC port range constants
+pub const VNC_PORT_MIN: u16 = 12001;
+pub const VNC_PORT_MAX: u16 = 13000;
+pub const VNC_PORT_STEP: u16 = 2;
+pub const VNC_PORT_BASE: u16 = 12000;
+
 /// Check if an ISO is mounted by any running VM — returns Err with VM name if so
 pub fn check_iso_not_mounted(iso_name: &str) -> Result<(), String> {
     use crate::api_helpers::qemu_monitor_cmd;
@@ -189,7 +195,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let mut vnc_port = cfg.vnc_port;
     let running_ports = running_vnc_ports(smac);
     if running_ports.contains(&vnc_port) {
-        let new_port = next_free_vnc_port(smac);
+        let new_port = next_free_vnc_port(smac)?;
         output_log.push_str(&format!(
             "VNC port {} already in use by another running VM, reassigned to {}\n",
             vnc_port, new_port
@@ -203,10 +209,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         }
     }
-    if vnc_port <= 12000 || vnc_port > 13000 {
-        return Err(format!("VNC port {} out of valid range (12001-13000)", vnc_port));
+    if vnc_port < VNC_PORT_MIN || vnc_port > VNC_PORT_MAX {
+        return Err(format!("VNC port {} out of valid range ({}-{})", vnc_port, VNC_PORT_MIN, VNC_PORT_MAX));
     }
-    let vnc_display = vnc_port - 12000;
+    let vnc_display = vnc_port - VNC_PORT_BASE;
     qemu_args.push("-display".into());
     qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, vnc_port));
 
@@ -439,10 +445,15 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
-    output.push_str(&send_cmd_pctl("stop", &cmd.smac));
-    // Set status to stopped
-    if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
-        output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+    let pctl_output = send_cmd_pctl("stop", &cmd.smac);
+    output.push_str(&pctl_output);
+    // Only mark stopped if the QEMU monitor command succeeded (no error reported)
+    if !pctl_output.contains("Error:") {
+        if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
+            output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+        }
+    } else {
+        output.push_str("WARNING: stop command may have failed — status not updated\n");
     }
     Ok(output)
 }
@@ -569,14 +580,17 @@ fn running_vnc_ports(exclude_smac: &str) -> Vec<u16> {
 }
 
 /// Find next available VNC port that is not used by any running VM
-fn next_free_vnc_port(exclude_smac: &str) -> u16 {
+fn next_free_vnc_port(exclude_smac: &str) -> Result<u16, String> {
     let running = running_vnc_ports(exclude_smac);
     let all_used = used_vnc_ports();
-    let mut port: u16 = 12001;
-    while (running.contains(&port) || all_used.contains(&port)) && port < 13000 {
-        port += 2;
+    let mut port = VNC_PORT_MIN;
+    while (running.contains(&port) || all_used.contains(&port)) && port < VNC_PORT_MAX {
+        port += VNC_PORT_STEP;
     }
-    port
+    if port >= VNC_PORT_MAX {
+        return Err(format!("No free VNC port available in range {}-{}", VNC_PORT_MIN, VNC_PORT_MAX));
+    }
+    Ok(port)
 }
 
 /// Collect all Local IPv4 addresses used by VMs in DB
@@ -676,14 +690,17 @@ fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str
     Ok(())
 }
 
-/// Find next available VNC port starting from 12001, step by 2
-fn next_vnc_port() -> u16 {
+/// Find next available VNC port starting from VNC_PORT_MIN, step by VNC_PORT_STEP
+fn next_vnc_port() -> Result<u16, String> {
     let used = used_vnc_ports();
-    let mut port: u16 = 12001;
-    while used.contains(&port) && port < 13000 {
-        port += 2;
+    let mut port = VNC_PORT_MIN;
+    while used.contains(&port) && port < VNC_PORT_MAX {
+        port += VNC_PORT_STEP;
     }
-    port
+    if port >= VNC_PORT_MAX {
+        return Err(format!("No free VNC port available in range {}-{}", VNC_PORT_MIN, VNC_PORT_MAX));
+    }
+    Ok(port)
 }
 
 pub fn create_config(json_str: &str) -> Result<String, String> {
@@ -705,7 +722,7 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
     let mut config = val.get("config").unwrap_or(&empty_obj).clone();
     if config.get("vnc_port").is_none() {
-        let port = next_vnc_port();
+        let port = next_vnc_port()?;
         config["vnc_port"] = serde_json::json!(port);
     }
     // Auto-assign unique Local IPv4 if MDS not set or default
@@ -834,7 +851,7 @@ pub fn create_disk(json_str: &str) -> Result<String, String> {
     let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("40G").to_string();
     // Validate size format (number followed by G or M)
     if size.len() < 2
-        || !size.ends_with('G') && !size.ends_with('M')
+        || (!size.ends_with('G') && !size.ends_with('M'))
         || size[..size.len()-1].parse::<u64>().is_err()
     {
         return Err("Invalid disk size (use format like '40G' or '512M')".into());
@@ -875,7 +892,7 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
 
     let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if size.len() < 2
-        || !size.ends_with('G') && !size.ends_with('M')
+        || (!size.ends_with('G') && !size.ends_with('M'))
         || size[..size.len()-1].parse::<u64>().is_err()
     {
         return Err("Invalid disk size (use format like '40G' or '512M')".into());

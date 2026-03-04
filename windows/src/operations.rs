@@ -5,6 +5,12 @@ use crate::mds;
 use crate::models::*;
 use crate::ssh::{run_cmd, sanitize_name, spawn_background, validate_port};
 
+/// VNC port range constants
+pub const VNC_PORT_MIN: u16 = 12001;
+pub const VNC_PORT_MAX: u16 = 13000;
+pub const VNC_PORT_STEP: u16 = 2;
+pub const VNC_PORT_BASE: u16 = 12000;
+
 /// Check if an ISO is mounted by any running VM — returns Err with VM name if so
 pub fn check_iso_not_mounted(iso_name: &str) -> Result<(), String> {
     use crate::api_helpers::qemu_monitor_cmd;
@@ -67,8 +73,8 @@ pub fn check_disk_not_in_use(disk_name: &str) -> Result<(), String> {
 /// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
 fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     let pctl_path = get_conf("pctl_path");
-    let seed_dir = format!("{}\\seed_{}", pctl_path, vm_name);
-    let iso_path = format!("{}\\seed_{}.iso", pctl_path, vm_name);
+    let seed_dir = format!("{}/seed_{}", pctl_path, vm_name);
+    let iso_path = format!("{}/seed_{}.iso", pctl_path, vm_name);
 
     // Create seed directory
     let _ = std::fs::create_dir_all(&seed_dir);
@@ -101,48 +107,24 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     // Generate user-data (cloud-config for NoCloud)
     let user_data = mds::generate_userdata_nocloud(&config);
 
-    // Write files (no network-config -- let SLIRP DHCP handle networking)
-    std::fs::write(format!("{}\\meta-data", seed_dir), &meta_data)
+    // Write files (no network-config — let SLIRP DHCP handle networking)
+    std::fs::write(format!("{}/meta-data", seed_dir), &meta_data)
         .map_err(|e| format!("Failed to write meta-data: {}", e))?;
-    std::fs::write(format!("{}\\user-data", seed_dir), &user_data)
+    std::fs::write(format!("{}/user-data", seed_dir), &user_data)
         .map_err(|e| format!("Failed to write user-data: {}", e))?;
 
-    // Create ISO using oscdimg (Windows ADK) or mkisofs
-    // Use run_cmd (not send_cmd) to avoid cmd /C path mangling
+    // Create ISO using hdiutil (macOS) — safe: no shell involved
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
-    let has_oscdimg = run_cmd("where", &["oscdimg"]).is_ok();
-    let has_mkisofs = run_cmd("where", &["mkisofs"]).is_ok();
-
-    if has_oscdimg {
-        run_cmd("oscdimg", &["-j1", "-lcidata", &seed_dir, &iso_path])
-            .map_err(|e| format!("Failed to create seed ISO: {}", e))?;
-    } else if has_mkisofs {
-        run_cmd("mkisofs", &["-o", &iso_path, "-V", "cidata", "-J", "-R", &seed_dir])
-            .map_err(|e| format!("Failed to create seed ISO: {}", e))?;
-    } else {
-        // Cleanup and return a clear error
-        let _ = std::fs::remove_dir_all(&seed_dir);
-        return Err("No ISO tool found. Install oscdimg (Windows ADK) or mkisofs (cdrtools)".into());
-    }
+    run_cmd("hdiutil", &[
+        "makehybrid", "-iso", "-joliet",
+        "-default-volume-name", "cidata",
+        "-o", &iso_path, &seed_dir,
+    ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
 
     Ok(iso_path)
-}
-
-/// Find a free TCP port starting from `start`, checking up to 100 ports.
-/// Ports in `skip` are excluded (e.g. already allocated to running VMs in DB).
-fn find_free_port(start: u16, skip: &[u16]) -> u16 {
-    for port in start..start.saturating_add(100) {
-        if skip.contains(&port) {
-            continue;
-        }
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-            return port;
-        }
-    }
-    start // fallback
 }
 
 /// Start a QEMU VM from config stored in the database
@@ -170,8 +152,8 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     // Build QEMU arguments safely (no shell involved)
     let mut qemu_args: Vec<String> = Vec::new();
 
-    // Boot options -- aarch64 virt machine uses virtio-gpu instead of -vga std
-    // NOTE: no -daemonize — QEMU's daemonize + websocket VNC is unreliable.
+    // Boot options — aarch64 virt machine uses virtio-gpu instead of -vga std
+    // NOTE: no -daemonize — QEMU's daemonize + websocket VNC crashes on macOS.
     // We use spawn_background() instead to run QEMU in the background.
     if is_aarch64 {
         qemu_args.extend([
@@ -213,7 +195,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let mut vnc_port = cfg.vnc_port;
     let running_ports = running_vnc_ports(smac);
     if running_ports.contains(&vnc_port) {
-        let new_port = next_free_vnc_port(smac);
+        let new_port = next_free_vnc_port(smac)?;
         output_log.push_str(&format!(
             "VNC port {} already in use by another running VM, reassigned to {}\n",
             vnc_port, new_port
@@ -227,10 +209,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         }
     }
-    if vnc_port <= 12000 || vnc_port > 13000 {
-        return Err(format!("VNC port {} out of valid range (12001-13000)", vnc_port));
+    if vnc_port < VNC_PORT_MIN || vnc_port > VNC_PORT_MAX {
+        return Err(format!("VNC port {} out of valid range ({}-{})", vnc_port, VNC_PORT_MIN, VNC_PORT_MAX));
     }
-    let vnc_display = vnc_port - 12000;
+    let vnc_display = vnc_port - VNC_PORT_BASE;
     qemu_args.push("-display".into());
     qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, vnc_port));
 
@@ -249,7 +231,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             disk.iops_total_max_length
         ));
         // auto-create disk if not exists
-        let disk_file = format!("{}\\{}.qcow2", disk_path, disk.diskname);
+        let disk_file = format!("{}/{}.qcow2", disk_path, disk.diskname);
         if !std::path::Path::new(&disk_file).exists() {
             let qemu_img = get_conf("qemu_img_path");
             output_log.push_str(&format!("auto-creating disk: {}\n", disk_file));
@@ -316,6 +298,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
 
         if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
             // Virtual switch mode — QEMU socket multicast with VLAN
+            // (macOS has no OVS kernel module, so we use multicast for L2 switching)
             let vlan_id: u16 = adapter.vlan.parse().unwrap_or(0);
             if vlan_id > 4094 {
                 return Err(format!(
@@ -344,6 +327,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 }
             }
         } else {
+            // Default: NAT (user-mode/SLIRP) networking
             qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
         }
 
@@ -351,12 +335,11 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
     }
 
-    // Machine type -- configurable accelerator (whpx:tcg for Windows)
+    // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
     qemu_args.push("-machine".into());
     qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
-    qemu_args.push("-no-shutdown".into());
 
-    // SMP -- correctly compute total = sockets * cores * threads
+    // SMP — correctly compute total = sockets * cores * threads
     let sockets: u32 = cfg.cpu.sockets.parse().unwrap_or(1);
     let cores: u32 = cfg.cpu.cores.parse().unwrap_or(1);
     let threads: u32 = cfg.cpu.threads.parse().unwrap_or(1);
@@ -365,10 +348,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
 
-    // CDROM -- named drive "cd0" for runtime ISO mount/unmount via monitor
+    // CDROM — named drive "cd0" for runtime ISO mount/unmount via monitor
     // bootindex=0 so UEFI/BIOS tries CD first, then falls through to disk
     if is_aarch64 {
-        // aarch64 virt has no IDE -- use virtio-scsi controller + scsi-cd
+        // aarch64 virt has no IDE — use virtio-scsi controller + scsi-cd
         qemu_args.push("-device".into());
         qemu_args.push("virtio-scsi-pci,id=scsi0".into());
         qemu_args.push("-drive".into());
@@ -407,7 +390,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         };
 
-        // SMBIOS cloud-init hint (x86_64 only -- aarch64 virt doesn't support SMBIOS)
+        // SMBIOS cloud-init hint (x86_64 only — aarch64 virt doesn't support SMBIOS)
         if !is_aarch64 {
             qemu_args.push("-smbios".into());
             qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
@@ -416,18 +399,14 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         output_log.push_str("cloud-init: disabled\n");
     }
 
-    // USB tablet (for mouse) -- aarch64 already has xhci+kbd+tablet from above
+    // USB tablet (for mouse) — aarch64 already has xhci+kbd+tablet from above
     if !is_aarch64 {
         qemu_args.extend(["-usb", "-device", "usb-tablet,bus=usb-bus.0,port=1"].map(String::from));
     }
 
-    // Monitor TCP socket (Windows)
-    let monitor_port = find_free_port(55555, &[]);
+    // Monitor socket
     qemu_args.push("-monitor".into());
-    qemu_args.push(format!("tcp:127.0.0.1:{},server,nowait", monitor_port));
-    // Save monitor port to file so api_helpers can read it
-    let monitor_port_file = format!(r"{}\{}.port", pctl_path, ismac);
-    let _ = std::fs::write(&monitor_port_file, monitor_port.to_string());
+    qemu_args.push(format!("unix:{}/{},server,nowait", pctl_path, ismac));
 
     // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
     let args_ref: Vec<&str> = qemu_args.iter().map(|s| s.as_str()).collect();
@@ -445,7 +424,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     Ok(output_log)
 }
 
-/// Start VM by smac -- loads config from DB
+/// Start VM by smac — loads config from DB
 pub fn start(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
@@ -466,18 +445,15 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
-    let pctl_result = send_cmd_pctl("stop", &cmd.smac);
-    output.push_str(&pctl_result);
-    // Also try taskkill as fallback if monitor failed
-    if pctl_result.contains("Error") || pctl_result.contains("error") {
-        output.push_str("Monitor unavailable, trying taskkill...\n");
-        let _ = run_cmd("taskkill", &["/F", "/IM", "qemu-system-x86_64.exe"]);
-        let _ = run_cmd("taskkill", &["/F", "/IM", "qemu-system-aarch64.exe"]);
-        output.push_str("Sent taskkill for QEMU processes\n");
-    }
-    // Set status to stopped + clear qemu_vnc_port
-    if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
-        output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+    let pctl_output = send_cmd_pctl("stop", &cmd.smac);
+    output.push_str(&pctl_output);
+    // Only mark stopped if the QEMU monitor command succeeded (no error reported)
+    if !pctl_output.contains("Error:") {
+        if let Err(e) = db::set_vm_status(&cmd.smac, "stopped") {
+            output.push_str(&format!("WARNING: DB status update failed: {}\n", e));
+        }
+    } else {
+        output.push_str("WARNING: stop command may have failed — status not updated\n");
     }
     Ok(output)
 }
@@ -498,11 +474,13 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     // ACPI powerdown is async — wait briefly then check if QEMU process exited
     std::thread::sleep(std::time::Duration::from_secs(3));
     let pctl_path = get_conf("pctl_path");
-    let sock_path = format!("{}\\{}", pctl_path, cmd.smac);
+    let sock_path = format!("{}/{}", pctl_path, cmd.smac);
     if !std::path::Path::new(&sock_path).exists() {
+        // Monitor socket gone = QEMU exited
         let _ = db::set_vm_status(&cmd.smac, "stopped");
         output.push_str("VM stopped.\n");
     } else {
+        // QEMU still running — guest is shutting down
         output.push_str("ACPI powerdown sent. Guest OS is shutting down (status still 'running').\n");
     }
     Ok(output)
@@ -534,7 +512,7 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
     Ok(output)
 }
 
-/// List images for a VM -- uses safe directory listing instead of shell
+/// List images for a VM — uses safe directory listing instead of shell
 pub fn listimage(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
@@ -567,25 +545,7 @@ pub fn listimage(json_str: &str) -> Result<String, String> {
     Ok(output)
 }
 
-/// Collect all QEMU VNC display ports (5900+) from running VMs in DB
-fn used_qemu_vnc_ports() -> Vec<u16> {
-    let mut ports = Vec::new();
-    if let Ok(vms) = db::list_vms() {
-        for vm in &vms {
-            if vm.status != "running" {
-                continue;
-            }
-            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
-                if let Some(p) = cfg.get("qemu_vnc_port").and_then(|v| v.as_u64()) {
-                    ports.push(p as u16);
-                }
-            }
-        }
-    }
-    ports
-}
-
-/// Create VM config -- save to DB + assign disk owners
+/// Create VM config — save to DB + assign disk owners
 /// Collect all VNC ports currently used by VMs in DB
 fn used_vnc_ports() -> Vec<u16> {
     let mut ports = Vec::new();
@@ -620,14 +580,17 @@ fn running_vnc_ports(exclude_smac: &str) -> Vec<u16> {
 }
 
 /// Find next available VNC port that is not used by any running VM
-fn next_free_vnc_port(exclude_smac: &str) -> u16 {
+fn next_free_vnc_port(exclude_smac: &str) -> Result<u16, String> {
     let running = running_vnc_ports(exclude_smac);
     let all_used = used_vnc_ports();
-    let mut port: u16 = 12001;
-    while (running.contains(&port) || all_used.contains(&port)) && port < 13000 {
-        port += 2;
+    let mut port = VNC_PORT_MIN;
+    while (running.contains(&port) || all_used.contains(&port)) && port < VNC_PORT_MAX {
+        port += VNC_PORT_STEP;
     }
-    port
+    if port >= VNC_PORT_MAX {
+        return Err(format!("No free VNC port available in range {}-{}", VNC_PORT_MIN, VNC_PORT_MAX));
+    }
+    Ok(port)
 }
 
 /// Collect all Local IPv4 addresses used by VMs in DB
@@ -727,14 +690,17 @@ fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str
     Ok(())
 }
 
-/// Find next available VNC port starting from 12001, step by 2
-fn next_vnc_port() -> u16 {
+/// Find next available VNC port starting from VNC_PORT_MIN, step by VNC_PORT_STEP
+fn next_vnc_port() -> Result<u16, String> {
     let used = used_vnc_ports();
-    let mut port: u16 = 12001;
-    while used.contains(&port) && port < 13000 {
-        port += 2;
+    let mut port = VNC_PORT_MIN;
+    while used.contains(&port) && port < VNC_PORT_MAX {
+        port += VNC_PORT_STEP;
     }
-    port
+    if port >= VNC_PORT_MAX {
+        return Err(format!("No free VNC port available in range {}-{}", VNC_PORT_MIN, VNC_PORT_MAX));
+    }
+    Ok(port)
 }
 
 pub fn create_config(json_str: &str) -> Result<String, String> {
@@ -756,7 +722,7 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
     let mut config = val.get("config").unwrap_or(&empty_obj).clone();
     if config.get("vnc_port").is_none() {
-        let port = next_vnc_port();
+        let port = next_vnc_port()?;
         config["vnc_port"] = serde_json::json!(port);
     }
     // Auto-assign unique Local IPv4 if MDS not set or default
@@ -871,7 +837,7 @@ pub fn backup(json_str: &str) -> Result<String, String> {
     Ok(output)
 }
 
-/// Create a standalone disk -- creates .qcow2 file + saves to SQLite
+/// Create a standalone disk — creates .qcow2 file + saves to SQLite
 pub fn create_disk(json_str: &str) -> Result<String, String> {
     let val: serde_json::Value =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
@@ -885,7 +851,7 @@ pub fn create_disk(json_str: &str) -> Result<String, String> {
     let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("40G").to_string();
     // Validate size format (number followed by G or M)
     if size.len() < 2
-        || !size.ends_with('G') && !size.ends_with('M')
+        || (!size.ends_with('G') && !size.ends_with('M'))
         || size[..size.len()-1].parse::<u64>().is_err()
     {
         return Err("Invalid disk size (use format like '40G' or '512M')".into());
@@ -895,7 +861,7 @@ pub fn create_disk(json_str: &str) -> Result<String, String> {
     let qemu_img = get_conf("qemu_img_path");
     let _ = std::fs::create_dir_all(&disk_path);
 
-    let disk_file = format!("{}\\{}.qcow2", disk_path, name);
+    let disk_file = format!("{}/{}.qcow2", disk_path, name);
     if std::path::Path::new(&disk_file).exists() {
         return Err(format!("Disk '{}' already exists", name));
     }
@@ -926,7 +892,7 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
 
     let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if size.len() < 2
-        || !size.ends_with('G') && !size.ends_with('M')
+        || (!size.ends_with('G') && !size.ends_with('M'))
         || size[..size.len()-1].parse::<u64>().is_err()
     {
         return Err("Invalid disk size (use format like '40G' or '512M')".into());
@@ -935,7 +901,7 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
     let disk_path = get_conf("disk_path");
     let qemu_img = get_conf("qemu_img_path");
 
-    let disk_file = format!("{}\\{}.qcow2", disk_path, name);
+    let disk_file = format!("{}/{}.qcow2", disk_path, name);
     if !std::path::Path::new(&disk_file).exists() {
         return Err(format!("Disk '{}' not found", name));
     }
@@ -957,7 +923,7 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
 // --- VNC operations ---
 
 pub fn vnc_start(json_str: &str) -> Result<String, String> {
-    // QEMU has built-in WebSocket VNC -- this endpoint checks status and returns the actual port.
+    // QEMU has built-in WebSocket VNC — this endpoint checks status and returns the actual port.
     let cmd: VncCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
@@ -966,7 +932,7 @@ pub fn vnc_start(json_str: &str) -> Result<String, String> {
     // Check if VM is running
     let vm = db::get_vm(&cmd.smac)?;
     if vm.status != "running" {
-        return Err(format!("VM '{}' is not running -- start the VM first", cmd.smac));
+        return Err(format!("VM '{}' is not running — start the VM first", cmd.smac));
     }
 
     // Get actual VNC port from saved config
@@ -993,7 +959,7 @@ pub fn vnc_stop(json_str: &str) -> Result<String, String> {
     // Check if VM exists
     let vm = db::get_vm(&cmd.smac)?;
     if vm.status != "running" {
-        return Ok(format!("VM '{}' is already stopped -- VNC is not active\n", cmd.smac));
+        return Ok(format!("VM '{}' is already stopped — VNC is not active\n", cmd.smac));
     }
 
     Ok(format!("VNC for {} will stop when VM stops (built-in QEMU)\n", cmd.smac))

@@ -145,6 +145,13 @@ async fn update_config_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
 
 async fn get_vm_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
     match crate::db::get_vm(&smac) {
         Ok(vm) => HttpResponse::Ok().json(vm),
         Err(e) => HttpResponse::NotFound().json(ApiResponse {
@@ -158,6 +165,13 @@ async fn get_vm_handler(path: web::Path<String>) -> HttpResponse {
 // Per-VM MDS config
 async fn get_vm_mds_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
     match crate::db::get_vm(&smac) {
         Ok(vm) => {
             let config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
@@ -182,10 +196,29 @@ async fn get_vm_mds_handler(path: web::Path<String>) -> HttpResponse {
 
 async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
     match crate::db::get_vm(&smac) {
         Ok(vm) => {
             let mut config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
             let mut new_mds = body.into_inner();
+
+            // Validate local_ipv4 format (if provided)
+            let new_ip = new_mds.get("local_ipv4").and_then(|v| v.as_str()).unwrap_or("");
+            if !new_ip.is_empty() {
+                if let Err(e) = crate::ssh::validate_ip(new_ip) {
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: format!("Invalid local_ipv4: {}", e),
+                        output: None,
+                    });
+                }
+            }
 
             // Validate root_password minimum length (if provided)
             let new_pw = new_mds.get("root_password").and_then(|v| v.as_str()).unwrap_or("");
@@ -264,53 +297,43 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "vnc_stop", operations::vnc_stop).await
 }
 
-/// List VMs -- auto-backfill VNC ports in a single pass
+/// List VMs — auto-backfill VNC ports in a single pass
 async fn list_vms_handler() -> HttpResponse {
     match crate::db::list_vms() {
-        Ok(vms) => {
+        Ok(mut vms) => {
             // Auto-backfill VNC ports for VMs that don't have one
             let mut used_ports: Vec<u16> = Vec::new();
-            let mut need_port: Vec<String> = Vec::new();
-            for vm in &vms {
+            let mut need_port: Vec<usize> = Vec::new();
+            for (i, vm) in vms.iter().enumerate() {
                 if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
                     if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
                         used_ports.push(p as u16);
                     } else {
-                        need_port.push(vm.smac.clone());
+                        need_port.push(i);
                     }
                 } else {
-                    need_port.push(vm.smac.clone());
+                    need_port.push(i);
                 }
             }
 
-            // Assign missing VNC ports
+            // Assign missing VNC ports — update DB and patch in-memory records
             if !need_port.is_empty() {
-                let mut next_port: u16 = 12001;
-                for smac in &need_port {
-                    while used_ports.contains(&next_port) {
-                        next_port += 2;
+                let mut next_port: u16 = operations::VNC_PORT_MIN;
+                for &idx in &need_port {
+                    while used_ports.contains(&next_port) && next_port < operations::VNC_PORT_MAX {
+                        next_port += operations::VNC_PORT_STEP;
                     }
-                    if let Ok(vm) = crate::db::get_vm(smac) {
-                        let mut cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-                        cfg["vnc_port"] = serde_json::json!(next_port);
-                        let _ = crate::db::update_vm(smac, &serde_json::to_string(&cfg).unwrap_or_default());
-                    }
+                    let mut cfg: serde_json::Value = serde_json::from_str(&vms[idx].config).unwrap_or_default();
+                    cfg["vnc_port"] = serde_json::json!(next_port);
+                    let new_config = serde_json::to_string(&cfg).unwrap_or_default();
+                    let _ = crate::db::update_vm(&vms[idx].smac, &new_config);
+                    vms[idx].config = new_config;
                     used_ports.push(next_port);
-                    next_port += 2;
+                    next_port += operations::VNC_PORT_STEP;
                 }
-                // Re-fetch after updates
-                match crate::db::list_vms() {
-                    Ok(updated_vms) => HttpResponse::Ok().json(updated_vms),
-                    Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
-                        success: false,
-                        message: format!("Failed to list VMs: {}", e),
-                        output: None,
-                    }),
-                }
-            } else {
-                // No updates needed, return directly
-                HttpResponse::Ok().json(vms)
             }
+
+            HttpResponse::Ok().json(vms)
         }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
@@ -381,7 +404,7 @@ async fn upload_iso_handler(
 
     let iso_path = get_conf("iso_path");
     let _ = std::fs::create_dir_all(&iso_path);
-    let dest = format!("{}\\{}", iso_path, safe_name);
+    let dest = format!("{}/{}", iso_path, safe_name);
 
     match std::fs::write(&dest, &body) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -420,7 +443,7 @@ async fn list_disks_handler() -> HttpResponse {
         Ok(disks) => {
             let result: Vec<serde_json::Value> = disks.iter().map(|d| {
                 // Get actual file size from filesystem
-                let file_path = format!("{}\\{}.qcow2", disk_path, d.name);
+                let file_path = format!("{}/{}.qcow2", disk_path, d.name);
                 let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
                 serde_json::json!({
                     "name": d.name,
@@ -483,7 +506,7 @@ async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse
     }
 
     let disk_path = get_conf("disk_path");
-    let path = format!("{}\\{}.qcow2", disk_path, name);
+    let path = format!("{}/{}.qcow2", disk_path, name);
 
     // Delete file
     let _ = std::fs::remove_file(&path);
@@ -536,8 +559,8 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
     }
 
     let disk_path = get_conf("disk_path");
-    let src_file = format!("{}\\{}.qcow2", disk_path, source);
-    let dst_file = format!("{}\\{}.qcow2", disk_path, new_name);
+    let src_file = format!("{}/{}.qcow2", disk_path, source);
+    let dst_file = format!("{}/{}.qcow2", disk_path, new_name);
 
     if !std::path::Path::new(&src_file).exists() {
         return HttpResponse::BadRequest().json(ApiResponse {
@@ -631,7 +654,7 @@ async fn delete_iso_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
     }
 
     let iso_path = get_conf("iso_path");
-    let path = format!("{}\\{}", iso_path, name);
+    let path = format!("{}/{}", iso_path, name);
 
     match std::fs::remove_file(&path) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -729,7 +752,7 @@ async fn upload_image_handler(
 
     let disk_path = get_conf("disk_path");
     let _ = std::fs::create_dir_all(&disk_path);
-    let upload_path = format!("{}\\{}", disk_path, safe_name);
+    let upload_path = format!("{}/{}", disk_path, safe_name);
 
     // Save uploaded file
     if let Err(e) = std::fs::write(&upload_path, &body) {
@@ -753,11 +776,11 @@ async fn upload_image_handler(
         });
     }
 
-    // Convert to qcow2
+    // Convert to qcow2 using safe command execution
     let qcow2_name = safe_name.rsplit_once('.')
         .map(|(base, _)| format!("{}.qcow2", base))
         .unwrap_or_else(|| format!("{}.qcow2", safe_name));
-    let qcow2_path = format!("{}\\{}", disk_path, qcow2_name);
+    let qcow2_path = format!("{}/{}", disk_path, qcow2_name);
     let qemu_img = get_conf("qemu_img_path");
     let src_fmt = src_format.to_string();
     let up_path = upload_path.clone();
@@ -842,7 +865,7 @@ async fn delete_image_handler(body: web::Json<serde_json::Value>) -> HttpRespons
     }
 
     let disk_path = get_conf("disk_path");
-    let path = format!("{}\\{}", disk_path, name);
+    let path = format!("{}/{}", disk_path, name);
 
     match std::fs::remove_file(&path) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -858,7 +881,7 @@ async fn delete_image_handler(body: web::Json<serde_json::Value>) -> HttpRespons
     }
 }
 
-/// Export a disk image -- supports qcow2 (direct download) or convert to raw/vmdk/vdi/vhdx
+/// Export a disk image — supports qcow2 (direct download) or convert to raw/vmdk/vdi/vhdx
 async fn export_disk_handler(
     req: actix_web::HttpRequest,
     path: web::Path<String>,
@@ -875,7 +898,7 @@ async fn export_disk_handler(
     }
 
     let disk_path = get_conf("disk_path");
-    let qcow2_file = format!("{}\\{}.qcow2", disk_path, name);
+    let qcow2_file = format!("{}/{}.qcow2", disk_path, name);
 
     if !std::path::Path::new(&qcow2_file).exists() {
         return HttpResponse::NotFound().json(ApiResponse {
@@ -900,7 +923,7 @@ async fn export_disk_handler(
 
     match format {
         "qcow2" => {
-            // Direct download -- stream the qcow2 file
+            // Direct download — stream the qcow2 file
             let download_name = format!("{}.qcow2", name);
             match actix_files::NamedFile::open_async(&qcow2_file).await {
                 Ok(f) => f
@@ -923,7 +946,7 @@ async fn export_disk_handler(
             let qemu_img = get_conf("qemu_img_path");
             let ext = format.to_string();
             let download_name = format!("{}.{}", name, ext);
-            let tmp_file = format!("{}\\{}_export_{}.{}", disk_path, name, std::process::id(), ext);
+            let tmp_file = format!("{}/{}_export_{}.{}", disk_path, name, std::process::id(), ext);
             let src = qcow2_file.clone();
             let dst = tmp_file.clone();
             let fmt = ext.clone();
@@ -1057,7 +1080,7 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 
     let live_path = get_conf("live_path");
-    let path = format!("{}\\{}", live_path, filename);
+    let path = format!("{}/{}", live_path, filename);
 
     match std::fs::remove_file(&path) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
@@ -1136,6 +1159,7 @@ async fn create_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
             });
         }
     };
+    // Sanitize: alphanumeric, dash, underscore only
     if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
         return HttpResponse::BadRequest().json(ApiResponse {
             success: false,
@@ -1144,11 +1168,19 @@ async fn create_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
         });
     }
     match crate::db::insert_switch(&name) {
-        Ok(id) => HttpResponse::Ok().json(ApiResponse {
-            success: true,
-            message: format!("Switch '{}' created (ID: {})", name, id),
-            output: Some(id.to_string()),
-        }),
+        Ok(id) => {
+            // Create OVS bridge
+            let bridge_name = format!("vs-{}", name);
+            let ovs = crate::config::get_conf("ovs_vsctl_path");
+            if !ovs.is_empty() {
+                let _ = crate::ssh::run_cmd(&ovs, &["--may-exist", "add-br", &bridge_name]);
+            }
+            HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                message: format!("Switch '{}' created (ID: {}, bridge: {})", name, id, bridge_name),
+                output: Some(id.to_string()),
+            })
+        }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
             message: e,
@@ -1168,6 +1200,14 @@ async fn delete_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
             });
         }
     };
+    // Delete OVS bridge before DB record
+    if let Ok(sw) = crate::db::get_switch_by_id(id) {
+        let bridge_name = format!("vs-{}", sw.name);
+        let ovs = crate::config::get_conf("ovs_vsctl_path");
+        if !ovs.is_empty() {
+            let _ = crate::ssh::run_cmd(&ovs, &["--if-exists", "del-br", &bridge_name]);
+        }
+    }
     match crate::db::delete_switch(id) {
         Ok(_) => HttpResponse::Ok().json(ApiResponse {
             success: true,
@@ -1398,7 +1438,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     // Read API key from environment (optional authentication)
     let api_key = std::env::var("VMCONTROL_API_KEY").unwrap_or_default();
     if api_key.is_empty() {
-        println!("WARNING: No VMCONTROL_API_KEY set -- API is unauthenticated");
+        println!("WARNING: No VMCONTROL_API_KEY set — API is unauthenticated");
     } else {
         println!("API key authentication enabled");
     }
@@ -1409,13 +1449,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
         if let Ok(vms) = crate::db::list_vms() {
             for vm in &vms {
                 if vm.status == "running" {
-                    let port_file = format!(r"{}\{}.port", pctl_path, vm.smac);
-                    let alive = if let Ok(port_str) = std::fs::read_to_string(&port_file) {
-                        let addr = format!("127.0.0.1:{}", port_str.trim());
-                        std::net::TcpStream::connect(&addr).is_ok()
-                    } else {
-                        false
-                    };
+                    let sock_path = format!("{}/{}", pctl_path, vm.smac);
+                    let alive = std::os::unix::net::UnixStream::connect(&sock_path).is_ok();
                     if !alive {
                         println!("Stale VM '{}': marked running but QEMU not found — setting to stopped", vm.smac);
                         let _ = crate::db::set_vm_status(&vm.smac, "stopped");

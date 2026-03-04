@@ -1,31 +1,5 @@
 use std::process::{Command, Stdio};
 
-/// Execute a shell command via cmd /C (UNSAFE with user input -- prefer run_cmd)
-#[allow(dead_code)]
-pub fn send_cmd(command: &str) -> Result<String, String> {
-    let result = Command::new("cmd")
-        .arg("/C")
-        .arg(command)
-        .output()
-        .map_err(|e| format!("unable to execute command: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&result.stderr).to_string();
-
-    if !result.status.success() {
-        if stderr.is_empty() {
-            return Err(format!("command failed with exit code: {}", result.status));
-        }
-        return Err(format!("command failed: {}", stderr));
-    }
-
-    let mut output = stdout;
-    if !stderr.is_empty() {
-        output.push_str(&stderr);
-    }
-    Ok(output)
-}
-
 /// Execute a command safely with explicit arguments (no shell injection)
 pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
     let result = Command::new(program)
@@ -54,27 +28,13 @@ pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
 /// Used for QEMU instead of -daemonize which has WebSocket VNC bugs.
 /// Returns (pid, log_path) so caller can check logs on failure.
 pub fn spawn_background(program: &str, args: &[&str]) -> Result<(u32, String), String> {
-    let pctl_path = std::path::PathBuf::from(r"C:\vmcontrol\logs");
-    let _ = std::fs::create_dir_all(&pctl_path);
-    let log_path = pctl_path.join(format!("qemu_{}.log", std::process::id()));
+    let pctl_path = std::env::temp_dir().join("vmcontrol");
+    let _ = std::fs::create_dir_all(pctl_path.join("logs"));
+    let log_path = pctl_path.join(format!("logs/qemu_{}.log", std::process::id()));
     let log_file = std::fs::File::create(&log_path)
         .map_err(|e| format!("unable to create log file: {}", e))?;
     let log_file2 = log_file.try_clone()
         .map_err(|e| format!("unable to clone log handle: {}", e))?;
-    #[cfg(target_os = "windows")]
-    let mut child = {
-        use std::os::windows::process::CommandExt;
-        const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000; // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
-        Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(log_file2)
-            .stderr(log_file)
-            .creation_flags(DETACH_FLAGS)
-            .spawn()
-            .map_err(|e| format!("unable to spawn '{}': {}", program, e))?
-    };
-    #[cfg(not(target_os = "windows"))]
     let mut child = Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -97,82 +57,6 @@ pub fn spawn_background(program: &str, args: &[&str]) -> Result<(u32, String), S
         Ok(None) => Ok((child.id(), log_path.to_string_lossy().to_string())),
         Err(e) => Ok((child.id(), format!("(could not check status: {})", e))),
     }
-}
-
-/// Spawn a long-running process in the background (e.g. QEMU VM)
-/// Returns immediately after starting the process
-pub fn spawn_cmd(program: &str, args: &[&str]) -> Result<String, String> {
-    let child = Command::new(program)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("unable to start {}: {}", program, e))?;
-
-    Ok(format!("Process started (PID: {})", child.id()))
-}
-
-/// Spawn a long-running process with stderr redirected to a log file.
-/// Returns the Child handle so the caller can check if the process is still alive.
-/// Uses CREATE_NEW_PROCESS_GROUP on Windows so the child survives after parent handler returns.
-pub fn spawn_cmd_with_log(program: &str, args: &[&str], log_path: &str) -> Result<std::process::Child, String> {
-    // Ensure the log directory exists
-    if let Some(parent) = std::path::Path::new(log_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    let log_file = std::fs::File::create(log_path)
-        .map_err(|e| format!("unable to create log file {}: {}", log_path, e))?;
-
-    let log_file2 = log_file.try_clone()
-        .map_err(|e| format!("unable to clone log file handle: {}", e))?;
-
-    #[cfg(target_os = "windows")]
-    let child = {
-        use std::os::windows::process::CommandExt;
-        const DETACH_FLAGS: u32 = 0x00000200 | 0x01000000;
-        Command::new(program)
-            .args(args)
-            .stdout(log_file2)
-            .stderr(log_file)
-            .creation_flags(DETACH_FLAGS)
-            .spawn()
-            .map_err(|e| format!("unable to start {}: {}", program, e))?
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let child = {
-        Command::new(program)
-            .args(args)
-            .stdout(log_file2)
-            .stderr(log_file)
-            .spawn()
-            .map_err(|e| format!("unable to start {}: {}", program, e))?
-    };
-
-    // Spawn background thread to monitor process exit and log the result
-    let log_path_owned = log_path.to_string();
-    let pid = child.id();
-    std::thread::spawn(move || {
-        // Wait a bit then check if process still exists
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        // Check if process is still alive using tasklist
-        if let Ok(output) = Command::new("tasklist")
-            .args(&["/FI", &format!("PID eq {}", pid), "/NH"])
-            .output()
-        {
-            let out = String::from_utf8_lossy(&output.stdout);
-            if !out.contains(&pid.to_string()) {
-                // Process died - append info to log
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&log_path_owned) {
-                    let _ = writeln!(f, "\n[MONITOR] Process PID {} exited within 10 seconds", pid);
-                }
-            }
-        }
-    });
-
-    Ok(child)
 }
 
 /// Validate that a string is safe for use as a VM name / identifier.

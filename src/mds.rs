@@ -68,7 +68,8 @@ pub fn save_mds_config(config: &MdsConfig) -> Result<(), String> {
 // Cloud-init userdata generation
 // ──────────────────────────────────────────
 
-pub fn generate_userdata(config: &MdsConfig) -> String {
+/// Common cloud-init userdata base (shared between Ec2 and NoCloud modes)
+fn generate_userdata_base(config: &MdsConfig) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("ssh_pwauth: true\n");
     ud.push_str("users:\n");
@@ -87,6 +88,22 @@ pub fn generate_userdata(config: &MdsConfig) -> String {
         ud.push_str("ssh_authorized_keys:\n");
         ud.push_str(&format!("  - {}\n", config.ssh_pubkey));
     }
+
+    ud
+}
+
+/// Append userdata_extra and ensure trailing newline
+fn append_userdata_extra(ud: &mut String, config: &MdsConfig) {
+    if !config.userdata_extra.is_empty() {
+        ud.push_str(&config.userdata_extra);
+        if !config.userdata_extra.ends_with('\n') {
+            ud.push('\n');
+        }
+    }
+}
+
+pub fn generate_userdata(config: &MdsConfig) -> String {
+    let mut ud = generate_userdata_base(config);
 
     ud.push_str("datasource:\n");
     ud.push_str("  Ec2:\n");
@@ -96,13 +113,7 @@ pub fn generate_userdata(config: &MdsConfig) -> String {
     ud.push_str("warnings:\n");
     ud.push_str("  dsid_missing_source: off\n");
 
-    if !config.userdata_extra.is_empty() {
-        ud.push_str(&config.userdata_extra);
-        if !config.userdata_extra.ends_with('\n') {
-            ud.push('\n');
-        }
-    }
-
+    append_userdata_extra(&mut ud, config);
     ud
 }
 
@@ -110,33 +121,13 @@ pub fn generate_userdata(config: &MdsConfig) -> String {
 pub fn generate_userdata_nocloud(config: &MdsConfig) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("datasource_list: [ NoCloud, None ]\n");
-    ud.push_str("ssh_pwauth: true\n");
-    ud.push_str("users:\n");
-    ud.push_str("  - name: root\n");
-    ud.push_str("    primary_group: root\n");
-    ud.push_str("    groups: root\n");
-    ud.push_str("    lock_passwd: false\n");
-    ud.push_str("    shell: /bin/bash\n");
-    ud.push_str("resize_rootfs: True\n");
-    ud.push_str("chpasswd:\n");
-    ud.push_str("  list: |\n");
-    ud.push_str(&format!("    root:{}\n", config.root_password));
-    ud.push_str("  expire: False\n");
-
-    if !config.ssh_pubkey.is_empty() {
-        ud.push_str("ssh_authorized_keys:\n");
-        ud.push_str(&format!("  - {}\n", config.ssh_pubkey));
-    }
+    // Re-append the base content after the #cloud-config header
+    let base = generate_userdata_base(config);
+    ud.push_str(base.strip_prefix("#cloud-config\n").unwrap_or(&base));
 
     ud.push_str("manage_etc_hosts: true\n");
 
-    if !config.userdata_extra.is_empty() {
-        ud.push_str(&config.userdata_extra);
-        if !config.userdata_extra.ends_with('\n') {
-            ud.push('\n');
-        }
-    }
-
+    append_userdata_extra(&mut ud, config);
     ud
 }
 

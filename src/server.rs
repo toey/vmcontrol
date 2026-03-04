@@ -145,6 +145,13 @@ async fn update_config_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
 
 async fn get_vm_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
     match crate::db::get_vm(&smac) {
         Ok(vm) => HttpResponse::Ok().json(vm),
         Err(e) => HttpResponse::NotFound().json(ApiResponse {
@@ -158,6 +165,13 @@ async fn get_vm_handler(path: web::Path<String>) -> HttpResponse {
 // Per-VM MDS config
 async fn get_vm_mds_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
     match crate::db::get_vm(&smac) {
         Ok(vm) => {
             let config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
@@ -182,10 +196,29 @@ async fn get_vm_mds_handler(path: web::Path<String>) -> HttpResponse {
 
 async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json::Value>) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
     match crate::db::get_vm(&smac) {
         Ok(vm) => {
             let mut config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
             let mut new_mds = body.into_inner();
+
+            // Validate local_ipv4 format (if provided)
+            let new_ip = new_mds.get("local_ipv4").and_then(|v| v.as_str()).unwrap_or("");
+            if !new_ip.is_empty() {
+                if let Err(e) = crate::ssh::validate_ip(new_ip) {
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: format!("Invalid local_ipv4: {}", e),
+                        output: None,
+                    });
+                }
+            }
 
             // Validate root_password minimum length (if provided)
             let new_pw = new_mds.get("root_password").and_then(|v| v.as_str()).unwrap_or("");
@@ -267,50 +300,40 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
 /// List VMs — auto-backfill VNC ports in a single pass
 async fn list_vms_handler() -> HttpResponse {
     match crate::db::list_vms() {
-        Ok(vms) => {
+        Ok(mut vms) => {
             // Auto-backfill VNC ports for VMs that don't have one
             let mut used_ports: Vec<u16> = Vec::new();
-            let mut need_port: Vec<String> = Vec::new();
-            for vm in &vms {
+            let mut need_port: Vec<usize> = Vec::new();
+            for (i, vm) in vms.iter().enumerate() {
                 if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
                     if let Some(p) = cfg.get("vnc_port").and_then(|v| v.as_u64()) {
                         used_ports.push(p as u16);
                     } else {
-                        need_port.push(vm.smac.clone());
+                        need_port.push(i);
                     }
                 } else {
-                    need_port.push(vm.smac.clone());
+                    need_port.push(i);
                 }
             }
 
-            // Assign missing VNC ports
+            // Assign missing VNC ports — update DB and patch in-memory records
             if !need_port.is_empty() {
-                let mut next_port: u16 = 12001;
-                for smac in &need_port {
-                    while used_ports.contains(&next_port) {
-                        next_port += 2;
+                let mut next_port: u16 = operations::VNC_PORT_MIN;
+                for &idx in &need_port {
+                    while used_ports.contains(&next_port) && next_port < operations::VNC_PORT_MAX {
+                        next_port += operations::VNC_PORT_STEP;
                     }
-                    if let Ok(vm) = crate::db::get_vm(smac) {
-                        let mut cfg: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
-                        cfg["vnc_port"] = serde_json::json!(next_port);
-                        let _ = crate::db::update_vm(smac, &serde_json::to_string(&cfg).unwrap_or_default());
-                    }
+                    let mut cfg: serde_json::Value = serde_json::from_str(&vms[idx].config).unwrap_or_default();
+                    cfg["vnc_port"] = serde_json::json!(next_port);
+                    let new_config = serde_json::to_string(&cfg).unwrap_or_default();
+                    let _ = crate::db::update_vm(&vms[idx].smac, &new_config);
+                    vms[idx].config = new_config;
                     used_ports.push(next_port);
-                    next_port += 2;
+                    next_port += operations::VNC_PORT_STEP;
                 }
-                // Re-fetch after updates
-                match crate::db::list_vms() {
-                    Ok(updated_vms) => HttpResponse::Ok().json(updated_vms),
-                    Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
-                        success: false,
-                        message: format!("Failed to list VMs: {}", e),
-                        output: None,
-                    }),
-                }
-            } else {
-                // No updates needed, return directly
-                HttpResponse::Ok().json(vms)
             }
+
+            HttpResponse::Ok().json(vms)
         }
         Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
