@@ -207,38 +207,12 @@ function saveImageMapping(templateKey, diskName) {
     }).catch(function(e) { console.error('Failed to save template image mapping:', e); });
 }
 
-// Populate Base Image dropdown with all available disk images
-function populateBaseImageSelect(selectedValue) {
-    var sel = document.getElementById('create-base-image');
-    if (!sel) return;
-    var disks = window._diskList || [];
-    var current = selectedValue || sel.value;
-    sel.innerHTML = '<option value="">-- no image --</option>';
-    disks.forEach(function(d) {
-        var opt = document.createElement('option');
-        opt.value = d.name;
-        var sizeInfo = d.disk_size || formatSize(d.size);
-        var ownerInfo = d.owner ? ' [' + d.owner + ']' : '';
-        opt.textContent = d.name + '.qcow2 (' + sizeInfo + ')' + ownerInfo;
-        sel.appendChild(opt);
-    });
-    if (current) sel.value = current;
-}
-
 function applyOsTemplate() {
     var sel = document.getElementById('create-os-template');
     var tpl = OS_TEMPLATES[sel.value];
     var templateKey = sel.value;
 
-    // Update template-info
-    var infoDiv = document.getElementById('template-info');
-    if (infoDiv) infoDiv.innerHTML = '';
-
-    if (!tpl) {
-        // Custom — clear base image selection
-        document.getElementById('create-base-image').value = '';
-        return;
-    }
+    if (!tpl) return;
 
     // Fill CPU / Memory / Features
     document.getElementById('start-vcpus').value = tpl.vcpus;
@@ -262,19 +236,12 @@ function applyOsTemplate() {
         imageName = findMatchingDisk(tpl.image);
     }
 
-    // Set base image dropdown
-    var baseImgSel = document.getElementById('create-base-image');
-    baseImgSel.value = imageName || '';
-
     // Auto-clone base image and set as disk 0
     if (imageName) {
         autoCloneDiskForTemplate(imageName);
     } else {
         applyBaseImageToDisk(imageName);
     }
-
-    // Update info
-    updateTemplateInfo(templateKey, imageName);
 }
 
 // Auto-clone a base image and set cloned disk as disk 0
@@ -319,27 +286,6 @@ async function autoCloneDiskForTemplate(sourceImage) {
     }
 }
 
-// When user manually changes Base Image dropdown
-function onBaseImageChange() {
-    var templateKey = document.getElementById('create-os-template').value;
-    var imageName = document.getElementById('create-base-image').value;
-
-    // Save mapping for this template
-    if (templateKey && templateKey !== 'custom') {
-        saveImageMapping(templateKey, imageName);
-    }
-
-    // Auto-clone and set as disk 0
-    if (imageName) {
-        autoCloneDiskForTemplate(imageName);
-    } else {
-        applyBaseImageToDisk(imageName);
-    }
-
-    // Update info
-    updateTemplateInfo(templateKey, imageName);
-}
-
 // Set first disk row's select to the chosen base image
 function applyBaseImageToDisk(diskName) {
     if (!diskName) return;
@@ -380,26 +326,6 @@ function findMatchingDisk(pattern) {
         if (d.name.toLowerCase().indexOf(pat) !== -1) return d.name;
     }
     return null;
-}
-
-// Show pairing status
-function updateTemplateInfo(templateKey, imageName) {
-    var infoDiv = document.getElementById('template-info');
-    if (!infoDiv) return;
-    if (!templateKey || templateKey === 'custom') { infoDiv.innerHTML = ''; return; }
-    var tpl = OS_TEMPLATES[templateKey];
-    if (!tpl) { infoDiv.innerHTML = ''; return; }
-
-    var savedMap = getImageMappings();
-    var isSaved = savedMap[templateKey] === imageName;
-
-    if (imageName) {
-        infoDiv.innerHTML = '<span style="color:#3fb950;">Base image: <b>' + escapeHtml(imageName) + '.qcow2</b></span>' +
-            (isSaved ? ' <small style="color:#8b949e;">(saved)</small>' : '');
-    } else {
-        infoDiv.innerHTML = '<span style="color:#d29922;">No image paired. Select a <b>Base Image</b> or upload one in ' +
-            '<a href="#" onclick="switchTab(\'listimage\');return false;" style="color:#58a6ff;">List Image</a> tab.</span>';
-    }
 }
 
 // ── OS Template Management ──
@@ -748,8 +674,6 @@ async function executeCreateVm() {
         document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
         document.getElementById('create-vm-name').disabled = false;
         document.getElementById('create-os-template').value = 'custom';
-        document.getElementById('create-base-image').value = '';
-        document.getElementById('template-info').innerHTML = '';
         document.getElementById('create-group').value = '';
         document.getElementById('create-group-new').value = '';
     }
@@ -797,8 +721,6 @@ async function executeUpdateVm() {
         document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
         document.getElementById('create-vm-name').disabled = false;
         document.getElementById('create-os-template').value = 'custom';
-        document.getElementById('create-base-image').value = '';
-        document.getElementById('template-info').innerHTML = '';
         document.getElementById('create-group').value = '';
         document.getElementById('create-group-new').value = '';
         // Switch to VM List tab after saving
@@ -1047,8 +969,6 @@ async function loadDiskList() {
         }
         // Refresh any disk selects on the page
         refreshAllDiskSelects();
-        // Also refresh Base Image dropdown
-        populateBaseImageSelect();
     } catch (err) {
         console.error('Failed to load disk list:', err);
     }
@@ -2079,8 +1999,6 @@ async function editVm(smac) {
             switchTab('create');
             // Reset template to custom when editing
             document.getElementById('create-os-template').value = 'custom';
-            document.getElementById('create-base-image').value = '';
-            document.getElementById('template-info').innerHTML = '';
             // Fill form
             document.getElementById('create-vm-name').value = vm.smac;
             document.getElementById('create-vm-name').disabled = true;
