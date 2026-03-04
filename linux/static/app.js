@@ -1471,7 +1471,7 @@ async function vmVncStart(smac) {
     // QEMU has built-in WebSocket VNC — just open the console directly
     window._vncActive[smac] = true;
     loadVmListTable();
-    window.open('/vnc.html?port=' + port + '&smac=' + smac, '_blank');
+    window.open('/vnc.html?smac=' + encodeURIComponent(smac), '_blank');
 }
 
 async function vmVncStop(smac) {
@@ -1859,7 +1859,7 @@ async function loadVmListTable() {
                 actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
 
                 var nameCell = vm.status === 'running'
-                    ? '<a href="/vnc.html?port=' + vncPort + '&smac=' + encodeURIComponent(vm.smac) + '" class="vm-name-link" target="_blank">' + escapeHtml(vm.smac) + '</a>'
+                    ? '<a href="/vnc.html?smac=' + encodeURIComponent(vm.smac) + '" class="vm-name-link" target="_blank">' + escapeHtml(vm.smac) + '</a>'
                     : escapeHtml(vm.smac);
 
                 html += '<tr>' +

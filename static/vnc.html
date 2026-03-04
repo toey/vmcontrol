@@ -93,8 +93,9 @@
     <div class="toolbar">
         <a href="/" class="btn-back">&larr; Back</a>
         <h1>VM Console</h1>
+        <span id="vnc-vm-name" class="info-text" style="font-size:14px;"></span>
         <span id="vnc-host" style="display:none"></span>
-        <label>Port <span id="vnc-port" class="info-text">12001</span></label>
+        <span id="vnc-port" style="display:none">12001</span>
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
@@ -317,13 +318,52 @@
         // Set VNC host to current page hostname
         document.getElementById('vnc-host').textContent = window.location.hostname || 'localhost';
 
-        // auto-connect if port in URL params
+        // Fetch VNC port from smac, then auto-connect
         var params = new URLSearchParams(window.location.search);
-        if (params.get('port')) {
+        var smac = params.get('smac');
+
+        if (params.get('host')) {
+            document.getElementById('vnc-host').textContent = params.get('host');
+        }
+
+        if (smac) {
+            document.getElementById('vnc-vm-name').textContent = smac;
+            document.title = smac + ' — VM Console';
+
+            // Fetch VM config to get vnc_port
+            (async function() {
+                try {
+                    setStatus('Loading VM info...', 'status-connecting');
+                    var res = await apiFetch('/api/vm/get/' + encodeURIComponent(smac));
+                    if (!res.ok) {
+                        setStatus('VM not found: ' + smac, 'status-disconnected');
+                        return;
+                    }
+                    var vm = await res.json();
+                    var port = 0;
+                    if (vm.config) {
+                        try {
+                            var cfg = JSON.parse(vm.config);
+                            port = cfg.vnc_port || 0;
+                        } catch(e) {}
+                    }
+                    if (!port) {
+                        setStatus('No VNC port for ' + smac, 'status-disconnected');
+                        return;
+                    }
+                    document.getElementById('vnc-port').textContent = port;
+                    if (vm.status === 'running') {
+                        setTimeout(doConnect, 300);
+                    } else {
+                        setStatus('VM is stopped', 'status-disconnected');
+                    }
+                } catch(e) {
+                    setStatus('Error: ' + e.message, 'status-disconnected');
+                }
+            })();
+        } else if (params.get('port')) {
+            // Legacy fallback: ?port=12001
             document.getElementById('vnc-port').textContent = params.get('port');
-            if (params.get('host')) {
-                document.getElementById('vnc-host').textContent = params.get('host');
-            }
             setTimeout(doConnect, 500);
         }
     </script>
