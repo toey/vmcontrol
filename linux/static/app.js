@@ -138,11 +138,57 @@ function applyOsTemplate() {
     var baseImgSel = document.getElementById('create-base-image');
     baseImgSel.value = imageName || '';
 
-    // Auto-select disk in first disk row
-    applyBaseImageToDisk(imageName);
+    // Auto-clone base image and set as disk 0
+    if (imageName) {
+        autoCloneDiskForTemplate(imageName);
+    } else {
+        applyBaseImageToDisk(imageName);
+    }
 
     // Update info
     updateTemplateInfo(templateKey, imageName);
+}
+
+// Auto-clone a base image and set cloned disk as disk 0
+async function autoCloneDiskForTemplate(sourceImage) {
+    var vmName = val('create-vm-name').trim();
+    // Generate clone name: {vm-name}-disk0 or {source}-{timestamp}
+    var cloneName;
+    if (vmName) {
+        cloneName = vmName + '-disk0';
+    } else {
+        var ts = Date.now().toString(36);
+        cloneName = sourceImage + '-' + ts;
+    }
+
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Cloning ' + sourceImage + ' → ' + cloneName + '...';
+
+    try {
+        var response = await apiFetch('/api/disk/clone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: sourceImage, name: cloneName }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = 'Cloned: ' + cloneName + '.qcow2';
+            // Reload disk list then set cloned disk as disk 0
+            await loadDiskList();
+            applyBaseImageToDisk(cloneName);
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Clone error: ' + data.message;
+            // Fallback: just select the source image
+            applyBaseImageToDisk(sourceImage);
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Clone error: ' + err.message;
+        applyBaseImageToDisk(sourceImage);
+    }
 }
 
 // When user manually changes Base Image dropdown
@@ -155,8 +201,12 @@ function onBaseImageChange() {
         saveImageMapping(templateKey, imageName);
     }
 
-    // Apply to first disk row
-    applyBaseImageToDisk(imageName);
+    // Auto-clone and set as disk 0
+    if (imageName) {
+        autoCloneDiskForTemplate(imageName);
+    } else {
+        applyBaseImageToDisk(imageName);
+    }
 
     // Update info
     updateTemplateInfo(templateKey, imageName);
