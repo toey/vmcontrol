@@ -555,7 +555,26 @@ if not exist "%CONFIG_YAML%" (
 
 echo.
 
-:: --- Step 8: Set up Windows Service ---
+:: --- Step 8: Generate API key ---
+set "API_KEY_FILE=%PCTL_PATH%\.api_key"
+if exist "%API_KEY_FILE%" (
+    set /p API_KEY=<"%API_KEY_FILE%"
+    echo [INFO] Using existing API key from %API_KEY_FILE%
+) else (
+    :: Generate 64-char hex key using PowerShell
+    for /f "delims=" %%K in ('powershell -NoProfile -Command "[System.BitConverter]::ToString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('-','')"') do set "API_KEY=%%K"
+    echo !API_KEY!> "%API_KEY_FILE%"
+    echo [OK]   API key generated and saved to %API_KEY_FILE%
+)
+
+:: Set system environment variable so it persists across reboots
+setx VMCONTROL_API_KEY "!API_KEY!" /M >nul 2>&1
+set "VMCONTROL_API_KEY=!API_KEY!"
+echo [OK]   VMCONTROL_API_KEY set as system environment variable
+
+echo.
+
+:: --- Step 9: Set up Windows Service ---
 echo [INFO] Setting up Windows service...
 
 where nssm >nul 2>&1
@@ -570,15 +589,17 @@ if %errorlevel% equ 0 (
     nssm set %SERVICE_NAME% AppStderr "%LOG_DIR%\vm_ctl.stderr.log"
     nssm set %SERVICE_NAME% AppRotateFiles 1
     nssm set %SERVICE_NAME% AppRotateBytes 10485760
+    nssm set %SERVICE_NAME% AppEnvironmentExtra "VMCONTROL_API_KEY=!API_KEY!"
     nssm start %SERVICE_NAME%
     echo [OK]   Service installed and started via NSSM
 ) else (
     echo [WARN] NSSM not found. Using Scheduled Task as fallback...
     echo        Download NSSM: https://nssm.cc/download
     echo.
-    :: Create a launcher script that sets working directory before running
+    :: Create a launcher script that sets working directory and API key before running
     (
         echo @echo off
+        echo set "VMCONTROL_API_KEY=!API_KEY!"
         echo cd /d "%CTL_BIN%"
         echo "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080
     ) > "%CTL_BIN%\start_vmcontrol.bat"
@@ -594,7 +615,7 @@ if %errorlevel% equ 0 (
     )
 )
 
-:: --- Step 9: Firewall rule ---
+:: --- Step 10: Firewall rule ---
 echo.
 echo [INFO] Adding firewall rule for port 8080...
 netsh advfirewall firewall delete rule name="vmcontrol" >nul 2>&1
@@ -603,7 +624,7 @@ echo [OK]   Firewall rule added
 
 echo.
 
-:: --- Step 10: Create Desktop shortcut (Admin PowerShell) ---
+:: --- Step 11: Create Desktop shortcut (Admin PowerShell) ---
 echo [INFO] Creating desktop shortcut...
 set "DESKTOP=%USERPROFILE%\Desktop"
 set "SHORTCUT=%DESKTOP%\vmcontrol.lnk"
@@ -616,7 +637,7 @@ powershell -NoProfile -Command "$bytes = [System.IO.File]::ReadAllBytes('%SHORTC
 echo [OK]   Desktop shortcut created: %SHORTCUT%
 echo.
 
-:: --- Step 11: Summary ---
+:: --- Step 12: Summary ---
 echo ================================================================
 echo   vmcontrol v%VERSION% installed successfully!
 echo ================================================================
@@ -632,6 +653,8 @@ echo   Logs:        %LOG_DIR%\
 echo   DB:          %PCTL_PATH%\vmcontrol.db ^(auto-created^)
 echo.
 echo   Web UI:      http://localhost:8080
+echo   API Key:     !API_KEY!
+echo   Key File:    %API_KEY_FILE%
 echo.
 where nssm >nul 2>&1
 if %errorlevel% equ 0 (

@@ -185,7 +185,19 @@ else
     warn "config.yaml already exists — skipping (preserving your customizations)"
 fi
 
-# --- Step 6: Set up systemd service ---
+# --- Step 6: Generate API key ---
+API_KEY_FILE="${PCTL_PATH}/.api_key"
+if [[ -f "$API_KEY_FILE" ]]; then
+    API_KEY=$(cat "$API_KEY_FILE")
+    info "Using existing API key from $API_KEY_FILE"
+else
+    API_KEY=$(openssl rand -hex 32 2>/dev/null || LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 64)
+    echo "$API_KEY" > "$API_KEY_FILE"
+    chmod 600 "$API_KEY_FILE"
+    success "API key generated and saved to $API_KEY_FILE"
+fi
+
+# --- Step 7: Set up systemd service ---
 info "Setting up systemd service..."
 
 cat > "$SYSTEMD_UNIT" << UNIT
@@ -198,6 +210,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=${CTL_BIN}
 ExecStart=${CTL_BIN}/vm_ctl server 0.0.0.0:8080
+Environment=VMCONTROL_API_KEY=${API_KEY}
 Restart=on-failure
 RestartSec=5
 StandardOutput=append:${LOG_DIR}/vm_ctl.stdout.log
@@ -221,7 +234,7 @@ echo "       firewalld: sudo firewall-cmd --add-port=8080/tcp --permanent && sud
 
 echo ""
 
-# --- Step 7: Summary ---
+# --- Step 8: Summary ---
 echo "================================================================"
 echo -e "  ${GREEN}vmcontrol v${VERSION} installed successfully!${NC}"
 echo "================================================================"
@@ -238,6 +251,8 @@ echo "  Logs:        $LOG_DIR/vm_ctl.{stdout,stderr}.log"
 echo "  Service:     $SERVICE_NAME (systemd)"
 echo ""
 echo "  Web UI:      http://localhost:8080"
+echo -e "  API Key:     ${YELLOW}${API_KEY}${NC}"
+echo "  Key File:    $API_KEY_FILE"
 echo ""
 echo "  Commands:"
 echo "    sudo systemctl status $SERVICE_NAME"

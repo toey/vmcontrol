@@ -167,7 +167,19 @@ else
     warn "config.yaml already exists — skipping (preserving your customizations)"
 fi
 
-# --- Step 6: Set up launchd service ---
+# --- Step 6: Generate API key ---
+API_KEY_FILE="${PCTL_PATH}/.api_key"
+if [[ -f "$API_KEY_FILE" ]]; then
+    API_KEY=$(cat "$API_KEY_FILE")
+    info "Using existing API key from $API_KEY_FILE"
+else
+    API_KEY=$(openssl rand -hex 32 2>/dev/null || LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 64)
+    echo "$API_KEY" > "$API_KEY_FILE"
+    chmod 600 "$API_KEY_FILE"
+    success "API key generated and saved to $API_KEY_FILE"
+fi
+
+# --- Step 7: Set up launchd service ---
 info "Setting up launchd service..."
 
 cat > "$PLIST_PATH" << PLIST
@@ -186,6 +198,11 @@ cat > "$PLIST_PATH" << PLIST
     </array>
     <key>WorkingDirectory</key>
     <string>${CTL_BIN}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>VMCONTROL_API_KEY</key>
+        <string>${API_KEY}</string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -203,7 +220,7 @@ success "Service registered and started"
 
 echo ""
 
-# --- Step 7: Summary ---
+# --- Step 8: Summary ---
 echo "================================================================"
 echo -e "  ${GREEN}vmcontrol v${VERSION} installed successfully!${NC}"
 echo "================================================================"
@@ -220,6 +237,8 @@ echo "  Logs:        $LOG_DIR/vm_ctl.{stdout,stderr}.log"
 echo "  Service:     $SERVICE_LABEL (launchd)"
 echo ""
 echo "  Web UI:      http://localhost:8080"
+echo -e "  API Key:     ${YELLOW}${API_KEY}${NC}"
+echo "  Key File:    $API_KEY_FILE"
 echo ""
 echo "  Commands:"
 echo "    sudo launchctl stop $SERVICE_LABEL"

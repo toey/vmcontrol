@@ -1,39 +1,45 @@
 # vmcontrol
 
-Cross-platform QEMU/KVM virtual machine management system written in Rust. Provides a web-based control panel and REST API for managing VMs, disks, ISOs, backups, networking, and VNC access.
+Cross-platform QEMU/KVM virtual machine management system written in Rust. Provides a web-based control panel and REST API for full VM lifecycle management -- from creating disks and booting VMs to live migration, backups, and VNC console access.
+
+---
 
 ## Features
 
-- **Web UI** -- Control panel at `http://localhost:8080` for managing VMs
-- **REST API** -- Full programmatic control over VM lifecycle with optional API key authentication
-- **Multi-Architecture** -- x86_64 and aarch64 (ARM64) guest support
-- **Multi-OS** -- Windows, macOS, Linux host platforms
-- **VM Groups** -- Organize VMs into logical groups (production, staging, dev, etc.)
-- **Cloud-Init** -- NoCloud metadata service with per-VM configuration
-- **VNC Console** -- Built-in QEMU WebSocket VNC with bundled noVNC viewer
-- **Disk Management** -- Create, clone, resize, delete QCOW2 disks with SQLite tracking
-- **Disk Export** -- Download disks as qcow2, or convert to raw/vmdk/vdi/vhdx on-the-fly
-- **Image Import** -- Upload vmdk/vdi/vhdx/raw images with auto-conversion to qcow2
-- **ISO Mount** -- Upload and boot VMs from ISO images (up to 4 GB)
-- **Virtual Switches** -- Inter-VM Layer 2 networking with VLAN segmentation
-- **Live Migration** -- Move running VMs between hosts
-- **Backup** -- Timestamped VM snapshots with gzip compression
+| Category | Highlights |
+|----------|-----------|
+| **Web UI** | Single-page control panel at `http://localhost:8080` |
+| **REST API** | 50+ endpoints with optional API key auth |
+| **Multi-Architecture** | x86_64 and aarch64 (ARM64) guests |
+| **Multi-OS Host** | Windows, macOS, Linux with native service integration |
+| **VM Groups** | Organize VMs into logical groups |
+| **Networking** | NAT, Virtual Switch (VLAN), Bridge/TAP, Port Forwarding, Internal VM-to-VM |
+| **Cloud-Init** | EC2-compatible metadata service with per-VM config |
+| **SSH Key Store** | Named SSH keys saved in DB, selectable per VM |
+| **VNC Console** | QEMU WebSocket VNC with bundled noVNC viewer |
+| **Disk Management** | Create, clone, resize QCOW2 disks with IOPS throttling |
+| **Disk Export** | Download as qcow2 / raw / vmdk / vdi / vhdx |
+| **Image Import** | Upload vmdk/vdi/vhdx/raw with auto-conversion to qcow2 |
+| **OS Templates** | 8 presets with auto-clone disk on selection |
+| **ISO Mount** | Upload and hot-mount ISO images (up to 4 GB) |
+| **Live Migration** | Move running VMs between hosts |
+| **Backup** | Timestamped gzip-compressed snapshots |
+| **DHCP Management** | Track and manage IP leases |
 
 ---
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/toey/vmcontrol.git
 cd vmcontrol
 
 # Install (pick your OS)
-# Windows:  run windows\install.bat as Administrator
 # macOS:    sudo bash mac/install.sh
 # Linux:    sudo bash linux/install.sh
+# Windows:  run windows\install.bat as Administrator
 
-# Access Web UI
+# Open Web UI
 open http://localhost:8080
 ```
 
@@ -48,61 +54,11 @@ open http://localhost:8080
 | **ISO tool** | Included (oscdimg/mkisofs) | Included (hdiutil) | `apt install genisoimage` |
 | **OVS** (optional) | -- | `brew install openvswitch` | `apt install openvswitch-switch` |
 
-> **Note:** websockify and Python are no longer required. VNC proxying is now handled natively by QEMU's built-in WebSocket support.
+> VNC uses QEMU's built-in WebSocket support. No external websockify or Python required.
 
 ---
 
 ## Installation
-
-### Windows
-
-> Requires **PowerShell as Administrator**
-
-```powershell
-cd windows
-.\install.bat
-```
-
-The installer will:
-1. Detect CPU architecture (x86_64 / ARM64) and verify QEMU compatibility
-2. Build `vm_ctl.exe` from source using Cargo (or use pre-built binary)
-3. Create directory structure at `C:\vmcontrol\`
-4. Generate `config.yaml` with detected paths
-5. Install as Windows Service (NSSM) or Scheduled Task
-6. Add firewall rule for port 8080
-
-**Service management:**
-```powershell
-# NSSM
-nssm status vmcontrol
-nssm stop vmcontrol
-nssm start vmcontrol
-nssm restart vmcontrol
-
-# Scheduled Task (fallback)
-schtasks /query /tn vmcontrol
-schtasks /run /tn vmcontrol
-schtasks /end /tn vmcontrol
-```
-
-**Installed paths:**
-```
-C:\vmcontrol\
-  bin\vm_ctl.exe        # Binary
-  bin\config.yaml       # Configuration
-  bin\static\           # Web UI files
-  disks\                # QCOW2 disk images
-  iso\                  # ISO files
-  backups\              # VM snapshots
-  logs\                 # QEMU + server logs
-  vmcontrol.db          # SQLite database
-```
-
-> **Windows ARM64 note:** If running on ARM (e.g. Parallels), install the QEMU ARM64 build from [qemu.weilnetz.de/aarch64](https://qemu.weilnetz.de/aarch64/). The installer detects this automatically.
-
-> **Rust toolchain:** You need either MSVC (Visual Studio Build Tools) or GNU (MinGW-w64) toolchain. See `windows/readme.txt` for detailed setup instructions.
-
----
 
 ### macOS
 
@@ -110,14 +66,8 @@ C:\vmcontrol\
 sudo bash mac/install.sh
 ```
 
-The installer will:
-1. Check prerequisites (cargo, QEMU)
-2. Build `vm_ctl` from source
-3. Create directory structure
-4. Generate `config.yaml`
-5. Install as launchd daemon
+Installs as a **launchd** daemon.
 
-**Service management:**
 ```bash
 sudo launchctl stop com.vmcontrol.vm_ctl
 sudo launchctl start com.vmcontrol.vm_ctl
@@ -127,84 +77,68 @@ sudo launchctl unload /Library/LaunchDaemons/com.vmcontrol.vm_ctl.plist
 sudo launchctl load /Library/LaunchDaemons/com.vmcontrol.vm_ctl.plist
 ```
 
-**Installed paths:**
-```
-/opt/ctl/bin/
-  vm_ctl                # Binary
-  config.yaml           # Configuration
-  static/               # Web UI files
-
-/tmp/vmcontrol/
-  disks/                # QCOW2 disk images
-  iso/                  # ISO files
-  backups/              # VM snapshots
-  logs/                 # QEMU logs
-  vmcontrol.db          # SQLite database
-```
-
----
-
 ### Linux
 
 ```bash
 sudo bash linux/install.sh
 ```
 
-The installer will:
-1. Check prerequisites (cargo, QEMU, genisoimage, openvswitch-switch)
-2. Build `vm_ctl` from source
-3. Create directory structure
-4. Generate `config.yaml`
-5. Install as systemd service
-6. Configure firewall rules
+Installs as a **systemd** service.
 
-**Service management:**
 ```bash
 sudo systemctl status vmcontrol
 sudo systemctl start vmcontrol
 sudo systemctl stop vmcontrol
 sudo systemctl restart vmcontrol
-
-# View logs
 sudo journalctl -u vmcontrol -f
 ```
 
-**Firewall:**
+Firewall:
+
 ```bash
-# UFW
-sudo ufw allow 8080/tcp
-
-# firewalld
-sudo firewall-cmd --add-port=8080/tcp --permanent
-sudo firewall-cmd --reload
+sudo ufw allow 8080/tcp                                          # UFW
+sudo firewall-cmd --add-port=8080/tcp --permanent && sudo firewall-cmd --reload  # firewalld
 ```
 
-**Installed paths:**
-```
-/opt/ctl/bin/
-  vm_ctl                # Binary
-  config.yaml           # Configuration
-  static/               # Web UI files
-  vs-up.sh              # OVS TAP up script
-  vs-down.sh            # OVS TAP down script
+### Windows
 
-/tmp/vmcontrol/
-  disks/                # QCOW2 disk images
-  iso/                  # ISO files
-  backups/              # VM snapshots
-  logs/                 # QEMU logs
-  vmcontrol.db          # SQLite database
+> Run as **Administrator**
+
+```powershell
+cd windows
+.\install.bat
 ```
+
+Installs as a Windows Service (NSSM) or Scheduled Task.
+
+```powershell
+nssm status vmcontrol
+nssm stop vmcontrol
+nssm start vmcontrol
+nssm restart vmcontrol
+```
+
+> **ARM64 note:** Install the QEMU ARM64 build from [qemu.weilnetz.de/aarch64](https://qemu.weilnetz.de/aarch64/). The installer detects this automatically.
+
+### Installed Paths
+
+| | macOS / Linux | Windows |
+|---|---|---|
+| Binary | `/opt/ctl/bin/vm_ctl` | `C:\vmcontrol\bin\vm_ctl.exe` |
+| Config | `/opt/ctl/bin/config.yaml` | `C:\vmcontrol\bin\config.yaml` |
+| Static | `/opt/ctl/bin/static/` | `C:\vmcontrol\bin\static\` |
+| Disks | `/tmp/vmcontrol/disks/` | `C:\vmcontrol\disks\` |
+| ISOs | `/tmp/vmcontrol/iso/` | `C:\vmcontrol\iso\` |
+| Backups | `/tmp/vmcontrol/backups/` | `C:\vmcontrol\backups\` |
+| Database | `/tmp/vmcontrol/vmcontrol.db` | `C:\vmcontrol\vmcontrol.db` |
+| Logs | `/tmp/vmcontrol/vm_ctl.*.log` | `C:\vmcontrol\logs\` |
 
 ---
 
 ## Configuration
 
-Config file location:
-- **Windows:** `C:\vmcontrol\bin\config.yaml`
-- **macOS / Linux:** `/opt/ctl/bin/config.yaml`
-
 ```yaml
+# config.yaml
 qemu_path: /usr/bin/qemu-system-x86_64
 qemu_img_path: /usr/bin/qemu-img
 qemu_aarch64_path: /usr/bin/qemu-system-aarch64
@@ -218,39 +152,33 @@ gzip_path: /usr/bin/gzip
 db_path: /tmp/vmcontrol/vmcontrol.db
 mds_config_path: /tmp/vmcontrol/mds.json
 domain: localhost
-qemu_accel: hvf:tcg
+qemu_accel: hvf:tcg           # macOS: hvf:tcg, Linux: kvm:tcg
 qemu_machine: pc
 ovs_vsctl_path: /usr/bin/ovs-vsctl
+bridge_sudo: true              # Use sudo for bridge mode
+bridge_sudo_path: /usr/bin/sudo
+internal_mcast_port: 11111     # VM-to-VM multicast port
 ```
 
-The installer generates this file automatically with detected paths. Edit manually to customize.
+The installer generates this file automatically. Edit to customize.
 
-### aarch64 (ARM64) Guest Support
+### aarch64 (ARM64) Guests
 
-To run ARM64 VMs, ensure:
-- `qemu-system-aarch64` is installed
-- EDK2 UEFI firmware is available (`edk2-aarch64-code.fd`)
-- Set `arch: aarch64` when creating a VM
-
-The system uses QEMU `virt` machine type with `virtio-gpu-pci` display and `-cpu max` for aarch64 guests.
+Ensure `qemu-system-aarch64` and EDK2 UEFI firmware (`edk2-aarch64-code.fd`) are installed. Select `aarch64` architecture when creating a VM. Uses QEMU `virt` machine type with `virtio-gpu-pci` display.
 
 ---
 
 ## API Authentication
 
-Set the `VMCONTROL_API_KEY` environment variable to enable API key authentication:
-
 ```bash
+# Enable by setting environment variable
 export VMCONTROL_API_KEY="your-secret-key"
-```
 
-All `/api/*` endpoints then require the `X-API-Key` header:
-
-```bash
+# All /api/* endpoints require the header
 curl -H "X-API-Key: your-secret-key" http://localhost:8080/api/vm/list
 ```
 
-If `VMCONTROL_API_KEY` is not set, all requests are allowed without authentication. Static files and EC2 metadata endpoints are always accessible.
+If `VMCONTROL_API_KEY` is not set, all requests are allowed without authentication. Static files and EC2 metadata endpoints always bypass auth.
 
 ---
 
@@ -258,103 +186,54 @@ If `VMCONTROL_API_KEY` is not set, all requests are allowed without authenticati
 
 **Base URL:** `http://localhost:8080`
 
-### VM Management
+### VM Lifecycle
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/vm/list` | List all VMs (grouped) |
-| `GET` | `/api/vm/get/{smac}` | Get VM details |
-| `POST` | `/api/vm/create-config` | Create VM |
+| `GET` | `/api/vm/get/{smac}` | Get VM details by short MAC |
+| `POST` | `/api/vm/create-config` | Create new VM |
 | `POST` | `/api/vm/update-config` | Update VM config |
 | `POST` | `/api/vm/start` | Start VM |
-| `POST` | `/api/vm/stop` | Stop VM (force halt) |
+| `POST` | `/api/vm/stop` | Force halt VM |
 | `POST` | `/api/vm/powerdown` | Graceful ACPI shutdown |
-| `POST` | `/api/vm/reset` | Reset VM |
-| `POST` | `/api/vm/delete` | Delete VM |
+| `POST` | `/api/vm/reset` | Reset/reboot VM |
+| `POST` | `/api/vm/delete` | Delete VM and release disks |
 | `POST` | `/api/vm/set-group` | Set VM group (`smac`, `group_name`) |
-
-### VM Groups
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
 | `GET` | `/api/group/list` | List all group names |
-| `POST` | `/api/vm/set-group` | Assign VM to a group |
 
-Groups are implicit -- they are created when a VM is assigned to a group name and disappear when no VMs belong to them. VMs without a group appear under "(Ungrouped)".
-
-### Disk Management
+### Disks
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/disk/list` | List disks |
-| `POST` | `/api/disk/create` | Create disk (`name`, `size`) |
+| `GET` | `/api/disk/list` | List all disks with owner info |
+| `POST` | `/api/disk/create` | Create QCOW2 disk (`name`, `size`) |
 | `POST` | `/api/disk/delete` | Delete disk (`name`) |
 | `POST` | `/api/disk/clone` | Clone disk (`source`, `name`) |
 | `POST` | `/api/disk/resize` | Resize disk (`name`, `size`) |
-| `GET` | `/api/disk/export/{name}` | Export/download disk (see below) |
+| `GET` | `/api/disk/export/{name}` | Export disk (`?format=vmdk\|vdi\|vhdx\|raw`) |
 
-### Disk Export
-
-Export a disk image with optional format conversion. Disk export is only available when the VM is stopped.
-
-```bash
-# Download as qcow2 (default -- no conversion, fastest)
-curl -O -H "X-API-Key: KEY" http://localhost:8080/api/disk/export/mydisk
-
-# Convert and download as VMDK (VMware)
-curl -O -H "X-API-Key: KEY" "http://localhost:8080/api/disk/export/mydisk?format=vmdk"
-
-# Convert and download as VDI (VirtualBox)
-curl -O -H "X-API-Key: KEY" "http://localhost:8080/api/disk/export/mydisk?format=vdi"
-
-# Convert and download as VHDX (Hyper-V)
-curl -O -H "X-API-Key: KEY" "http://localhost:8080/api/disk/export/mydisk?format=vhdx"
-
-# Convert and download as raw image
-curl -O -H "X-API-Key: KEY" "http://localhost:8080/api/disk/export/mydisk?format=raw"
-```
-
-Supported formats: `qcow2` (default), `raw`, `vmdk`, `vdi`, `vhdx`
-
-### Image Import
+### Images
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/image/list` | List disk images |
+| `GET` | `/api/image/list` | List uploaded images |
 | `POST` | `/api/image/upload` | Upload image (auto-converts to qcow2) |
 | `POST` | `/api/image/delete` | Delete image |
 
-Upload supports: qcow2, vmdk, vdi, vhdx, raw, img -- non-qcow2 formats are auto-converted via `qemu-img convert`.
+Supported upload formats: qcow2, vmdk, vdi, vhdx, raw, img
 
-### ISO Management
+### ISOs
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/iso/list` | List ISOs |
+| `GET` | `/api/iso/list` | List ISO files |
 | `POST` | `/api/iso/upload` | Upload ISO (max 4 GB) |
 | `POST` | `/api/iso/delete` | Delete ISO |
-| `POST` | `/api/vm/mountiso` | Mount ISO to VM |
+| `POST` | `/api/vm/mountiso` | Mount ISO to running VM |
 | `POST` | `/api/vm/unmountiso` | Unmount ISO |
 
-### VNC Console
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/vnc/start` | Start VNC session (`smac`, `novncport`) |
-| `POST` | `/api/vnc/stop` | Stop VNC session |
-
-VNC uses QEMU's built-in WebSocket support with automatic port assignment (range 12001-13000). The bundled noVNC viewer is accessible from the Web UI.
-
-### Backup & Migration
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/backup/list` | List backups |
-| `POST` | `/api/backup/delete` | Delete backup |
-| `POST` | `/api/vm/backup` | Create VM backup (gzip snapshot) |
-| `POST` | `/api/vm/livemigrate` | Live migrate VM to another host |
-
-### Virtual Network Switches
+### Networking
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -362,13 +241,82 @@ VNC uses QEMU's built-in WebSocket support with automatic port assignment (range
 | `POST` | `/api/switch/create` | Create switch (`name`) |
 | `POST` | `/api/switch/delete` | Delete switch (`id`) |
 | `POST` | `/api/switch/rename` | Rename switch (`id`, `name`) |
+| `GET` | `/api/vm/{smac}/portforward` | List port forwards |
+| `POST` | `/api/vm/{smac}/portforward` | Add port forward (`protocol`, `host_port`, `guest_port`) |
+| `POST` | `/api/vm/{smac}/portforward/delete` | Delete port forward |
+| `GET` | `/api/internal-network` | List internal VM-to-VM network |
+| `GET` | `/api/mac/list` | List MAC addresses |
+| `GET` | `/api/ip/list` | List IP pool |
+
+### DHCP
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/dhcp/list` | List DHCP leases |
+| `POST` | `/api/dhcp/add` | Add DHCP lease |
+| `POST` | `/api/dhcp/delete` | Delete DHCP lease |
+| `POST` | `/api/dhcp/sync` | Sync DHCP from VMs |
+
+### VNC Console
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/vnc/start` | Start VNC session (`smac`) |
+| `POST` | `/api/vnc/stop` | Stop VNC session |
+
+Auto-assigns VNC ports from range 12001-13000.
+
+### Backup & Migration
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/backup/list` | List backups |
+| `POST` | `/api/backup/delete` | Delete backup |
+| `POST` | `/api/vm/backup` | Create gzip snapshot |
+| `POST` | `/api/vm/livemigrate` | Live migrate to remote host |
 
 ### Metadata Service (MDS)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/vm/{smac}/mds` | Get per-VM metadata config |
-| `POST` | `/api/vm/{smac}/mds` | Save per-VM metadata config |
+| `GET` | `/api/mds/config` | Get global MDS config |
+| `POST` | `/api/mds/config` | Save global MDS config |
+| `GET` | `/api/vm/{smac}/mds` | Get per-VM metadata |
+| `POST` | `/api/vm/{smac}/mds` | Save per-VM metadata |
+
+### SSH Keys
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/sshkey/list` | List saved SSH keys |
+| `POST` | `/api/sshkey/create` | Save SSH key (`name`, `pubkey`) |
+| `POST` | `/api/sshkey/delete` | Delete SSH key (`id`) |
+
+### Template Images
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/template-images` | List template-to-image mappings |
+| `POST` | `/api/template-images/set` | Set mapping (`template_key`, `disk_name`) |
+
+### Utility
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/host/ram` | Get host total/used/available RAM |
+
+### EC2-Compatible Metadata (for VMs)
+
+VMs can query metadata at `http://169.254.169.254` (or the host gateway):
+
+```
+/2009-04-04/user-data
+/2009-04-04/meta-data/instance-id
+/2009-04-04/meta-data/hostname
+/2009-04-04/meta-data/local-ipv4
+/2009-04-04/meta-data/public-keys/0/openssh-key
+/2009-04-04/meta-data/network/interfaces/macs/{mac}/local-ipv4s
+```
 
 ---
 
@@ -376,65 +324,162 @@ VNC uses QEMU's built-in WebSocket support with automatic port assignment (range
 
 ### Network Modes
 
-Each VM network adapter supports:
+Each VM network adapter supports one of three modes:
 
-- **NAT** (default) -- VM gets internet access through the host's NAT. Simple, no extra setup.
-- **Switch** -- VM connects to a virtual switch for Layer 2 inter-VM communication.
+| Mode | Description | Host Access |
+|------|-------------|-------------|
+| **NAT** | SLIRP user-mode networking. VM gets internet via host. | Outbound only (use port forwarding for inbound) |
+| **Switch** | Virtual Layer 2 switch for inter-VM communication. | No host access |
+| **Bridge** | Bridge/TAP mode. VM gets IP on host network. | Full bidirectional (ping, SSH, etc.) |
+
+### NAT + Port Forwarding
+
+NAT is the default mode. VMs can reach the internet but the host cannot initiate connections to VMs. Use **port forwarding** to expose VM services:
+
+```bash
+# Forward host:2222 -> guest:22 (SSH)
+curl -X POST http://localhost:8080/api/vm/{smac}/portforward \
+  -H "Content-Type: application/json" \
+  -d '{"protocol":"tcp","host_port":"2222","guest_port":"22"}'
+```
+
+### Internal VM-to-VM Network
+
+VMs on NAT mode get auto-assigned internal IPs from `192.168.100.0/24` for direct VM-to-VM communication via QEMU socket multicast. The Internal Net tab shows the IP pool and assignments.
 
 ### Virtual Switches
 
-Virtual switches enable direct Layer 2 connectivity between VMs on the same switch. VMs must configure their own IP addresses (no DHCP).
-
-**How it works by platform:**
+Switches create Layer 2 segments for VM-to-VM traffic. Implementation varies by platform:
 
 | Platform | Technology | Details |
 |----------|-----------|---------|
-| **Linux** | OVS + TAP | Open vSwitch bridge with TAP interfaces per VM. Supports VLAN tagging. |
-| **macOS** | QEMU socket multicast | UDP multicast for VM-to-VM traffic. Each switch gets a unique multicast port. |
+| **Linux** | OVS + TAP | Open vSwitch bridge with TAP interfaces. Full VLAN support. |
+| **macOS** | QEMU socket multicast | UDP multicast per switch. VLAN IDs map to different ports. |
 | **Windows** | QEMU socket multicast | Same as macOS. |
 
 ### VLAN Segmentation
 
-VMs on the same switch can be isolated into VLANs. Set the VLAN ID (0-4094) per network adapter:
+VMs on the same switch can be isolated with VLANs (0-4094):
 
-- VLAN `0` = untagged (default, communicates with all VMs on the switch)
-- VLAN `1`-`4094` = tagged (only communicates with VMs on the same VLAN)
+- VLAN `0` = untagged (talks to all VMs on the switch)
+- VLAN `1`-`4094` = tagged (only talks to same VLAN)
 
-On Linux, VLAN tagging is enforced by OVS. On macOS/Windows, VLAN IDs map to different multicast ports for isolation.
+### Bridge Mode
+
+Bridge mode gives VMs an IP address on the host's physical network. The host can directly ping/SSH into VMs.
+
+| Platform | Technology | IP Assignment |
+|----------|-----------|---------------|
+| **macOS** | vmnet-shared | Automatic DHCP from 192.168.64.0/24 |
+| **Linux** | TAP device | Manual or DHCP from host bridge |
+| **Windows** | TAP-Windows Adapter V9 | Manual or DHCP |
+
+> Bridge mode requires **sudo** by default. Configure `bridge_sudo: false` in config.yaml to disable.
 
 ---
 
 ## OS Templates
 
-The Create VM form includes OS templates with recommended defaults:
+The Create VM form includes 8 templates with recommended defaults:
 
-| Template | CPU | Memory | Disk | Notes |
-|----------|-----|--------|------|-------|
-| Ubuntu Server | 1s/2c/1t | 2 GB | 40 GB | Minimal, headless |
-| Ubuntu Desktop | 1s/2c/2t | 4 GB | 60 GB | With GUI |
-| Debian | 1s/2c/1t | 2 GB | 40 GB | Stable, minimal |
-| CentOS / Rocky | 1s/2c/1t | 2 GB | 40 GB | Enterprise Linux |
-| Windows 10/11 | 1s/2c/2t | 4 GB | 64 GB | `is_windows=1` |
-| Windows Server | 1s/4c/2t | 8 GB | 80 GB | `is_windows=1` |
-| macOS | 1s/4c/2t | 8 GB | 80 GB | Requires compatible host |
-| Minimal Linux | 1s/1c/1t | 512 MB | 10 GB | Alpine, Tiny Core, etc. |
+| Template | vCPUs | Memory | Architecture | Notes |
+|----------|-------|--------|-------------|-------|
+| Ubuntu Server | 2 | 2 GB | x86_64 | Headless server |
+| Ubuntu Desktop | 4 | 4 GB | x86_64 | With GUI |
+| Debian | 2 | 1 GB | x86_64 | Stable, minimal |
+| CentOS / Rocky | 2 | 2 GB | x86_64 | Enterprise Linux |
+| Windows 10/11 | 4 | 4 GB | x86_64 | `is_windows=1` |
+| Windows Server | 8 | 8 GB | x86_64 | `is_windows=1` |
+| macOS | 8 | 8 GB | x86_64 | Requires compatible host |
+| Minimal Linux | 1 | 512 MB | x86_64 | Alpine, Tiny Core, etc. |
 
-Templates pre-fill the form -- all values can be customized before creating.
+### Template Image Mapping + Auto-Clone
+
+Each template can be mapped to a base disk image (persisted in DB). When you select a template:
+
+1. The mapped base image is found
+2. A clone is created automatically with name `{vm-name}-disk0`
+3. The cloned disk is set as **Disk 0** -- ready to boot
+
+This means each VM gets its own independent disk copy from the base image.
+
+---
+
+## IOPS Throttling
+
+Disk I/O can be throttled per disk with 6 presets:
+
+| Preset | IOPS | Burst Max | Burst Length |
+|--------|------|-----------|-------------|
+| Low | 3,200 | 3,840 | 60s |
+| Standard | 9,600 | 11,520 | 60s |
+| High | 19,200 | 23,040 | 60s |
+| Ultra | 38,400 | 46,080 | 60s |
+| Max | 76,800 | 92,160 | 60s |
+| Unlimited | No limit | -- | -- |
+| Custom | User-defined | User-defined | User-defined |
+
+---
+
+## Cloud-Init & Metadata Service
+
+Each VM can be configured with cloud-init metadata:
+
+- **Hostname** -- auto-generated or custom
+- **SSH Public Key** -- select from saved keys or paste manually
+- **Root Password** -- default: `changeme`
+- **Custom Userdata** -- additional cloud-init YAML
+- **Internal IP** -- auto-assigned from pool for VM-to-VM networking
+
+The metadata service is EC2-compatible. VMs query it for their configuration during boot via cloud-init's NoCloud datasource.
+
+### Named SSH Keys
+
+SSH public keys can be saved with names in the database. When configuring a VM's cloud-init, select a saved key from the dropdown instead of copy-pasting.
+
+---
+
+## Disk Export
+
+Export stopped VM disks with optional format conversion:
+
+```bash
+# Original qcow2 (fastest, no conversion)
+curl -O http://localhost:8080/api/disk/export/mydisk
+
+# Convert to other formats
+curl -O "http://localhost:8080/api/disk/export/mydisk?format=vmdk"   # VMware
+curl -O "http://localhost:8080/api/disk/export/mydisk?format=vdi"    # VirtualBox
+curl -O "http://localhost:8080/api/disk/export/mydisk?format=vhdx"   # Hyper-V
+curl -O "http://localhost:8080/api/disk/export/mydisk?format=raw"    # Raw image
+```
+
+---
+
+## Database
+
+SQLite with WAL mode. Tables:
+
+| Table | Purpose |
+|-------|---------|
+| `vms` | VM configs, status, group assignments |
+| `disks` | Disk inventory with owner tracking |
+| `switches` | Virtual switch definitions |
+| `dhcp_leases` | DHCP lease records |
+| `ssh_keys` | Named SSH public keys |
+| `template_images` | OS template to base image mappings |
 
 ---
 
 ## Build from Source
 
 ```bash
-# Build for current platform
+# Pick your platform directory
 cd linux   # or mac / windows
 cargo build --release
 
 # Run directly (development)
 cargo run -- server 0.0.0.0:8080
-
-# Run with config file
-./target/release/vm_ctl server 0.0.0.0:8080
 ```
 
 ---
@@ -443,40 +488,36 @@ cargo run -- server 0.0.0.0:8080
 
 ```
 vmcontrol/
-├── src/                    # Root / development code (macOS)
-│   ├── main.rs             # CLI entry + server launcher
-│   ├── server.rs           # Actix-web API routes & handlers
-│   ├── operations.rs       # VM/disk QEMU operations
-│   ├── db.rs               # SQLite database layer
-│   ├── config.rs           # YAML config loader
-│   ├── models.rs           # Data structures
-│   ├── mds.rs              # EC2-compatible metadata service + cloud-init
-│   ├── api_helpers.rs      # QEMU monitor interaction
-│   └── ssh.rs              # Command execution
-├── static/                  # Web UI (single source of truth)
-│   ├── index.html           # Control panel
-│   ├── vnc.html             # VNC viewer (noVNC)
-│   ├── app.js               # Frontend application
-│   ├── style.css            # Styling
-│   └── vendor/novnc/        # Bundled noVNC library
-├── linux/                   # Linux platform
-│   ├── install.sh           # systemd installer
-│   ├── src/                 # Linux-specific config (OVS paths, etc.)
-│   └── static/              # Synced from root static/
-├── mac/                     # macOS platform
-│   ├── install.sh           # launchd installer
-│   ├── src/                 # macOS-specific config (Homebrew paths)
-│   └── static/              # Synced from root static/
-├── windows/                 # Windows platform
-│   ├── install.bat          # NSSM service installer
-│   ├── src/                 # Windows-specific config
-│   └── static/              # Synced from root static/
-├── Cargo.toml               # Root package (v0.3.0)
-├── config.yaml              # Development config
-└── README.md
+├── src/                       # Rust source code
+│   ├── main.rs                # CLI + server entry point
+│   ├── server.rs              # Actix-web API routes & handlers
+│   ├── operations.rs          # QEMU VM/disk operations
+│   ├── db.rs                  # SQLite database layer
+│   ├── config.rs              # YAML config loader
+│   ├── models.rs              # Data structures (VmStartConfig, etc.)
+│   ├── mds.rs                 # EC2-compatible metadata service
+│   ├── api_helpers.rs         # QEMU monitor protocol (QMP)
+│   └── ssh.rs                 # Command execution utilities
+├── static/                    # Web UI (source of truth)
+│   ├── index.html             # Control panel
+│   ├── app.js                 # Frontend application
+│   ├── style.css              # Styling
+│   ├── vnc.html               # noVNC viewer page
+│   └── vendor/novnc/          # Bundled noVNC library
+├── mac/                       # macOS platform
+│   ├── install.sh             # launchd installer
+│   └── src/                   # macOS-specific config defaults
+├── linux/                     # Linux platform
+│   ├── install.sh             # systemd installer
+│   └── src/                   # Linux-specific config defaults
+├── windows/                   # Windows platform
+│   ├── install.bat            # NSSM service installer
+│   └── src/                   # Windows-specific config defaults
+├── Cargo.toml                 # Package manifest (v0.3.0)
+└── config.yaml                # Development config
 ```
 
-### Tech Stack
+## Tech Stack
 
 | Component | Technology |
 |-----------|-----------|
@@ -485,7 +526,7 @@ vmcontrol/
 | Frontend | Vanilla JS, HTML, CSS |
 | VNC | noVNC + QEMU WebSocket |
 | VM Engine | QEMU/KVM |
-| Networking | OVS+TAP (Linux), QEMU socket multicast (macOS/Windows) |
+| Networking | OVS+TAP (Linux), vmnet-shared (macOS), TAP-Windows (Windows), QEMU multicast |
 | Cloud-Init | NoCloud seed ISO generation |
 | Config | YAML (serde_yaml_ng) |
 
