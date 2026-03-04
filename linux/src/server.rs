@@ -228,6 +228,30 @@ async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json
                 }
             }
 
+            // Validate internal_ip format and uniqueness (if provided)
+            let new_internal = new_mds
+                .get("internal_ip")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !new_internal.is_empty() {
+                if let Err(e) = crate::ssh::validate_ip(new_internal) {
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: format!("Invalid internal_ip: {}", e),
+                        output: None,
+                    });
+                }
+                if let Err(e) =
+                    operations::validate_internal_ip_unique(new_internal, Some(&smac))
+                {
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: e,
+                        output: None,
+                    });
+                }
+            }
+
             // Validate root_password minimum length (if provided)
             let new_pw = new_mds.get("root_password").and_then(|v| v.as_str()).unwrap_or("");
             if !new_pw.is_empty() && new_pw.len() < 6 {
@@ -1610,6 +1634,58 @@ async fn list_ip_pool_handler() -> HttpResponse {
     }))
 }
 
+async fn list_internal_network_handler() -> HttpResponse {
+    let vms = crate::db::list_vms().unwrap_or_default();
+    let mut members: Vec<serde_json::Value> = Vec::new();
+    for vm in &vms {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+            let ip = cfg
+                .get("mds")
+                .and_then(|m| m.get("internal_ip"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !ip.is_empty() {
+                let internal_mac = operations::derive_internal_mac(ip);
+                let hostname = cfg
+                    .get("mds")
+                    .and_then(|m| m.get("hostname_prefix"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                members.push(serde_json::json!({
+                    "vm_name": vm.smac,
+                    "internal_ip": ip,
+                    "internal_mac": internal_mac,
+                    "hostname": hostname,
+                    "status": vm.status,
+                }));
+            }
+        }
+    }
+    // Sort by internal IP numerically
+    members.sort_by(|a, b| {
+        let ip_a = a["internal_ip"].as_str().unwrap_or("");
+        let ip_b = b["internal_ip"].as_str().unwrap_or("");
+        let parse_ip = |ip: &str| -> u32 {
+            ip.split('.')
+                .enumerate()
+                .fold(0u32, |acc, (i, p)| {
+                    acc | ((p.parse::<u32>().unwrap_or(0)) << (8 * (3 - i)))
+                })
+        };
+        parse_ip(ip_a).cmp(&parse_ip(ip_b))
+    });
+
+    let next = operations::next_internal_ip();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "members": members,
+        "total": members.len(),
+        "next_available": next,
+        "subnet": "192.168.100.0/24",
+        "multicast_group": "230.0.100.1",
+    }))
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -1720,6 +1796,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/{smac}/portforward/delete", web::post().to(delete_port_forward_handler))
             // IP pool routes
             .route("/api/ip/list", web::get().to(list_ip_pool_handler))
+            // Internal network routes (VM-to-VM in NAT)
+            .route("/api/internal-network", web::get().to(list_internal_network_handler))
             // DHCP routes
             .route("/api/dhcp/list", web::get().to(list_dhcp_handler))
             .route("/api/dhcp/add", web::post().to(add_dhcp_handler))

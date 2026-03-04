@@ -34,7 +34,7 @@ async fn main() {
     if args.len() == 2 {
         match mode.as_str() {
             "stop" => println!("Usage : {} stop '{{\"smac\": \"52-54-c4-ca-42-38\"}}'", prog),
-            "start" => println!("Usage : {} start '{{\"cpu\": {{\"sockets\": \"1\",\"cores\": \"2\",\"threads\": \"1\"}},\"memory\": {{\"size\": \"2048\"}},\"features\": {{\"is_windows\": \"0\"}},\"network_adapters\": [{{\"netid\": \"0\",\"mac\": \"52:54:c4:ca:42:38\",\"vlan\": \"0\"}}],\"disks\": [{{\"diskid\": \"0\",\"diskname\": \"52-54-c4-ca-42-38\",\"iops-total\": \"9600\",\"iops-total-max\": \"11520\",\"iops-total-max-length\": \"60\"}}]}}'", prog),
+            "start" => println!("Usage : {} start '{{\"cpu\": {{\"vcpus\": \"4\"}},\"memory\": {{\"size\": \"2048\"}},\"features\": {{\"is_windows\": \"0\"}},\"network_adapters\": [{{\"netid\": \"0\",\"mac\": \"52:54:c4:ca:42:38\",\"vlan\": \"0\"}}],\"disks\": [{{\"diskid\": \"0\",\"diskname\": \"52-54-c4-ca-42-38\",\"iops-total\": \"9600\",\"iops-total-max\": \"11520\",\"iops-total-max-length\": \"60\"}}]}}'", prog),
             "startlive" => println!("Usage : {} startlive", prog),
             "powerdown" => println!("Usage : {} powerdown '{{\"smac\": \"52-54-c4-ca-42-38\"}}'", prog),
             "reset" => println!("Usage : {} reset '{{\"smac\": \"52-54-c4-ca-42-38\"}}'", prog),

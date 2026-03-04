@@ -87,9 +87,7 @@
             <div class="form-grid">
                 <fieldset>
                     <legend>CPU</legend>
-                    <label>Sockets <input type="text" id="start-cpu-sockets" value="1"></label>
-                    <label>Cores <input type="text" id="start-cpu-cores" value="2"></label>
-                    <label>Threads <input type="text" id="start-cpu-threads" value="1"></label>
+                    <label>vCPUs <input type="number" id="start-vcpus" value="2" min="1" max="128"></label>
                 </fieldset>
                 <fieldset>
                     <legend>Memory</legend>
@@ -221,6 +219,7 @@
             <fieldset>
                 <legend>Network</legend>
                 <label>Local IPv4 <input type="text" id="mds-local-ipv4" placeholder="10.0.1.10"></label>
+                <label>Internal IP (VM-to-VM) <input type="text" id="mds-internal-ip" placeholder="192.168.100.10"></label>
                 <label>VLAN <input type="text" id="mds-vlan" placeholder="0"></label>
                 <label>Default MAC <input type="text" id="mds-default-mac" placeholder="52:54:00:00:00:01"></label>
             </fieldset>

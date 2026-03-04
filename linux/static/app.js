@@ -39,14 +39,14 @@ function escapeHtml(str) {
 // OS Templates — image: default disk name pattern for auto-match
 var OS_TEMPLATES = {
     'custom':          null,
-    'ubuntu-server':   { sockets: '1', cores: '2', threads: '1', memory: '2048', is_windows: '0', image: 'ubuntu-server' },
-    'ubuntu-desktop':  { sockets: '1', cores: '4', threads: '1', memory: '4096', is_windows: '0', image: 'ubuntu-desktop' },
-    'debian':          { sockets: '1', cores: '2', threads: '1', memory: '1024', is_windows: '0', image: 'debian' },
-    'centos-rocky':    { sockets: '1', cores: '2', threads: '1', memory: '2048', is_windows: '0', image: 'centos' },
-    'windows-desktop': { sockets: '1', cores: '4', threads: '2', memory: '4096', is_windows: '1', image: 'windows-10' },
-    'windows-server':  { sockets: '1', cores: '4', threads: '2', memory: '8192', is_windows: '1', image: 'windows-server' },
-    'macos':           { sockets: '1', cores: '4', threads: '2', memory: '8192', is_windows: '0', image: 'macos' },
-    'minimal-linux':   { sockets: '1', cores: '1', threads: '1', memory: '512',  is_windows: '0', image: 'minimal' },
+    'ubuntu-server':   { vcpus: '2', memory: '2048', is_windows: '0', image: 'ubuntu-server' },
+    'ubuntu-desktop':  { vcpus: '4', memory: '4096', is_windows: '0', image: 'ubuntu-desktop' },
+    'debian':          { vcpus: '2', memory: '1024', is_windows: '0', image: 'debian' },
+    'centos-rocky':    { vcpus: '2', memory: '2048', is_windows: '0', image: 'centos' },
+    'windows-desktop': { vcpus: '4', memory: '4096', is_windows: '1', image: 'windows-10' },
+    'windows-server':  { vcpus: '8', memory: '8192', is_windows: '1', image: 'windows-server' },
+    'macos':           { vcpus: '8', memory: '8192', is_windows: '0', image: 'macos' },
+    'minimal-linux':   { vcpus: '1', memory: '512',  is_windows: '0', image: 'minimal' },
 };
 
 // Load saved template-to-image mappings from localStorage
@@ -95,9 +95,7 @@ function applyOsTemplate() {
     }
 
     // Fill CPU / Memory / Features
-    document.getElementById('start-cpu-sockets').value = tpl.sockets;
-    document.getElementById('start-cpu-cores').value = tpl.cores;
-    document.getElementById('start-cpu-threads').value = tpl.threads;
+    document.getElementById('start-vcpus').value = tpl.vcpus;
     document.getElementById('start-memory-size').value = tpl.memory;
     document.getElementById('start-is-windows').value = tpl.is_windows;
     document.getElementById('start-arch').value = tpl.arch || 'x86_64';
@@ -389,9 +387,7 @@ function collectVmConfig() {
 
     return {
         cpu: {
-            sockets: val('start-cpu-sockets'),
-            cores: val('start-cpu-cores'),
-            threads: val('start-cpu-threads'),
+            vcpus: val('start-vcpus'),
         },
         memory: { size: val('start-memory-size') },
         features: { is_windows: val('start-is-windows'), arch: val('start-arch'), cloudinit: val('start-cloudinit') },
@@ -1274,6 +1270,7 @@ async function loadMdsConfig() {
             // Auto-generate unique IPv4 if empty or default
             var ipv4 = config.local_ipv4;
             document.getElementById('mds-local-ipv4').value = (!ipv4 || ipv4 === '10.0.0.1') ? genUniqueIpv4(smac) : ipv4;
+            document.getElementById('mds-internal-ip').value = config.internal_ip || '';
             document.getElementById('mds-vlan').value = config.vlan || '0';
             // Default MAC: pull from VM's Network Adapter 0
             var vmMac = '';
@@ -1336,6 +1333,7 @@ async function saveMdsConfig() {
         ami_id: val('mds-ami-id'),
         hostname_prefix: val('mds-hostname-prefix'),
         local_ipv4: val('mds-local-ipv4'),
+        internal_ip: val('mds-internal-ip'),
         vlan: val('mds-vlan') || '0',
         ssh_pubkey: val('mds-ssh-pubkey'),
         root_password: val('mds-root-password'),
@@ -1436,7 +1434,7 @@ async function loadVmListTable() {
             groupVms.forEach(function(vm) {
                 var config = {};
                 try { config = JSON.parse(vm.config); } catch(e) {}
-                var cpuText = config.cpu ? escapeHtml(config.cpu.cores) + 'c/' + escapeHtml(config.cpu.threads) + 't' : '-';
+                var cpuText = config.cpu ? (config.cpu.vcpus && config.cpu.vcpus !== '0' ? escapeHtml(config.cpu.vcpus) + ' vCPU' : escapeHtml(config.cpu.cores || '1') + 'c/' + escapeHtml(config.cpu.threads || '1') + 't') : '-';
                 var memText = config.memory ? escapeHtml(config.memory.size) + 'MB' : '-';
                 var isStopped = vm.status !== 'running';
                 var diskText = (config.disks && config.disks.length > 0) ? config.disks.map(function(d) {
@@ -1550,9 +1548,15 @@ async function editVm(smac) {
 
             // Fill CPU/Memory/Features
             if (config.cpu) {
-                document.getElementById('start-cpu-sockets').value = config.cpu.sockets || '1';
-                document.getElementById('start-cpu-cores').value = config.cpu.cores || '2';
-                document.getElementById('start-cpu-threads').value = config.cpu.threads || '1';
+                // Backward compat: compute vcpus from sockets*cores*threads if vcpus not set
+                var vcpus = config.cpu.vcpus;
+                if (!vcpus || vcpus === '0') {
+                    var s = parseInt(config.cpu.sockets || '1');
+                    var c = parseInt(config.cpu.cores || '1');
+                    var t = parseInt(config.cpu.threads || '1');
+                    vcpus = String(s * c * t);
+                }
+                document.getElementById('start-vcpus').value = vcpus;
             }
             if (config.memory) {
                 document.getElementById('start-memory-size').value = config.memory.size || '2048';

@@ -1,5 +1,5 @@
 use crate::api_helpers::{send_cmd_pctl, set_ma_mode, set_update_status};
-use crate::config::get_conf;
+use crate::config::{get_conf, get_conf_or};
 use crate::db;
 use crate::mds;
 use crate::models::*;
@@ -107,11 +107,48 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     // Generate user-data (cloud-config for NoCloud)
     let user_data = mds::generate_userdata_nocloud(&config);
 
-    // Write files (no network-config — let SLIRP DHCP handle networking)
+    // Write files
     std::fs::write(format!("{}/meta-data", seed_dir), &meta_data)
         .map_err(|e| format!("Failed to write meta-data: {}", e))?;
     std::fs::write(format!("{}/user-data", seed_dir), &user_data)
         .map_err(|e| format!("Failed to write user-data: {}", e))?;
+
+    // Generate network-config for internal NIC (cloud-init NoCloud, version 2)
+    if !config.internal_ip.is_empty() {
+        let primary_mac = if let Ok(vm_rec) = db::get_vm(vm_name) {
+            let vm_cfg: serde_json::Value =
+                serde_json::from_str(&vm_rec.config).unwrap_or_default();
+            vm_cfg
+                .get("network_adapters")
+                .and_then(|a| a.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|a| a.get("mac"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string()
+        } else {
+            String::new()
+        };
+
+        let internal_mac = derive_internal_mac(&config.internal_ip);
+        let mut net_cfg = String::from("version: 2\nethernets:\n");
+        // Primary NIC — DHCP from SLIRP (preserves existing behavior)
+        if !primary_mac.is_empty() {
+            net_cfg.push_str("  primary:\n");
+            net_cfg.push_str("    match:\n");
+            net_cfg.push_str(&format!("      macaddress: \"{}\"\n", primary_mac));
+            net_cfg.push_str("    dhcp4: true\n");
+        }
+        // Internal NIC — static IP on shared 192.168.100.0/24 subnet
+        net_cfg.push_str("  internal:\n");
+        net_cfg.push_str("    match:\n");
+        net_cfg.push_str(&format!("      macaddress: \"{}\"\n", internal_mac));
+        net_cfg.push_str("    addresses:\n");
+        net_cfg.push_str(&format!("      - {}/24\n", config.internal_ip));
+
+        std::fs::write(format!("{}/network-config", seed_dir), &net_cfg)
+            .map_err(|e| format!("Failed to write network-config: {}", e))?;
+    }
 
     // Create ISO using hdiutil (macOS) — safe: no shell involved
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
@@ -358,15 +395,42 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
     }
 
+    // Internal network — shared L2 multicast for VM-to-VM communication
+    if !mds_config.internal_ip.is_empty() {
+        let internal_mac = derive_internal_mac(&mds_config.internal_ip);
+        let internal_mcast_port = get_conf_or("internal_mcast_port", "11111");
+
+        output_log.push_str(&format!("internal_ip : {}\n", mds_config.internal_ip));
+        output_log.push_str(&format!("internal_mac: {}\n", internal_mac));
+        output_log.push_str(&format!("internal_net: 230.0.100.1:{}\n", internal_mcast_port));
+
+        qemu_args.push("-netdev".into());
+        qemu_args.push(format!(
+            "socket,id=netint,mcast=230.0.100.1:{}",
+            internal_mcast_port
+        ));
+        qemu_args.push("-device".into());
+        qemu_args.push(format!(
+            "virtio-net-pci,netdev=netint,mac={}",
+            internal_mac
+        ));
+    }
+
     // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
     qemu_args.push("-machine".into());
     qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
 
-    // SMP — correctly compute total = sockets * cores * threads
-    let sockets: u32 = cfg.cpu.sockets.parse().unwrap_or(1);
-    let cores: u32 = cfg.cpu.cores.parse().unwrap_or(1);
-    let threads: u32 = cfg.cpu.threads.parse().unwrap_or(1);
-    let total_cpus = sockets * cores * threads;
+    // SMP — if vcpus is set, auto-compute topology; otherwise use explicit values
+    let vcpus: u32 = cfg.cpu.vcpus.parse().unwrap_or(0);
+    let (total_cpus, sockets, cores, threads) = if vcpus > 0 {
+        // Auto topology: 1 socket, vcpus cores, 1 thread
+        (vcpus, 1u32, vcpus, 1u32)
+    } else {
+        let s: u32 = cfg.cpu.sockets.parse().unwrap_or(1);
+        let c: u32 = cfg.cpu.cores.parse().unwrap_or(1);
+        let t: u32 = cfg.cpu.threads.parse().unwrap_or(1);
+        (s * c * t, s, c, t)
+    };
     qemu_args.push("-smp".into());
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
@@ -680,6 +744,86 @@ pub fn next_ipv4() -> String {
     "10.0.1.10".to_string()
 }
 
+// ──────────────────────────────────────────
+// Internal network IP pool (VM-to-VM in NAT)
+// ──────────────────────────────────────────
+
+/// Derive a unique MAC address for the internal NIC from the internal IP.
+/// e.g. 192.168.100.10 → 52:54:01:00:00:0a
+pub fn derive_internal_mac(internal_ip: &str) -> String {
+    let last_octet: u8 = internal_ip
+        .rsplit('.')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    format!("52:54:01:00:00:{:02x}", last_octet)
+}
+
+/// Collect all internal IPs used by VMs in DB
+fn used_internal_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(ip) = cfg
+                    .get("mds")
+                    .and_then(|m| m.get("internal_ip"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !ip.is_empty() {
+                        ips.push(ip.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ips
+}
+
+/// Find next available internal IP: 192.168.100.{10..254}
+pub fn next_internal_ip() -> String {
+    let used = used_internal_ips();
+    for host in 10u8..=254 {
+        let ip = format!("192.168.100.{}", host);
+        if !used.contains(&ip) {
+            return ip;
+        }
+    }
+    // Fallback (should never reach with 245 available)
+    "192.168.100.10".to_string()
+}
+
+/// Check that an internal IP is not already used by another VM.
+pub fn validate_internal_ip_unique(ip: &str, exclude_smac: Option<&str>) -> Result<(), String> {
+    if ip.is_empty() {
+        return Ok(());
+    }
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Some(exc) = exclude_smac {
+                if vm.smac == exc {
+                    continue;
+                }
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(existing_ip) = cfg
+                    .get("mds")
+                    .and_then(|m| m.get("internal_ip"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !existing_ip.is_empty() && existing_ip == ip {
+                        return Err(format!(
+                            "Internal IP '{}' is already assigned to VM '{}'",
+                            ip, vm.smac
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Collect all MAC addresses used by all VMs in DB.
 /// Returns Vec<(mac, vm_name)> for error reporting.
 fn used_macs(exclude_smac: Option<&str>) -> Vec<(String, String)> {
@@ -797,6 +941,34 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
     // Validate IP uniqueness
     if let Some(ip) = config.get("mds").and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()) {
         validate_ip_unique(ip, None)?;
+    }
+    // Auto-assign internal_ip for VM-to-VM communication
+    {
+        let needs_internal = match config
+            .get("mds")
+            .and_then(|m| m.get("internal_ip"))
+            .and_then(|v| v.as_str())
+        {
+            Some(ip) if !ip.is_empty() => false,
+            _ => true,
+        };
+        if needs_internal {
+            let ip = next_internal_ip();
+            if config.get("mds").is_none() {
+                config["mds"] = serde_json::json!({});
+            }
+            config["mds"]["internal_ip"] = serde_json::json!(ip);
+        }
+    }
+    // Validate internal IP uniqueness
+    if let Some(ip) = config
+        .get("mds")
+        .and_then(|m| m.get("internal_ip"))
+        .and_then(|v| v.as_str())
+    {
+        if !ip.is_empty() {
+            validate_internal_ip_unique(ip, None)?;
+        }
     }
     // Validate MAC address uniqueness before saving
     validate_mac_uniqueness(&config, None)?;

@@ -26,6 +26,7 @@ fn defaults() -> HashMap<String, String> {
     m.insert("qemu_aarch64_path".into(), "/opt/homebrew/bin/qemu-system-aarch64".into());
     m.insert("edk2_aarch64_bios".into(), "/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into());
     m.insert("ovs_vsctl_path".into(), "/opt/homebrew/bin/ovs-vsctl".into());
+    m.insert("internal_mcast_port".into(), "11111".into());
     m
 }
 
@@ -59,4 +60,10 @@ pub fn get_conf(name: &str) -> String {
         eprintln!("config: key '{}' not found", name);
         String::new()
     })
+}
+
+/// Get config value with explicit fallback default
+pub fn get_conf_or(name: &str, default: &str) -> String {
+    let map = CONFIG_CACHE.get_or_init(load_config);
+    map.get(name).cloned().unwrap_or_else(|| default.to_string())
 }

@@ -13,10 +13,19 @@ pub struct VmStartConfig {
     pub vnc_port: u16,
 }
 
+fn default_one() -> String { "1".into() }
+fn default_zero() -> String { "0".into() }
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct CpuInfo {
+    /// Number of vCPUs — if set (>0), sockets/cores/threads are auto-computed
+    #[serde(default = "default_zero")]
+    pub vcpus: String,
+    #[serde(default = "default_one")]
     pub sockets: String,
+    #[serde(default = "default_one")]
     pub cores: String,
+    #[serde(default = "default_one")]
     pub threads: String,
 }
 
