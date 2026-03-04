@@ -156,6 +156,8 @@ async function loadOsTemplates() {
         });
         // Populate the Create VM template dropdown
         populateOsTemplateDropdown();
+        // Populate template image dropdown
+        populateTplImageSelect();
         // Render management list
         renderOsTemplateList();
     } catch (e) {
@@ -330,6 +332,64 @@ function findMatchingDisk(pattern) {
 
 // ── OS Template Management ──
 
+// Populate template image dropdown from disk list
+function populateTplImageSelect(selectedValue) {
+    var sel = document.getElementById('tpl-image');
+    if (!sel) return;
+    var disks = window._diskList || [];
+    var current = selectedValue !== undefined ? selectedValue : sel.value;
+    sel.innerHTML = '<option value="">-- no image --</option>';
+    disks.forEach(function(d) {
+        var opt = document.createElement('option');
+        opt.value = d.name;
+        var sizeInfo = d.disk_size || formatSize(d.size);
+        opt.textContent = d.name + '.qcow2 (' + sizeInfo + ')';
+        sel.appendChild(opt);
+    });
+    if (current) sel.value = current;
+}
+
+// Upload qcow2 image for templates (reuses /api/image/upload)
+window.uploadTemplateImage = function() {
+    var fileInput = document.getElementById('tpl-image-file');
+    if (!fileInput.files.length) { alert('Select a file'); return; }
+    var file = fileInput.files[0];
+    var progressDiv = document.getElementById('tpl-upload-progress');
+    var progressBar = document.getElementById('tpl-progress-bar');
+    var progressText = document.getElementById('tpl-progress-text');
+    progressDiv.style.display = '';
+    progressBar.value = 0;
+    progressText.textContent = '0%';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/image/upload', true);
+    var key = localStorage.getItem('vmcontrol_api_key') || '';
+    if (key) xhr.setRequestHeader('X-API-Key', key);
+    xhr.setRequestHeader('X-Filename', file.name.replace(/[^a-zA-Z0-9._-]/g, '_'));
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            var pct = Math.round(e.loaded / e.total * 100);
+            progressBar.value = pct;
+            progressText.textContent = pct + '%';
+        }
+    };
+    xhr.onload = function() {
+        progressDiv.style.display = 'none';
+        fileInput.value = '';
+        if (xhr.status === 200) {
+            // Reload disk list then refresh the image dropdown
+            loadDiskList().then(function() { populateTplImageSelect(); });
+        } else {
+            alert('Upload failed: ' + xhr.responseText);
+        }
+    };
+    xhr.onerror = function() {
+        progressDiv.style.display = 'none';
+        alert('Upload error');
+    };
+    xhr.send(file);
+};
+
 function renderOsTemplateList() {
     var listDiv = document.getElementById('os-template-list');
     if (!listDiv) return;
@@ -464,7 +524,7 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         // Auto-load switch list when switching to switches tab
         if (tab.dataset.tab === 'switches') { loadSwitchList(); }
         // Auto-load OS template list when switching to os-templates tab
-        if (tab.dataset.tab === 'os-templates') { loadOsTemplates(); }
+        if (tab.dataset.tab === 'os-templates') { loadDiskList().then(function() { loadOsTemplates(); }); }
     });
 });
 

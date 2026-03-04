@@ -331,11 +331,20 @@
                         <option value="aarch64">aarch64</option>
                     </select></label>
                 </div>
-                <label>Image Pattern <input type="text" id="tpl-image" placeholder="ubuntu-server"></label>
+                <label>Base Image <select id="tpl-image"><option value="">-- no image --</option></select></label>
                 <div class="btn-group">
                     <button class="execute-btn" onclick="saveOsTemplate()">Save</button>
                     <button class="execute-btn btn-unmount" onclick="resetTplForm()">Cancel</button>
                 </div>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>Upload Template Image (.qcow2)</legend>
+                <input type="file" id="tpl-image-file" accept=".qcow2,.img,.vmdk,.vdi,.vhdx,.raw">
+                <div id="tpl-upload-progress" style="display:none; margin-top:8px;">
+                    <progress id="tpl-progress-bar" value="0" max="100" style="width:100%;"></progress>
+                    <span id="tpl-progress-text"></span>
+                </div>
+                <button class="execute-btn" onclick="uploadTemplateImage()" style="margin-top:8px;">Upload</button>
             </fieldset>
             <fieldset style="margin-top:16px;">
                 <legend>Existing Templates</legend>
