@@ -249,13 +249,13 @@ function applyOsTemplate() {
 // Auto-clone a base image and set cloned disk as disk 0
 async function autoCloneDiskForTemplate(sourceImage) {
     var vmName = val('create-vm-name').trim();
-    // Generate clone name: {vm-name}-disk0 or {source}-{timestamp}
+    // Generate random suffix (6 chars)
+    var rand = Math.random().toString(36).substring(2, 8);
     var cloneName;
     if (vmName) {
-        cloneName = vmName + '-disk0';
+        cloneName = vmName + '-' + rand;
     } else {
-        var ts = Date.now().toString(36);
-        cloneName = sourceImage + '-' + ts;
+        cloneName = sourceImage.replace(/^template-/, '') + '-' + rand;
     }
 
     var statusEl = document.getElementById('status-indicator');
