@@ -49,16 +49,34 @@ var OS_TEMPLATES = {
     'minimal-linux':   { vcpus: '1', memory: '512',  is_windows: '0', image: 'minimal' },
 };
 
-// Load saved template-to-image mappings from localStorage
-function loadImageMappings() {
-    try { return JSON.parse(localStorage.getItem('os_template_images') || '{}'); }
-    catch(e) { return {}; }
+// Template-to-image mappings (cached from server)
+window._templateImageMap = {};
+
+async function loadImageMappings() {
+    try {
+        var response = await apiFetch('/api/template-images');
+        var map = await safeJson(response);
+        window._templateImageMap = map || {};
+    } catch (e) {
+        window._templateImageMap = {};
+    }
+    return window._templateImageMap;
 }
+
+function getImageMappings() {
+    return window._templateImageMap || {};
+}
+
 function saveImageMapping(templateKey, diskName) {
-    var map = loadImageMappings();
-    if (diskName) { map[templateKey] = diskName; }
-    else { delete map[templateKey]; }
-    localStorage.setItem('os_template_images', JSON.stringify(map));
+    // Update local cache immediately
+    if (diskName) { window._templateImageMap[templateKey] = diskName; }
+    else { delete window._templateImageMap[templateKey]; }
+    // Persist to server (fire and forget)
+    apiFetch('/api/template-images/set', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template_key: templateKey, disk_name: diskName || '' })
+    }).catch(function(e) { console.error('Failed to save template image mapping:', e); });
 }
 
 // Populate Base Image dropdown with all available disk images
@@ -101,7 +119,7 @@ function applyOsTemplate() {
     document.getElementById('start-arch').value = tpl.arch || 'x86_64';
 
     // Resolve base image: saved mapping → auto-match → none
-    var savedMap = loadImageMappings();
+    var savedMap = getImageMappings();
     var imageName = savedMap[templateKey] || null;
 
     // Verify saved image still exists
@@ -194,7 +212,7 @@ function updateTemplateInfo(templateKey, imageName) {
     var tpl = OS_TEMPLATES[templateKey];
     if (!tpl) { infoDiv.innerHTML = ''; return; }
 
-    var savedMap = loadImageMappings();
+    var savedMap = getImageMappings();
     var isSaved = savedMap[templateKey] === imageName;
 
     if (imageName) {
@@ -2063,4 +2081,5 @@ window.addEventListener('DOMContentLoaded', function() {
     loadVmListTable();
     loadSwitchList();
     loadGroupList();
+    loadImageMappings();
 });

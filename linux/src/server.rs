@@ -1296,6 +1296,58 @@ async fn rename_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 }
 
+// ======== Template Image Mappings ========
+
+async fn list_template_images_handler() -> HttpResponse {
+    match crate::db::list_template_images() {
+        Ok(mappings) => {
+            let map: serde_json::Map<String, serde_json::Value> = mappings
+                .into_iter()
+                .map(|(k, v)| (k, serde_json::json!(v)))
+                .collect();
+            HttpResponse::Ok().json(map)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list template images: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn set_template_image_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let template_key = match body.get("template_key").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing or empty 'template_key' field".into(),
+                output: None,
+            });
+        }
+    };
+    let disk_name = body.get("disk_name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match crate::db::set_template_image(&template_key, &disk_name) {
+        Ok(_) => {
+            let msg = if disk_name.is_empty() {
+                format!("Template '{}' image cleared", template_key)
+            } else {
+                format!("Template '{}' → {}", template_key, disk_name)
+            };
+            HttpResponse::Ok().json(ApiResponse {
+                success: true,
+                message: msg,
+                output: None,
+            })
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
 // ======== SSH Key Management ========
 
 async fn list_ssh_keys_handler() -> HttpResponse {
@@ -1903,6 +1955,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/sshkey/list", web::get().to(list_ssh_keys_handler))
             .route("/api/sshkey/create", web::post().to(create_ssh_key_handler))
             .route("/api/sshkey/delete", web::post().to(delete_ssh_key_handler))
+            // Template image mapping routes
+            .route("/api/template-images", web::get().to(list_template_images_handler))
+            .route("/api/template-images/set", web::post().to(set_template_image_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

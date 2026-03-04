@@ -112,6 +112,14 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB ssh_keys table init error: {}", e))?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS template_images (
+            template_key TEXT PRIMARY KEY,
+            disk_name TEXT NOT NULL
+        );",
+    )
+    .map_err(|e| format!("DB template_images table init error: {}", e))?;
+
     Ok(conn)
 }
 
@@ -530,4 +538,37 @@ pub fn delete_ssh_key(id: i64) -> Result<(), String> {
     conn.execute("DELETE FROM ssh_keys WHERE id = ?1", params![id])
         .map_err(|e| format!("DB delete ssh key error: {}", e))?;
     Ok(())
+}
+
+// ── Template Image Mappings ──
+
+pub fn set_template_image(template_key: &str, disk_name: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    if disk_name.is_empty() {
+        conn.execute("DELETE FROM template_images WHERE template_key = ?1", params![template_key])
+            .map_err(|e| format!("DB delete template image error: {}", e))?;
+    } else {
+        conn.execute(
+            "INSERT INTO template_images (template_key, disk_name) VALUES (?1, ?2)
+             ON CONFLICT(template_key) DO UPDATE SET disk_name = ?2",
+            params![template_key, disk_name],
+        )
+        .map_err(|e| format!("DB set template image error: {}", e))?;
+    }
+    Ok(())
+}
+
+pub fn list_template_images() -> Result<Vec<(String, String)>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT template_key, disk_name FROM template_images ORDER BY template_key ASC")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(result)
 }
