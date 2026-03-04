@@ -349,6 +349,44 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "vnc_stop", operations::vnc_stop).await
 }
 
+/// Query QEMU block device info — returns per-drive mount status (cd0–cd3)
+async fn blockinfo_handler(path: web::Path<String>) -> HttpResponse {
+    let smac = path.into_inner();
+    match crate::api_helpers::qemu_monitor_cmd(&smac, "info block") {
+        Ok(raw) => {
+            // Parse "info block" output to extract cd0–cd3 status
+            // Format: "cd0 (#block123): /path/to/file.iso (raw, read-only)" or "cd0: [not inserted]"
+            let mut drives = serde_json::Map::new();
+            for i in 0..4 {
+                let drive_id = format!("cd{}", i);
+                let mut mounted = false;
+                let mut file = String::new();
+                for line in raw.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with(&format!("{} ", drive_id)) || trimmed.starts_with(&format!("{}:", drive_id)) {
+                        if !trimmed.contains("[not inserted]") && !trimmed.contains("not inserted") {
+                            mounted = true;
+                            // Extract filename from path
+                            if let Some(colon_pos) = trimmed.find(": ") {
+                                let rest = &trimmed[colon_pos + 2..];
+                                let path_str = rest.split(' ').next().unwrap_or("");
+                                file = path_str.rsplit('/').next().unwrap_or(path_str).to_string();
+                            }
+                        }
+                    }
+                }
+                drives.insert(drive_id, serde_json::json!({ "mounted": mounted, "file": file }));
+            }
+            HttpResponse::Ok().json(drives)
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to query block info: {}", e),
+            output: None,
+        }),
+    }
+}
+
 /// Generate a one-time VNC access token for a VM
 async fn vnc_token_handler(
     body: web::Json<serde_json::Value>,
@@ -2260,6 +2298,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/os-templates/create", web::post().to(create_os_template_handler))
             .route("/api/os-templates/update", web::post().to(update_os_template_handler))
             .route("/api/os-templates/delete", web::post().to(delete_os_template_handler))
+            // Block info route (per-drive mount status)
+            .route("/api/vm/blockinfo/{smac}", web::get().to(blockinfo_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

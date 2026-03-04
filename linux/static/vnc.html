@@ -87,6 +87,14 @@
         .placeholder { text-align: center; color: #484f58; }
         .placeholder h2 { font-size: 24px; margin-bottom: 8px; }
         .placeholder p { font-size: 14px; }
+        .cd-row {
+            display: flex; align-items: center; gap: 6px; padding: 2px 0;
+            font-size: 13px;
+        }
+        .cd-label { color: #8b949e; font-weight: 600; min-width: 30px; }
+        .cd-file { color: #3fb950; font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cd-row select { min-width: 100px; font-size: 12px; padding: 2px 4px; }
+        .cd-row button { font-size: 11px; padding: 2px 8px; }
     </style>
 </head>
 <body>
@@ -100,15 +108,7 @@
         <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" style="display:none">Disconnect</button>
         <button class="btn-fullscreen" onclick="toggleFullscreen()">Fullscreen</button>
         <button class="btn-reset" onclick="doReset()">Reset VM</button>
-        <select id="vnc-drive-select" style="min-width:60px;">
-            <option value="cd0">cd0</option>
-            <option value="cd1">cd1</option>
-            <option value="cd2">cd2</option>
-            <option value="cd3">cd3</option>
-        </select>
-        <select id="iso-select"><option value="">-- ISO --</option></select>
-        <button class="btn-action" onclick="doMountIso()">Mount</button>
-        <button class="btn-unmount" onclick="doUnmountIso()">Unmount</button>
+        <div id="cd-drives" style="display:flex;flex-direction:column;gap:2px;"></div>
         <button onclick="doSendCtrlAltDel()" style="background:#6e40c9;color:#fff;">Ctrl+Alt+Del</button>
         <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
@@ -249,28 +249,70 @@
             }
         };
 
-        // ISO mount/unmount
+        // ISO list cache
+        window._isoList = [];
+
         window.loadIsoList = async function() {
             try {
                 var res = await apiFetch('/api/iso/list');
-                var isos = await res.json();
-                var sel = document.getElementById('iso-select');
-                sel.innerHTML = '<option value="">-- ISO --</option>';
-                isos.forEach(function(iso) {
-                    var opt = document.createElement('option');
-                    opt.value = iso.name;
-                    opt.textContent = iso.name;
-                    sel.appendChild(opt);
-                });
-            } catch (e) {}
+                window._isoList = await res.json();
+            } catch (e) { window._isoList = []; }
         };
 
-        window.doMountIso = async function() {
+        // Build ISO <option> HTML for dropdowns
+        function isoOptionsHtml() {
+            var html = '<option value="">-- ISO --</option>';
+            window._isoList.forEach(function(iso) {
+                html += '<option value="' + iso.name + '">' + iso.name + '</option>';
+            });
+            return html;
+        }
+
+        // Render per-drive rows based on block info
+        window.renderCdDrives = function(blockInfo) {
+            var container = document.getElementById('cd-drives');
+            var html = '';
+            for (var i = 0; i < 4; i++) {
+                var drive = 'cd' + i;
+                var info = (blockInfo && blockInfo[drive]) || { mounted: false, file: '' };
+                html += '<div class="cd-row">';
+                html += '<span class="cd-label">' + drive + '</span>';
+                if (info.mounted) {
+                    html += '<span class="cd-file" title="' + info.file + '">' + info.file + '</span>';
+                    html += '<button class="btn-unmount" onclick="doUnmountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Unmount</button>';
+                } else {
+                    html += '<select id="iso-sel-' + drive + '" style="min-width:100px;font-size:12px;padding:2px 4px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;">' + isoOptionsHtml() + '</select>';
+                    html += '<button class="btn-action" onclick="doMountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Mount</button>';
+                }
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        };
+
+        // Load block info from QEMU and render
+        window.loadBlockInfo = async function() {
+            var smac = window._vncSmac;
+            if (!smac) { renderCdDrives(null); return; }
+            try {
+                var res = await apiFetch('/api/vm/blockinfo/' + encodeURIComponent(smac));
+                if (res.ok) {
+                    var data = await res.json();
+                    renderCdDrives(data);
+                } else {
+                    renderCdDrives(null);
+                }
+            } catch (e) {
+                renderCdDrives(null);
+            }
+        };
+
+        // Mount ISO on a specific drive
+        window.doMountDrive = async function(drive) {
             var smac = window._vncSmac;
             if (!smac) { alert('No VM-NAME'); return; }
-            var iso = document.getElementById('iso-select').value;
-            if (!iso) { alert('Select an ISO first'); return; }
-            var drive = document.getElementById('vnc-drive-select').value;
+            var sel = document.getElementById('iso-sel-' + drive);
+            var iso = sel ? sel.value : '';
+            if (!iso) { alert('Select an ISO for ' + drive); return; }
             setStatus('Mounting ' + iso + ' on ' + drive + '...', 'status-connecting');
             try {
                 var res = await apiFetch('/api/vm/mountiso', {
@@ -280,7 +322,8 @@
                 });
                 var data = await res.json();
                 if (data.success) {
-                    setStatus('Mounted: ' + iso, 'status-connected');
+                    setStatus('Mounted: ' + iso + ' on ' + drive, 'status-connected');
+                    loadBlockInfo();
                 } else {
                     setStatus('Mount failed: ' + data.message, 'status-disconnected');
                 }
@@ -289,10 +332,10 @@
             }
         };
 
-        window.doUnmountIso = async function() {
+        // Unmount a specific drive
+        window.doUnmountDrive = async function(drive) {
             var smac = window._vncSmac;
             if (!smac) { alert('No VM-NAME'); return; }
-            var drive = document.getElementById('vnc-drive-select').value;
             setStatus('Unmounting ' + drive + '...', 'status-connecting');
             try {
                 var res = await apiFetch('/api/vm/unmountiso', {
@@ -302,7 +345,8 @@
                 });
                 var data = await res.json();
                 if (data.success) {
-                    setStatus('ISO unmounted', 'status-connected');
+                    setStatus(drive + ' unmounted', 'status-connected');
+                    loadBlockInfo();
                 } else {
                     setStatus('Unmount failed: ' + data.message, 'status-disconnected');
                 }
@@ -328,6 +372,8 @@
             }
             if (vmStatus === 'running' && vncPort) {
                 setTimeout(doConnect, 300);
+                // Load block info to show per-drive mount state
+                loadBlockInfo();
             } else if (!vncPort) {
                 setStatus('No VNC port for ' + smac, 'status-disconnected');
             } else {
@@ -335,8 +381,8 @@
             }
         }
 
-        // Load ISO list on page load
-        loadIsoList();
+        // Load ISO list on page load, then render empty drives
+        loadIsoList().then(function() { renderCdDrives(null); });
 
         // Set VNC host to current page hostname
         document.getElementById('vnc-host').textContent = window.location.hostname || 'localhost';
