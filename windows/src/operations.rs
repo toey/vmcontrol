@@ -288,6 +288,29 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         String::new()
     };
 
+    // Build hostfwd options from port_forwards config
+    let hostfwd_opts = {
+        let vm_cfg: serde_json::Value = if let Ok(vm_rec) = db::get_vm(smac) {
+            serde_json::from_str(&vm_rec.config).unwrap_or_default()
+        } else {
+            serde_json::Value::default()
+        };
+        let mut fwd = String::new();
+        if let Some(forwards) = vm_cfg.get("port_forwards").and_then(|v| v.as_array()) {
+            for rule in forwards {
+                let proto = rule.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp");
+                let host_port = rule.get("host_port").and_then(|v| v.as_u64()).unwrap_or(0);
+                let guest_port = rule.get("guest_port").and_then(|v| v.as_u64()).unwrap_or(0);
+                if host_port > 0 && guest_port > 0 {
+                    fwd.push_str(&format!(",hostfwd={}::{}-:{}", proto, host_port, guest_port));
+                    output_log.push_str(&format!("portfwd: {}:{} -> guest:{}\n",
+                        proto, host_port, guest_port));
+                }
+            }
+        }
+        fwd
+    };
+
     for adapter in &cfg.network_adapters {
         output_log.push_str(&format!("netid : {}\n", adapter.netid));
         output_log.push_str(&format!("mac : {}\n", adapter.mac));
@@ -327,8 +350,8 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 }
             }
         } else {
-            // Default: NAT (user-mode/SLIRP) networking
-            qemu_args.push(format!("user,id=net{}{}", adapter.netid, slirp_opts));
+            // Default: NAT (user-mode/SLIRP) networking with port forwarding
+            qemu_args.push(format!("user,id=net{}{}{}", adapter.netid, slirp_opts, hostfwd_opts));
         }
 
         qemu_args.push("-device".into());
@@ -954,6 +977,196 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
 
     output.push_str(&format!("Disk '{}' resized to {} successfully\n", name, size));
     Ok(output)
+}
+
+// --- Port forwarding operations ---
+
+/// Collect all host ports used by port_forwards across all VMs
+fn used_host_ports(exclude_smac: Option<&str>) -> Vec<(u16, String, String)> {
+    // Returns Vec<(host_port, protocol, vm_name)>
+    let mut ports = Vec::new();
+    if let Ok(vms) = db::list_vms() {
+        for vm in &vms {
+            if let Some(exc) = exclude_smac {
+                if vm.smac == exc { continue; }
+            }
+            if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if let Some(forwards) = cfg.get("port_forwards").and_then(|v| v.as_array()) {
+                    for rule in forwards {
+                        let proto = rule.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp");
+                        let hp = rule.get("host_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+                        if hp > 0 {
+                            ports.push((hp, proto.to_string(), vm.smac.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Check that a host port is not already used by another VM's port forward
+pub fn validate_host_port_unique(host_port: u16, protocol: &str, exclude_smac: Option<&str>) -> Result<(), String> {
+    let used = used_host_ports(exclude_smac);
+    for (port, proto, vm_name) in &used {
+        if *port == host_port && proto == protocol {
+            return Err(format!(
+                "Host port {} ({}) is already used by VM '{}'",
+                host_port, protocol, vm_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Add a port forward rule to a VM config. If VM is running, also apply via QEMU monitor.
+pub fn add_port_forward(smac: &str, protocol: &str, host_port: u16, guest_port: u16) -> Result<String, String> {
+    // Validate protocol
+    if protocol != "tcp" && protocol != "udp" {
+        return Err("Protocol must be 'tcp' or 'udp'".into());
+    }
+    // Validate port ranges
+    if host_port < 1024 {
+        return Err(format!("Host port {} is below 1024 (reserved range)", host_port));
+    }
+    if guest_port == 0 {
+        return Err("Guest port must be 1-65535".into());
+    }
+
+    // Check host port uniqueness
+    validate_host_port_unique(host_port, protocol, Some(smac))?;
+
+    // Load current config
+    let vm = db::get_vm(smac)?;
+    let mut config: serde_json::Value = serde_json::from_str(&vm.config)
+        .map_err(|e| format!("Config parse error: {}", e))?;
+
+    // Get or create port_forwards array
+    let forwards = config.get("port_forwards")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Check for duplicate within this VM
+    for rule in &forwards {
+        let p = rule.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+        let hp = rule.get("host_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+        if p == protocol && hp == host_port {
+            return Err(format!(
+                "Port forward {}:{} already exists for this VM",
+                protocol, host_port
+            ));
+        }
+    }
+
+    // Add new rule
+    let mut new_forwards = forwards;
+    new_forwards.push(serde_json::json!({
+        "protocol": protocol,
+        "host_port": host_port,
+        "guest_port": guest_port,
+    }));
+    config["port_forwards"] = serde_json::json!(new_forwards);
+
+    // Save config
+    let config_str = serde_json::to_string(&config).unwrap_or_default();
+    db::update_vm(smac, &config_str)?;
+
+    let mut output = format!("Port forward added: {}:{} -> guest:{}\n", protocol, host_port, guest_port);
+
+    // If VM is running, apply via QEMU monitor (find first NAT adapter netdev id)
+    if vm.status == "running" {
+        let netdev_id = find_nat_netdev_id(&config);
+        let cmd = format!("hostfwd_add {} {}::{}-:{}", netdev_id, protocol, host_port, guest_port);
+        match crate::api_helpers::qemu_monitor_cmd(smac, &cmd) {
+            Ok(resp) => {
+                if resp.is_empty() || !resp.to_lowercase().contains("error") {
+                    output.push_str("Applied to running VM (live)\n");
+                } else {
+                    output.push_str(&format!("WARNING: live apply failed: {}\n", resp));
+                }
+            }
+            Err(e) => {
+                output.push_str(&format!("WARNING: could not apply live (will take effect on next start): {}\n", e));
+            }
+        }
+    } else {
+        output.push_str("Will take effect on next VM start\n");
+    }
+
+    Ok(output)
+}
+
+/// Remove a port forward rule from a VM config. If VM is running, also remove via QEMU monitor.
+pub fn remove_port_forward(smac: &str, protocol: &str, host_port: u16) -> Result<String, String> {
+    // Load current config
+    let vm = db::get_vm(smac)?;
+    let mut config: serde_json::Value = serde_json::from_str(&vm.config)
+        .map_err(|e| format!("Config parse error: {}", e))?;
+
+    let forwards = config.get("port_forwards")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Find and remove matching rule
+    let new_forwards: Vec<serde_json::Value> = forwards.iter()
+        .filter(|rule| {
+            let p = rule.get("protocol").and_then(|v| v.as_str()).unwrap_or("");
+            let hp = rule.get("host_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+            !(p == protocol && hp == host_port)
+        })
+        .cloned()
+        .collect();
+
+    if new_forwards.len() == forwards.len() {
+        return Err(format!("Port forward {}:{} not found for this VM", protocol, host_port));
+    }
+
+    config["port_forwards"] = serde_json::json!(new_forwards);
+
+    // Save config
+    let config_str = serde_json::to_string(&config).unwrap_or_default();
+    db::update_vm(smac, &config_str)?;
+
+    let mut output = format!("Port forward removed: {}:{}\n", protocol, host_port);
+
+    // If VM is running, remove via QEMU monitor
+    if vm.status == "running" {
+        let netdev_id = find_nat_netdev_id(&config);
+        let cmd = format!("hostfwd_remove {} {}::{}", netdev_id, protocol, host_port);
+        match crate::api_helpers::qemu_monitor_cmd(smac, &cmd) {
+            Ok(resp) => {
+                if resp.is_empty() || !resp.to_lowercase().contains("error") {
+                    output.push_str("Removed from running VM (live)\n");
+                } else {
+                    output.push_str(&format!("WARNING: live remove failed: {}\n", resp));
+                }
+            }
+            Err(e) => {
+                output.push_str(&format!("WARNING: could not remove live (will take effect on next start): {}\n", e));
+            }
+        }
+    } else {
+        output.push_str("Will take effect on next VM start\n");
+    }
+
+    Ok(output)
+}
+
+/// Find the QEMU netdev ID for the first NAT adapter
+fn find_nat_netdev_id(config: &serde_json::Value) -> String {
+    if let Some(adapters) = config.get("network_adapters").and_then(|v| v.as_array()) {
+        for adapter in adapters {
+            let mode = adapter.get("mode").and_then(|v| v.as_str()).unwrap_or("nat");
+            if mode == "nat" || mode.is_empty() {
+                let netid = adapter.get("netid").and_then(|v| v.as_str()).unwrap_or("0");
+                return format!("net{}", netid);
+            }
+        }
+    }
+    "net0".to_string()
 }
 
 // --- VNC operations ---

@@ -1440,6 +1440,131 @@ async fn list_macs_handler() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "macs": macs }))
 }
 
+// ── Port Forwarding ──
+
+async fn get_port_forwards_handler(path: web::Path<String>) -> HttpResponse {
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+    match crate::db::get_vm(&smac) {
+        Ok(vm) => {
+            let config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+            let forwards = config.get("port_forwards").cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "vm_name": smac,
+                "port_forwards": forwards,
+            }))
+        }
+        Err(e) => HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+async fn add_port_forward_handler(
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+
+    let protocol = body.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp").to_string();
+    let host_port = body.get("host_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+    let guest_port = body.get("guest_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+
+    if host_port == 0 || guest_port == 0 {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "host_port and guest_port are required (non-zero)".into(),
+            output: None,
+        });
+    }
+
+    let result = web::block(move || {
+        operations::add_port_forward(&smac, &protocol, host_port, guest_port)
+    }).await;
+
+    match result {
+        Ok(Ok(output)) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: "Port forward added".into(),
+            output: Some(output),
+        }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Internal error: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn delete_port_forward_handler(
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+
+    let protocol = body.get("protocol").and_then(|v| v.as_str()).unwrap_or("tcp").to_string();
+    let host_port = body.get("host_port").and_then(|v| v.as_u64()).unwrap_or(0) as u16;
+
+    if host_port == 0 {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "host_port is required (non-zero)".into(),
+            output: None,
+        });
+    }
+
+    let result = web::block(move || {
+        operations::remove_port_forward(&smac, &protocol, host_port)
+    }).await;
+
+    match result {
+        Ok(Ok(output)) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: "Port forward removed".into(),
+            output: Some(output),
+        }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Internal error: {}", e),
+            output: None,
+        }),
+    }
+}
+
 // ── IP Pool ──
 async fn list_ip_pool_handler() -> HttpResponse {
     let vms = crate::db::list_vms().unwrap_or_default();
@@ -1589,6 +1714,10 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))
             // MAC address routes
             .route("/api/mac/list", web::get().to(list_macs_handler))
+            // Port forwarding routes
+            .route("/api/vm/{smac}/portforward", web::get().to(get_port_forwards_handler))
+            .route("/api/vm/{smac}/portforward", web::post().to(add_port_forward_handler))
+            .route("/api/vm/{smac}/portforward/delete", web::post().to(delete_port_forward_handler))
             // IP pool routes
             .route("/api/ip/list", web::get().to(list_ip_pool_handler))
             // DHCP routes
