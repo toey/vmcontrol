@@ -1022,11 +1022,12 @@ async function loadDiskList() {
                     '</span></span>';
                 var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
+                var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">→ Template</button>';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                     '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
-                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + deleteBtn + '</span>' +
+                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -1129,6 +1130,39 @@ async function cloneDisk(source) {
     var statusEl = document.getElementById('status-indicator');
     statusEl.className = 'loading';
     statusEl.textContent = 'Cloning ' + source + ' -> ' + newName + '...';
+    try {
+        var response = await apiFetch('/api/disk/clone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: source, name: newName }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            loadDiskList();
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// Clone disk as template image (auto-prefix "template-")
+async function cloneDiskAsTemplate(source) {
+    var baseName = source.replace(/^template-/, '');
+    var defaultName = 'template-' + baseName;
+    var newName = prompt('Clone "' + source + '" as template image:', defaultName);
+    if (!newName) return;
+    newName = newName.trim();
+    if (!newName) return;
+    if (newName.indexOf('template-') !== 0) newName = 'template-' + newName;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Cloning ' + source + ' -> ' + newName + ' (template)...';
     try {
         var response = await apiFetch('/api/disk/clone', {
             method: 'POST',
