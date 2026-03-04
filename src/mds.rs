@@ -9,14 +9,13 @@ use crate::models::ApiResponse;
 // ──────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct MdsConfig {
     pub instance_id: String,
     pub ami_id: String,
     pub hostname_prefix: String,
     pub local_ipv4: String,
-    #[serde(default)]
     pub internal_ip: String,
-    #[serde(default)]
     pub vlan: String,
     pub ssh_pubkey: String,
     pub root_password: String,
