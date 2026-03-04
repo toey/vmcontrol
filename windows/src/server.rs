@@ -1832,7 +1832,12 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // MDS routes
             .configure(mds::configure_mds_routes)
             // Static files (must be last - catch-all)
-            .service(fs::Files::new("/", &static_path).index_file("index.html"))
+            .service(
+                fs::Files::new("/", &static_path)
+                    .index_file("index.html")
+                    .use_last_modified(true)
+                    .use_etag(true)
+            )
     })
     .bind(bind_addr)?
     .run()

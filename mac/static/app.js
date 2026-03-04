@@ -398,6 +398,7 @@ function collectVmConfig() {
 
 // Create VM — save config to DB + create disk
 async function executeCreateVm() {
+    try {
     var vmName = val('create-vm-name').trim();
     if (!vmName) {
         alert('Please enter a VM-NAME');
@@ -437,10 +438,17 @@ async function executeCreateVm() {
         document.getElementById('create-group').value = '';
         document.getElementById('create-group-new').value = '';
     }
+    } catch (err) {
+        document.getElementById('status-indicator').className = 'error';
+        document.getElementById('status-indicator').textContent = 'Error: ' + err.message;
+        document.getElementById('output').textContent = err.stack || '';
+        console.error('executeCreateVm error:', err);
+    }
 }
 
 // Update VM config (edit mode)
 async function executeUpdateVm() {
+    try {
     var vmName = val('create-vm-name').trim();
     if (!vmName) {
         alert('Please enter a VM-NAME');
@@ -478,6 +486,12 @@ async function executeUpdateVm() {
         document.getElementById('create-group-new').value = '';
         // Switch to VM List tab after saving
         switchTab('vmlist');
+    }
+    } catch (err) {
+        document.getElementById('status-indicator').className = 'error';
+        document.getElementById('status-indicator').textContent = 'Error: ' + err.message;
+        document.getElementById('output').textContent = err.stack || '';
+        console.error('executeUpdateVm error:', err);
     }
 }
 

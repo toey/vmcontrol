@@ -114,6 +114,28 @@ fn validate_vm_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate disk name: must start with English letter, only [a-zA-Z0-9_-]
+fn validate_disk_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Disk name is required".into());
+    }
+    if !name.chars().next().unwrap().is_ascii_alphabetic() {
+        return Err("Disk name must start with an English letter (a-z, A-Z)".into());
+    }
+    if name.len() > 255 {
+        return Err("Disk name too long (max 255 chars)".into());
+    }
+    for c in name.chars() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
+            return Err(format!(
+                "Invalid character '{}' in disk name — only English letters, numbers, underscore and dash allowed",
+                c
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Check if a disk is owned by a running VM — returns Err if so
 pub fn check_disk_not_in_use(disk_name: &str) -> Result<(), String> {
     if let Ok(disks) = db::list_disks() {
@@ -1060,6 +1082,16 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
     }
     // Validate MAC address uniqueness before saving
     validate_mac_uniqueness(&config, None)?;
+    // Validate disk names
+    if let Some(disks) = config.get("disks").and_then(|d| d.as_array()) {
+        for disk in disks {
+            if let Some(dname) = disk.get("diskname").and_then(|v| v.as_str()) {
+                if !dname.is_empty() {
+                    validate_disk_name(dname)?;
+                }
+            }
+        }
+    }
 
     let config_str = serde_json::to_string(&config).unwrap_or_default();
 
@@ -1100,6 +1132,16 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
 
     // Validate MAC address uniqueness (exclude this VM's own MACs)
     validate_mac_uniqueness(config, Some(&smac))?;
+    // Validate disk names
+    if let Some(disks) = config.get("disks").and_then(|d| d.as_array()) {
+        for disk in disks {
+            if let Some(dname) = disk.get("diskname").and_then(|v| v.as_str()) {
+                if !dname.is_empty() {
+                    validate_disk_name(dname)?;
+                }
+            }
+        }
+    }
 
     let config_str = serde_json::to_string(config).unwrap_or_default();
 
@@ -1162,10 +1204,7 @@ pub fn create_disk(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
 
     let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if name.is_empty() {
-        return Err("Disk name is required".into());
-    }
-    sanitize_name(&name)?;
+    validate_disk_name(&name)?;
 
     let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("40G").to_string();
     // Validate size format (number followed by G or M)
@@ -1204,10 +1243,7 @@ pub fn resize_disk(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
 
     let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if name.is_empty() {
-        return Err("Disk name is required".into());
-    }
-    sanitize_name(&name)?;
+    validate_disk_name(&name)?;
 
     let size = val.get("size").and_then(|v| v.as_str()).unwrap_or("").to_string();
     if size.len() < 2
