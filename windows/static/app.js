@@ -1493,8 +1493,6 @@ async function loadMdsConfig() {
             // Auto-generate unique IDs if empty or still default placeholder
             var iid = config.instance_id;
             document.getElementById('mds-instance-id').value = (!iid || iid === 'i-0000000000000001') ? genInstanceId() : iid;
-            var aid = config.ami_id;
-            document.getElementById('mds-ami-id').value = (!aid || aid === 'ami-00000001') ? genAmiId() : aid;
             var hp = config.hostname_prefix;
             document.getElementById('mds-hostname-prefix').value = (!hp || hp === 'vm') ? smac : hp;
             // Auto-generate unique IPv4 if empty or default
@@ -1566,7 +1564,7 @@ async function saveMdsConfig() {
     statusEl.textContent = 'Saving MDS config for ' + smac + '...';
     var payload = {
         instance_id: val('mds-instance-id'),
-        ami_id: val('mds-ami-id'),
+        ami_id: '',
         hostname_prefix: val('mds-hostname-prefix'),
         local_ipv4: val('mds-local-ipv4'),
         internal_ip: val('mds-internal-ip'),
