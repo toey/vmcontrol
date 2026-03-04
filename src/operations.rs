@@ -406,14 +406,26 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let mds_config = if let Ok(vm_rec) = db::get_vm(smac) {
         let vm_cfg: serde_json::Value = serde_json::from_str(&vm_rec.config).unwrap_or_default();
         if let Some(mds_val) = vm_cfg.get("mds") {
-            serde_json::from_value::<mds::MdsConfig>(mds_val.clone())
-                .unwrap_or_else(|_| mds::load_mds_config())
+            output_log.push_str(&format!("mds_json: {}\n", mds_val));
+            match serde_json::from_value::<mds::MdsConfig>(mds_val.clone()) {
+                Ok(cfg) => {
+                    output_log.push_str(&format!("mds_local_ipv4: {}\n", cfg.local_ipv4));
+                    cfg
+                }
+                Err(e) => {
+                    output_log.push_str(&format!("mds_parse_err: {} — using default\n", e));
+                    mds::load_mds_config()
+                }
+            }
         } else {
+            output_log.push_str("mds_json: NONE — using default\n");
             mds::load_mds_config()
         }
     } else {
+        output_log.push_str("mds_json: VM_NOT_FOUND — using default\n");
         mds::load_mds_config()
     };
+    output_log.push_str(&format!("slirp_ipv4: {}\n", mds_config.local_ipv4));
     let slirp_opts = if !mds_config.local_ipv4.is_empty() {
         let parts: Vec<&str> = mds_config.local_ipv4.split('.').collect();
         if parts.len() == 4 {
