@@ -1226,12 +1226,12 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
     validate_vm_name(&smac)?;
 
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
-    let config = val.get("config").unwrap_or(&empty_obj);
+    let new_config = val.get("config").unwrap_or(&empty_obj);
 
     // Validate MAC address uniqueness (exclude this VM's own MACs)
-    validate_mac_uniqueness(config, Some(&smac))?;
+    validate_mac_uniqueness(new_config, Some(&smac))?;
     // Validate disk names
-    if let Some(disks) = config.get("disks").and_then(|d| d.as_array()) {
+    if let Some(disks) = new_config.get("disks").and_then(|d| d.as_array()) {
         for disk in disks {
             if let Some(dname) = disk.get("diskname").and_then(|v| v.as_str()) {
                 if !dname.is_empty() {
@@ -1241,7 +1241,19 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
         }
     }
 
-    let config_str = serde_json::to_string(config).unwrap_or_default();
+    // Merge: start with old config, overlay new fields (preserves mds, vnc_port, port_forwards)
+    let mut config = if let Ok(old_vm) = db::get_vm(&smac) {
+        serde_json::from_str::<serde_json::Value>(&old_vm.config).unwrap_or_default()
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    if let (Some(old_map), Some(new_map)) = (config.as_object_mut(), new_config.as_object()) {
+        for (k, v) in new_map {
+            old_map.insert(k.clone(), v.clone());
+        }
+    }
+
+    let config_str = serde_json::to_string(&config).unwrap_or_default();
 
     db::update_vm(&smac, &config_str)?;
 
