@@ -1486,6 +1486,88 @@ async fn set_template_image_handler(body: web::Json<serde_json::Value>) -> HttpR
     }
 }
 
+// ── OS Templates CRUD ──
+
+async fn list_os_templates_handler() -> HttpResponse {
+    match crate::db::list_os_templates() {
+        Ok(templates) => HttpResponse::Ok().json(templates),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to list os templates: {}", e),
+            output: None,
+        }),
+    }
+}
+
+async fn create_os_template_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let key = match body.get("key").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'key'".into(), output: None,
+        }),
+    };
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or(&key).to_string();
+    let vcpus = body.get("vcpus").and_then(|v| v.as_str()).unwrap_or("2").to_string();
+    let memory = body.get("memory").and_then(|v| v.as_str()).unwrap_or("2048").to_string();
+    let is_windows = body.get("is_windows").and_then(|v| v.as_str()).unwrap_or("0").to_string();
+    let arch = body.get("arch").and_then(|v| v.as_str()).unwrap_or("x86_64").to_string();
+    let image = body.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match crate::db::create_os_template(&key, &name, &vcpus, &memory, &is_windows, &arch, &image) {
+        Ok(id) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true, "message": format!("Template '{}' created", name), "id": id
+        })),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+    }
+}
+
+async fn update_os_template_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let id = match body.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'id'".into(), output: None,
+        }),
+    };
+    let key = match body.get("key").and_then(|v| v.as_str()) {
+        Some(k) if !k.is_empty() => k.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'key'".into(), output: None,
+        }),
+    };
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or(&key).to_string();
+    let vcpus = body.get("vcpus").and_then(|v| v.as_str()).unwrap_or("2").to_string();
+    let memory = body.get("memory").and_then(|v| v.as_str()).unwrap_or("2048").to_string();
+    let is_windows = body.get("is_windows").and_then(|v| v.as_str()).unwrap_or("0").to_string();
+    let arch = body.get("arch").and_then(|v| v.as_str()).unwrap_or("x86_64").to_string();
+    let image = body.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match crate::db::update_os_template(id, &key, &name, &vcpus, &memory, &is_windows, &arch, &image) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true, message: format!("Template '{}' updated", name), output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+    }
+}
+
+async fn delete_os_template_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let id = match body.get("id").and_then(|v| v.as_i64()) {
+        Some(id) => id,
+        None => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'id'".into(), output: None,
+        }),
+    };
+    match crate::db::delete_os_template(id) {
+        Ok(_) => HttpResponse::Ok().json(ApiResponse {
+            success: true, message: "Template deleted".into(), output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+    }
+}
+
 // ======== SSH Key Management ========
 
 async fn list_ssh_keys_handler() -> HttpResponse {
@@ -2173,6 +2255,11 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Template image mapping routes
             .route("/api/template-images", web::get().to(list_template_images_handler))
             .route("/api/template-images/set", web::post().to(set_template_image_handler))
+            // OS template CRUD routes
+            .route("/api/os-templates", web::get().to(list_os_templates_handler))
+            .route("/api/os-templates/create", web::post().to(create_os_template_handler))
+            .route("/api/os-templates/update", web::post().to(update_os_template_handler))
+            .route("/api/os-templates/delete", web::post().to(delete_os_template_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))

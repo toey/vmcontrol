@@ -24,6 +24,7 @@
         <button class="tab" data-tab="dhcp">DHCP</button>
         <button class="tab" data-tab="internal-net">Internal Net</button>
         <button class="tab" data-tab="switches">Switches</button>
+        <button class="tab" data-tab="os-templates">OS Templates</button>
     </nav>
 
     <main>
@@ -68,14 +69,6 @@
                 <label>OS Template
                     <select id="create-os-template" onchange="applyOsTemplate()">
                         <option value="custom">Custom</option>
-                        <option value="ubuntu-server">Ubuntu Server</option>
-                        <option value="ubuntu-desktop">Ubuntu Desktop</option>
-                        <option value="debian">Debian</option>
-                        <option value="centos-rocky">CentOS / Rocky</option>
-                        <option value="windows-desktop">Windows 10/11</option>
-                        <option value="windows-server">Windows Server</option>
-                        <option value="macos">macOS</option>
-                        <option value="minimal-linux">Minimal Linux</option>
                     </select>
                 </label>
                 <label>Base Image
@@ -320,6 +313,39 @@
             <fieldset style="margin-top:16px;">
                 <legend>Existing Switches</legend>
                 <div id="switch-list" style="font-size:0.9em;"></div>
+            </fieldset>
+        </div>
+
+        <!-- OS Templates -->
+        <div id="tab-os-templates" class="tab-panel">
+            <h2>OS Templates</h2>
+            <p class="form-desc">Manage OS templates for quick VM creation. Templates define default vCPUs, memory, and disk image pattern.</p>
+            <fieldset>
+                <legend id="tpl-form-legend">Add Template</legend>
+                <input type="hidden" id="tpl-edit-id" value="">
+                <label>Key <input type="text" id="tpl-key" placeholder="ubuntu-server"></label>
+                <label>Display Name <input type="text" id="tpl-name" placeholder="Ubuntu Server"></label>
+                <div style="display:flex;gap:12px;flex-wrap:wrap;">
+                    <label style="flex:1">vCPUs <input type="text" id="tpl-vcpus" value="2" style="width:80px;"></label>
+                    <label style="flex:1">Memory (MB) <input type="text" id="tpl-memory" value="2048" style="width:100px;"></label>
+                    <label style="flex:1">Windows <select id="tpl-is-windows" style="width:80px;">
+                        <option value="0">No</option>
+                        <option value="1">Yes</option>
+                    </select></label>
+                    <label style="flex:1">Arch <select id="tpl-arch" style="width:100px;">
+                        <option value="x86_64">x86_64</option>
+                        <option value="aarch64">aarch64</option>
+                    </select></label>
+                </div>
+                <label>Image Pattern <input type="text" id="tpl-image" placeholder="ubuntu-server"></label>
+                <div class="btn-group">
+                    <button class="execute-btn" onclick="saveOsTemplate()">Save</button>
+                    <button class="execute-btn btn-unmount" onclick="resetTplForm()">Cancel</button>
+                </div>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>Existing Templates</legend>
+                <div id="os-template-list" style="font-size:0.9em;"></div>
             </fieldset>
         </div>
     </main>

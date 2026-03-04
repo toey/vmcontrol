@@ -114,18 +114,68 @@ function escapeHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-// OS Templates — image: default disk name pattern for auto-match
-var OS_TEMPLATES = {
-    'custom':          null,
-    'ubuntu-server':   { vcpus: '2', memory: '2048', is_windows: '0', image: 'ubuntu-server' },
-    'ubuntu-desktop':  { vcpus: '4', memory: '4096', is_windows: '0', image: 'ubuntu-desktop' },
-    'debian':          { vcpus: '2', memory: '1024', is_windows: '0', image: 'debian' },
-    'centos-rocky':    { vcpus: '2', memory: '2048', is_windows: '0', image: 'centos' },
-    'windows-desktop': { vcpus: '4', memory: '4096', is_windows: '1', image: 'windows-10' },
-    'windows-server':  { vcpus: '8', memory: '8192', is_windows: '1', image: 'windows-server' },
-    'macos':           { vcpus: '8', memory: '8192', is_windows: '0', image: 'macos' },
-    'minimal-linux':   { vcpus: '1', memory: '512',  is_windows: '0', image: 'minimal' },
-};
+// OS Templates — loaded from DB, keyed by template key
+// { 'ubuntu-server': { vcpus: '2', memory: '2048', is_windows: '0', arch: 'x86_64', image: 'ubuntu-server', name: 'Ubuntu Server', id: 1 }, ... }
+var OS_TEMPLATES = { 'custom': null };
+window._osTemplateList = []; // raw array from API
+
+// Default templates — seeded to DB if empty
+var DEFAULT_OS_TEMPLATES = [
+    { key: 'ubuntu-server',   name: 'Ubuntu Server',   vcpus: '2', memory: '2048', is_windows: '0', arch: 'x86_64',  image: 'ubuntu-server' },
+    { key: 'ubuntu-desktop',  name: 'Ubuntu Desktop',  vcpus: '4', memory: '4096', is_windows: '0', arch: 'x86_64',  image: 'ubuntu-desktop' },
+    { key: 'debian',          name: 'Debian',           vcpus: '2', memory: '1024', is_windows: '0', arch: 'x86_64',  image: 'debian' },
+    { key: 'centos-rocky',    name: 'CentOS / Rocky',   vcpus: '2', memory: '2048', is_windows: '0', arch: 'x86_64',  image: 'centos' },
+    { key: 'windows-desktop', name: 'Windows 10/11',    vcpus: '4', memory: '4096', is_windows: '1', arch: 'x86_64',  image: 'windows-10' },
+    { key: 'windows-server',  name: 'Windows Server',   vcpus: '8', memory: '8192', is_windows: '1', arch: 'x86_64',  image: 'windows-server' },
+    { key: 'macos',           name: 'macOS',             vcpus: '8', memory: '8192', is_windows: '0', arch: 'x86_64',  image: 'macos' },
+    { key: 'minimal-linux',   name: 'Minimal Linux',    vcpus: '1', memory: '512',  is_windows: '0', arch: 'x86_64',  image: 'minimal' },
+];
+
+async function loadOsTemplates() {
+    try {
+        var response = await apiFetch('/api/os-templates');
+        var list = await safeJson(response);
+        if (!list || list.length === 0) {
+            // Seed defaults
+            for (var i = 0; i < DEFAULT_OS_TEMPLATES.length; i++) {
+                await apiFetch('/api/os-templates/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(DEFAULT_OS_TEMPLATES[i]),
+                });
+            }
+            // Reload after seeding
+            response = await apiFetch('/api/os-templates');
+            list = await safeJson(response) || [];
+        }
+        window._osTemplateList = list;
+        // Build lookup map
+        OS_TEMPLATES = { 'custom': null };
+        list.forEach(function(t) {
+            OS_TEMPLATES[t.key] = { vcpus: t.vcpus, memory: t.memory, is_windows: t.is_windows, arch: t.arch || 'x86_64', image: t.image, name: t.name, id: t.id };
+        });
+        // Populate the Create VM template dropdown
+        populateOsTemplateDropdown();
+        // Render management list
+        renderOsTemplateList();
+    } catch (e) {
+        console.error('Failed to load OS templates:', e);
+    }
+}
+
+function populateOsTemplateDropdown() {
+    var sel = document.getElementById('create-os-template');
+    if (!sel) return;
+    var current = sel.value;
+    sel.innerHTML = '<option value="custom">Custom</option>';
+    window._osTemplateList.forEach(function(t) {
+        var opt = document.createElement('option');
+        opt.value = t.key;
+        opt.textContent = t.name;
+        sel.appendChild(opt);
+    });
+    if (current) sel.value = current;
+}
 
 // Template-to-image mappings (cached from server)
 window._templateImageMap = {};
@@ -352,6 +402,116 @@ function updateTemplateInfo(templateKey, imageName) {
     }
 }
 
+// ── OS Template Management ──
+
+function renderOsTemplateList() {
+    var listDiv = document.getElementById('os-template-list');
+    if (!listDiv) return;
+    var list = window._osTemplateList || [];
+    if (list.length === 0) {
+        listDiv.innerHTML = '<em>No templates</em>';
+        return;
+    }
+    listDiv.innerHTML = '<table style="width:100%;border-collapse:collapse;">' +
+        '<tr style="border-bottom:1px solid #30363d;"><th style="text-align:left;padding:4px;">Key</th><th>Name</th><th>vCPUs</th><th>Memory</th><th>Windows</th><th>Arch</th><th>Image</th><th></th></tr>' +
+        list.map(function(t) {
+            return '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:4px;">' + escapeHtml(t.key) + '</td>' +
+                '<td style="padding:4px;">' + escapeHtml(t.name) + '</td>' +
+                '<td style="padding:4px;text-align:center;">' + escapeHtml(t.vcpus) + '</td>' +
+                '<td style="padding:4px;text-align:center;">' + escapeHtml(t.memory) + '</td>' +
+                '<td style="padding:4px;text-align:center;">' + (t.is_windows === '1' ? 'Yes' : 'No') + '</td>' +
+                '<td style="padding:4px;text-align:center;">' + escapeHtml(t.arch || 'x86_64') + '</td>' +
+                '<td style="padding:4px;">' + escapeHtml(t.image) + '</td>' +
+                '<td style="padding:4px;white-space:nowrap;">' +
+                    '<button class="btn-remove" style="background:#1f6feb;margin-right:4px;" onclick="editOsTemplate(' + t.id + ')">Edit</button>' +
+                    '<button class="btn-remove" onclick="deleteOsTemplate(' + t.id + ')">X</button>' +
+                '</td></tr>';
+        }).join('') +
+        '</table>';
+}
+
+window.saveOsTemplate = async function() {
+    var id = document.getElementById('tpl-edit-id').value;
+    var data = {
+        key: val('tpl-key'),
+        name: val('tpl-name'),
+        vcpus: val('tpl-vcpus'),
+        memory: val('tpl-memory'),
+        is_windows: val('tpl-is-windows'),
+        arch: val('tpl-arch'),
+        image: val('tpl-image'),
+    };
+    if (!data.key) { alert('Key is required'); return; }
+    if (!data.name) data.name = data.key;
+
+    var url = id ? '/api/os-templates/update' : '/api/os-templates/create';
+    if (id) data.id = parseInt(id);
+
+    try {
+        var response = await apiFetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data),
+        });
+        var result = await safeJson(response);
+        if (result && result.success) {
+            resetTplForm();
+            await loadOsTemplates();
+        } else {
+            alert('Error: ' + (result ? result.message : 'Unknown'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+};
+
+window.editOsTemplate = function(id) {
+    var list = window._osTemplateList || [];
+    var t = list.find(function(x) { return x.id === id; });
+    if (!t) return;
+    document.getElementById('tpl-edit-id').value = t.id;
+    document.getElementById('tpl-key').value = t.key;
+    document.getElementById('tpl-name').value = t.name;
+    document.getElementById('tpl-vcpus').value = t.vcpus;
+    document.getElementById('tpl-memory').value = t.memory;
+    document.getElementById('tpl-is-windows').value = t.is_windows;
+    document.getElementById('tpl-arch').value = t.arch || 'x86_64';
+    document.getElementById('tpl-image').value = t.image;
+    document.getElementById('tpl-form-legend').textContent = 'Edit Template: ' + t.name;
+};
+
+window.deleteOsTemplate = async function(id) {
+    if (!confirm('Delete this template?')) return;
+    try {
+        var response = await apiFetch('/api/os-templates/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: id }),
+        });
+        var result = await safeJson(response);
+        if (result && result.success) {
+            await loadOsTemplates();
+        } else {
+            alert('Error: ' + (result ? result.message : 'Unknown'));
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+};
+
+window.resetTplForm = function() {
+    document.getElementById('tpl-edit-id').value = '';
+    document.getElementById('tpl-key').value = '';
+    document.getElementById('tpl-name').value = '';
+    document.getElementById('tpl-vcpus').value = '2';
+    document.getElementById('tpl-memory').value = '2048';
+    document.getElementById('tpl-is-windows').value = '0';
+    document.getElementById('tpl-arch').value = 'x86_64';
+    document.getElementById('tpl-image').value = '';
+    document.getElementById('tpl-form-legend').textContent = 'Add Template';
+};
+
 // Tab switching
 document.querySelectorAll('.tab').forEach(function(tab) {
     tab.addEventListener('click', function() {
@@ -377,6 +537,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'internal-net') { loadInternalNetwork(); }
         // Auto-load switch list when switching to switches tab
         if (tab.dataset.tab === 'switches') { loadSwitchList(); }
+        // Auto-load OS template list when switching to os-templates tab
+        if (tab.dataset.tab === 'os-templates') { loadOsTemplates(); }
     });
 });
 
@@ -2227,5 +2389,6 @@ window.addEventListener('DOMContentLoaded', function() {
     loadSwitchList();
     loadGroupList();
     loadImageMappings();
+    loadOsTemplates();
     loadApikey();
 });

@@ -120,6 +120,20 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB template_images table init error: {}", e))?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS os_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            vcpus TEXT NOT NULL DEFAULT '2',
+            memory TEXT NOT NULL DEFAULT '2048',
+            is_windows TEXT NOT NULL DEFAULT '0',
+            arch TEXT NOT NULL DEFAULT 'x86_64',
+            image TEXT NOT NULL DEFAULT ''
+        );",
+    )
+    .map_err(|e| format!("DB os_templates table init error: {}", e))?;
+
     Ok(conn)
 }
 
@@ -571,4 +585,77 @@ pub fn list_template_images() -> Result<Vec<(String, String)>, String> {
         result.push(row.map_err(|e| format!("DB row error: {}", e))?);
     }
     Ok(result)
+}
+
+// ── OS Templates ──
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct OsTemplate {
+    pub id: i64,
+    pub key: String,
+    pub name: String,
+    pub vcpus: String,
+    pub memory: String,
+    pub is_windows: String,
+    pub arch: String,
+    pub image: String,
+}
+
+pub fn list_os_templates() -> Result<Vec<OsTemplate>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT id, key, name, vcpus, memory, is_windows, arch, image FROM os_templates ORDER BY id ASC")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(OsTemplate {
+                id: row.get(0)?,
+                key: row.get(1)?,
+                name: row.get(2)?,
+                vcpus: row.get(3)?,
+                memory: row.get(4)?,
+                is_windows: row.get(5)?,
+                arch: row.get(6)?,
+                image: row.get(7)?,
+            })
+        })
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(result)
+}
+
+pub fn create_os_template(key: &str, name: &str, vcpus: &str, memory: &str, is_windows: &str, arch: &str, image: &str) -> Result<i64, String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO os_templates (key, name, vcpus, memory, is_windows, arch, image) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![key, name, vcpus, memory, is_windows, arch, image],
+    )
+    .map_err(|e| format!("DB insert os_template error: {}", e))?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn update_os_template(id: i64, key: &str, name: &str, vcpus: &str, memory: &str, is_windows: &str, arch: &str, image: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    let changed = conn.execute(
+        "UPDATE os_templates SET key=?2, name=?3, vcpus=?4, memory=?5, is_windows=?6, arch=?7, image=?8 WHERE id=?1",
+        params![id, key, name, vcpus, memory, is_windows, arch, image],
+    )
+    .map_err(|e| format!("DB update os_template error: {}", e))?;
+    if changed == 0 {
+        return Err(format!("OS template id {} not found", id));
+    }
+    Ok(())
+}
+
+pub fn delete_os_template(id: i64) -> Result<(), String> {
+    let conn = open_db()?;
+    let changed = conn.execute("DELETE FROM os_templates WHERE id = ?1", params![id])
+        .map_err(|e| format!("DB delete os_template error: {}", e))?;
+    if changed == 0 {
+        return Err(format!("OS template id {} not found", id));
+    }
+    Ok(())
 }
