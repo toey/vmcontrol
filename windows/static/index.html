@@ -114,6 +114,12 @@
                 <div id="start-disks"></div>
                 <button type="button" class="btn-add" onclick="addDisk()">+ Add Disk</button>
             </fieldset>
+            <fieldset>
+                <legend>PCI Passthrough (VFIO)</legend>
+                <div id="start-pci-devices"></div>
+                <div style="background:#1c2128; border:1px solid #30363d; border-radius:6px; padding:6px 10px; margin:6px 0; font-size:0.82rem; color:#8b949e;">ℹ Linux only — requires IOMMU enabled + devices bound to vfio-pci driver</div>
+                <button type="button" class="btn-add" onclick="addPciDevice()">+ Add PCI Device</button>
+            </fieldset>
             <div class="btn-group">
                 <button class="execute-btn" id="create-submit-btn" onclick="executeCreateVm()">Create VM</button>
             </div>

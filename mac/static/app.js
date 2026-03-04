@@ -688,6 +688,11 @@ function collectVmConfig() {
         };
     }).filter(function(d) { return d.diskname; }); // filter out empty disk selections
 
+    var pciRows = document.querySelectorAll('#start-pci-devices .pci-row');
+    var pci_devices = Array.from(pciRows).map(function(row) {
+        return { host: row.querySelector('.pci-host').value.trim() };
+    }).filter(function(p) { return p.host; });
+
     return {
         cpu: {
             vcpus: val('start-vcpus'),
@@ -696,6 +701,7 @@ function collectVmConfig() {
         features: { is_windows: val('start-is-windows'), arch: val('start-arch'), cloudinit: val('start-cloudinit') },
         network_adapters: network_adapters,
         disks: disks,
+        pci_devices: pci_devices,
     };
 }
 
@@ -992,6 +998,54 @@ function addDisk(selectedValue, iopsKey) {
         '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
     container.appendChild(row);
     populateDiskSelect(row.querySelector('.disk-diskname'), selectedValue || '');
+}
+
+// ======== PCI Passthrough (VFIO) ========
+
+window._vfioDevices = [];
+
+async function loadVfioDevices() {
+    try {
+        var res = await apiFetch('/api/devices/vfio');
+        window._vfioDevices = await safeJson(res);
+    } catch(e) { window._vfioDevices = []; }
+}
+
+function buildVfioOptions(selectedAddr) {
+    var html = '<option value="">-- select or type below --</option>';
+    window._vfioDevices.forEach(function(d) {
+        var label = d.address;
+        if (d.description) label += ' — ' + d.description.substring(0, 60);
+        var sel = (selectedAddr && d.address === selectedAddr) ? ' selected' : '';
+        html += '<option value="' + d.address + '"' + sel + '>' + label + '</option>';
+    });
+    return html;
+}
+
+function addPciDevice(existing) {
+    var container = document.getElementById('start-pci-devices');
+    var row = document.createElement('div');
+    row.className = 'pci-row';
+    row.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:4px;';
+    var addr = (existing && existing.host) || '';
+    var hasVfio = window._vfioDevices.length > 0;
+    if (hasVfio) {
+        row.innerHTML =
+            '<select class="pci-select" onchange="onPciSelectChange(this)" style="min-width:200px;">' + buildVfioOptions(addr) + '</select>' +
+            '<input class="pci-host" placeholder="PCI Address (0000:01:00.0)" value="' + addr + '" style="width:180px;">' +
+            '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
+    } else {
+        row.innerHTML =
+            '<input class="pci-host" placeholder="PCI Address (0000:01:00.0)" value="' + addr + '" style="width:250px;">' +
+            '<button type="button" class="btn-remove" onclick="this.parentElement.remove()">X</button>';
+    }
+    container.appendChild(row);
+}
+
+function onPciSelectChange(sel) {
+    var row = sel.closest('.pci-row');
+    var input = row.querySelector('.pci-host');
+    if (input && sel.value) input.value = sel.value;
 }
 
 // ======== Disk Management ========
@@ -2181,6 +2235,15 @@ async function editVm(smac) {
             } else {
                 addDisk();
             }
+
+            // Fill PCI Devices
+            var pciContainer = document.getElementById('start-pci-devices');
+            pciContainer.innerHTML = '';
+            if (config.pci_devices && config.pci_devices.length > 0) {
+                config.pci_devices.forEach(function(pci) {
+                    addPciDevice(pci);
+                });
+            }
         }
     } catch (err) {
         alert('Failed to load VM config: ' + err.message);
@@ -2406,5 +2469,6 @@ window.addEventListener('DOMContentLoaded', function() {
     loadGroupList();
     loadImageMappings();
     loadOsTemplates();
+    loadVfioDevices();
     loadApikey();
 });

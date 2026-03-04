@@ -599,6 +599,16 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         ));
     }
 
+    // PCI Passthrough — VFIO devices (GPU, NIC, etc.)
+    for (idx, pci) in cfg.pci_devices.iter().enumerate() {
+        let addr = pci.host.trim();
+        if !addr.is_empty() {
+            output_log.push_str(&format!("pci_passthrough[{}]: {}\n", idx, addr));
+            qemu_args.push("-device".into());
+            qemu_args.push(format!("vfio-pci,host={}", addr));
+        }
+    }
+
     // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
     qemu_args.push("-machine".into());
     qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
