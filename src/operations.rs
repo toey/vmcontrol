@@ -497,11 +497,11 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 }
             }
         } else if adapter.mode == "bridge" {
-            // Bridge/tap mode — host↔VM bidirectional connectivity (requires sudo)
+            // Bridge/tap mode — host↔VM bidirectional connectivity (requires sudo/admin)
             // Validate bridge_iface to prevent command injection
             if !adapter.bridge_iface.is_empty() {
                 for c in adapter.bridge_iface.chars() {
-                    if !c.is_alphanumeric() && c != '-' && c != '_' {
+                    if !c.is_alphanumeric() && c != '-' && c != '_' && c != ' ' {
                         return Err(format!(
                             "Invalid bridge interface name '{}' for adapter {}",
                             adapter.bridge_iface, adapter.netid
@@ -548,7 +548,21 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     ));
                 }
             }
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(target_os = "windows")]
+            {
+                // Windows: TAP-Windows adapter (requires OpenVPN TAP driver installed)
+                let tap_name = if adapter.bridge_iface.is_empty() {
+                    "TAP-Windows Adapter V9".to_string()
+                } else {
+                    adapter.bridge_iface.clone()
+                };
+                qemu_args.push(format!(
+                    "tap,id=net{},ifname={}",
+                    adapter.netid, tap_name
+                ));
+                output_log.push_str(&format!("bridge : tap ifname={} (Windows)\n", tap_name));
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
             {
                 return Err(format!(
                     "Bridge networking not supported on this platform for adapter {}",
