@@ -438,8 +438,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             } else {
                 mds_config.local_ipv4.clone()
             };
-            format!(",net={},host={},dns={},dhcpstart={}",
-                net, host, dns, dhcp_start)
+            let mds_port = get_conf_or("api_port", "8080");
+            format!(",net={},host={},dns={},dhcpstart={},guestfwd=tcp:169.254.169.254:80-tcp:127.0.0.1:{}",
+                net, host, dns, dhcp_start, mds_port)
         } else {
             String::new()
         }
