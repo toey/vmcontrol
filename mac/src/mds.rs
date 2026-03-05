@@ -122,10 +122,14 @@ pub fn generate_userdata(config: &MdsConfig) -> String {
 /// Generate user-data for NoCloud seed ISO (no Ec2 datasource block)
 /// NOTE: datasource_list is NOT set here — cloud-init determines datasource
 /// BEFORE reading user-data. Use SMBIOS hint or /etc/cloud/cloud.cfg.d/ instead.
-pub fn generate_userdata_nocloud(config: &MdsConfig) -> String {
+pub fn generate_userdata_nocloud(config: &MdsConfig, hostname: &str) -> String {
     let base = generate_userdata_base(config);
     let mut ud = base;
 
+    // Set hostname explicitly in user-data (some distros ignore meta-data local-hostname)
+    ud.push_str(&format!("hostname: {}\n", hostname));
+    ud.push_str(&format!("fqdn: {}\n", hostname));
+    ud.push_str("preserve_hostname: false\n");
     ud.push_str("manage_etc_hosts: true\n");
 
     append_userdata_extra(&mut ud, config);

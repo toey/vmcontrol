@@ -196,7 +196,7 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     }
 
     // Generate user-data (cloud-config for NoCloud)
-    let user_data = mds::generate_userdata_nocloud(&config);
+    let user_data = mds::generate_userdata_nocloud(&config, &hostname);
 
     // Write files
     std::fs::write(format!("{}/meta-data", seed_dir), &meta_data)
