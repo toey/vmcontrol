@@ -947,6 +947,64 @@ pub fn validate_ip_unique(ip: &str, exclude_smac: Option<&str>) -> Result<(), St
     Ok(())
 }
 
+/// Repair VMs that are missing mds.local_ipv4 or internal_ip
+/// (caused by old update_config bug that wiped mds section)
+pub fn repair_missing_mds_ips() {
+    let vms = match db::list_vms() {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    for vm in &vms {
+        let mut cfg: serde_json::Value = match serde_json::from_str(&vm.config) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let mut changed = false;
+
+        // Check local_ipv4
+        let needs_ip = match cfg.get("mds").and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()) {
+            Some(ip) if !ip.is_empty() && ip != "10.0.0.1" => false,
+            _ => true,
+        };
+        if needs_ip {
+            let ip = next_ipv4_excluding(&cfg);
+            if cfg.get("mds").is_none() {
+                cfg["mds"] = serde_json::json!({});
+            }
+            cfg["mds"]["local_ipv4"] = serde_json::json!(ip);
+            println!("repair: {} → local_ipv4={}", vm.smac, ip);
+            changed = true;
+        }
+
+        // Check internal_ip
+        let needs_internal = match cfg.get("mds").and_then(|m| m.get("internal_ip")).and_then(|v| v.as_str()) {
+            Some(ip) if !ip.is_empty() => false,
+            _ => true,
+        };
+        if needs_internal {
+            let ip = next_internal_ip();
+            if cfg.get("mds").is_none() {
+                cfg["mds"] = serde_json::json!({});
+            }
+            cfg["mds"]["internal_ip"] = serde_json::json!(ip);
+            println!("repair: {} → internal_ip={}", vm.smac, ip);
+            changed = true;
+        }
+
+        if changed {
+            let config_str = serde_json::to_string(&cfg).unwrap_or_default();
+            let _ = db::update_vm(&vm.smac, &config_str);
+        }
+    }
+}
+
+/// next_ipv4 but also considers the IP we just assigned (for repair loop)
+fn next_ipv4_excluding(_current_cfg: &serde_json::Value) -> String {
+    // Just use the standard next_ipv4 which reads all VMs from DB
+    // Since we save each VM immediately in the repair loop, DB is up-to-date
+    next_ipv4()
+}
+
 /// Find next available Local IPv4: 10.0.{subnet}.10
 /// Supports up to 10.0.254.10 (254 subnets) then wraps to 10.1.x.10, etc.
 pub fn next_ipv4() -> String {

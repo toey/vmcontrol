@@ -2208,6 +2208,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
         println!("API key authentication enabled");
     }
 
+    // Repair VMs missing mds IPs (from old update_config bug)
+    operations::repair_missing_mds_ips();
+
     // Shared API key state for runtime updates
     let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));
 
