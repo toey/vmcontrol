@@ -180,7 +180,13 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     // Generate meta-data (NoCloud format with full MDS fields)
     let hostname = format!("{}-{}", config.hostname_prefix, vm_name);
     let mut meta_data = String::new();
-    meta_data.push_str(&format!("instance-id: {}\n", config.instance_id));
+    // Use unique instance-id per VM to ensure cloud-init runs on cloned templates
+    let instance_id = if config.instance_id == "i-0000000000000001" || config.instance_id.is_empty() {
+        format!("i-{}", vm_name)
+    } else {
+        config.instance_id.clone()
+    };
+    meta_data.push_str(&format!("instance-id: {}\n", instance_id));
     meta_data.push_str(&format!("local-hostname: {}\n", hostname));
     meta_data.push_str(&format!("ami-id: {}\n", config.ami_id));
     meta_data.push_str(&format!("local-ipv4: {}\n", config.local_ipv4));
@@ -235,13 +241,34 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
             .map_err(|e| format!("Failed to write network-config: {}", e))?;
     }
 
-    // Create ISO using hdiutil (macOS) — safe: no shell involved
+    // Create ISO — platform-specific tool
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
-    run_cmd("hdiutil", &[
-        "makehybrid", "-iso", "-joliet",
-        "-default-volume-name", "cidata",
-        "-o", &iso_path, &seed_dir,
-    ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    #[cfg(target_os = "macos")]
+    {
+        run_cmd("hdiutil", &[
+            "makehybrid", "-iso", "-joliet",
+            "-default-volume-name", "cidata",
+            "-o", &iso_path, &seed_dir,
+        ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try genisoimage first, fall back to mkisofs
+        let result = run_cmd("genisoimage", &[
+            "-output", &iso_path, "-volid", "cidata",
+            "-joliet", "-rock", &seed_dir,
+        ]);
+        if result.is_err() {
+            run_cmd("mkisofs", &[
+                "-output", &iso_path, "-volid", "cidata",
+                "-joliet", "-rock", &seed_dir,
+            ]).map_err(|e| format!("Failed to create seed ISO (install genisoimage or mkisofs): {}", e))?;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Err("Seed ISO generation not supported on Windows — disable cloud-init or create ISO manually".into());
+    }
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
@@ -406,14 +433,26 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let mds_config = if let Ok(vm_rec) = db::get_vm(smac) {
         let vm_cfg: serde_json::Value = serde_json::from_str(&vm_rec.config).unwrap_or_default();
         if let Some(mds_val) = vm_cfg.get("mds") {
-            serde_json::from_value::<mds::MdsConfig>(mds_val.clone())
-                .unwrap_or_else(|_| mds::load_mds_config())
+            output_log.push_str(&format!("mds_json: {}\n", mds_val));
+            match serde_json::from_value::<mds::MdsConfig>(mds_val.clone()) {
+                Ok(cfg) => {
+                    output_log.push_str(&format!("mds_local_ipv4: {}\n", cfg.local_ipv4));
+                    cfg
+                }
+                Err(e) => {
+                    output_log.push_str(&format!("mds_parse_err: {} — using default\n", e));
+                    mds::load_mds_config()
+                }
+            }
         } else {
+            output_log.push_str("mds_json: NONE — using default\n");
             mds::load_mds_config()
         }
     } else {
+        output_log.push_str("mds_json: VM_NOT_FOUND — using default\n");
         mds::load_mds_config()
     };
+    output_log.push_str(&format!("slirp_ipv4: {}\n", mds_config.local_ipv4));
     let slirp_opts = if !mds_config.local_ipv4.is_empty() {
         let parts: Vec<&str> = mds_config.local_ipv4.split('.').collect();
         if parts.len() == 4 {
@@ -599,6 +638,16 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         ));
     }
 
+    // PCI Passthrough — VFIO devices (GPU, NIC, etc.)
+    for (idx, pci) in cfg.pci_devices.iter().enumerate() {
+        let addr = pci.host.trim();
+        if !addr.is_empty() {
+            output_log.push_str(&format!("pci_passthrough[{}]: {}\n", idx, addr));
+            qemu_args.push("-device".into());
+            qemu_args.push(format!("vfio-pci,host={}", addr));
+        }
+    }
+
     // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
     qemu_args.push("-machine".into());
     qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
@@ -641,19 +690,14 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         match generate_seed_iso(&ismac) {
             Ok(seed_iso_path) => {
                 output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
-                if is_aarch64 {
-                    qemu_args.push("-drive".into());
-                    qemu_args.push(format!(
-                        "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
-                    ));
-                    qemu_args.push("-device".into());
-                    qemu_args.push("virtio-blk-pci,drive=seed0".into());
-                } else {
-                    qemu_args.push("-drive".into());
-                    qemu_args.push(format!(
-                        "file={},if=ide,index=1,media=cdrom,readonly=on", seed_iso_path
-                    ));
-                }
+                // Attach seed ISO as scsi-cd on the existing virtio-scsi controller
+                // so cloud-init sees it as a CD-ROM device (/dev/sr*) with label CIDATA
+                qemu_args.push("-drive".into());
+                qemu_args.push(format!(
+                    "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
+                ));
+                qemu_args.push("-device".into());
+                qemu_args.push("scsi-cd,drive=seed0".into());
             }
             Err(e) => {
                 output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
@@ -925,6 +969,63 @@ pub fn validate_ip_unique(ip: &str, exclude_smac: Option<&str>) -> Result<(), St
     Ok(())
 }
 
+/// Repair VMs that are missing mds.local_ipv4 or internal_ip
+/// (caused by old update_config bug that wiped mds section)
+pub fn repair_missing_mds_ips() {
+    println!("repair: checking all VMs for missing mds...");
+    let vms = match db::list_vms() {
+        Ok(v) => v,
+        Err(e) => { println!("repair: failed to list VMs: {}", e); return; }
+    };
+    for vm in &vms {
+        let mut cfg: serde_json::Value = match serde_json::from_str(&vm.config) {
+            Ok(v) => v,
+            Err(e) => { println!("repair: {} — bad config: {}", vm.smac, e); continue; }
+        };
+
+        // Ensure mds is an object
+        let has_mds = cfg.get("mds").is_some() && cfg.get("mds").unwrap().is_object();
+        if !has_mds {
+            let obj = cfg.as_object_mut().unwrap();
+            obj.insert("mds".to_string(), serde_json::json!({}));
+            println!("repair: {} — created mds object", vm.smac);
+        }
+
+        let mut changed = false;
+
+        // Check local_ipv4
+        let cur_ip = cfg.get("mds").and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if cur_ip.is_empty() || cur_ip == "10.0.0.1" {
+            let ip = next_ipv4();
+            cfg.get_mut("mds").unwrap().as_object_mut().unwrap()
+                .insert("local_ipv4".to_string(), serde_json::json!(ip));
+            println!("repair: {} → local_ipv4={}", vm.smac, ip);
+            changed = true;
+        }
+
+        // Check internal_ip
+        let cur_internal = cfg.get("mds").and_then(|m| m.get("internal_ip")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if cur_internal.is_empty() {
+            let ip = next_internal_ip();
+            cfg.get_mut("mds").unwrap().as_object_mut().unwrap()
+                .insert("internal_ip".to_string(), serde_json::json!(ip));
+            println!("repair: {} → internal_ip={}", vm.smac, ip);
+            changed = true;
+        }
+
+        if changed {
+            let config_str = serde_json::to_string(&cfg).unwrap_or_default();
+            match db::update_vm(&vm.smac, &config_str) {
+                Ok(_) => println!("repair: {} — saved OK", vm.smac),
+                Err(e) => println!("repair: {} — save FAILED: {}", vm.smac, e),
+            }
+        } else {
+            println!("repair: {} — OK (ipv4={}, internal={})", vm.smac, cur_ip, cur_internal);
+        }
+    }
+    println!("repair: done");
+}
+
 /// Find next available Local IPv4: 10.0.{subnet}.10
 /// Supports up to 10.0.254.10 (254 subnets) then wraps to 10.1.x.10, etc.
 pub fn next_ipv4() -> String {
@@ -1130,10 +1231,13 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
         };
         if needs_ip {
             let ip = next_ipv4();
-            if config.get("mds").is_none() {
-                config["mds"] = serde_json::json!({});
+            // Ensure mds object exists
+            if config.get("mds").is_none() || !config.get("mds").unwrap().is_object() {
+                config.as_object_mut().unwrap()
+                    .insert("mds".to_string(), serde_json::json!({}));
             }
-            config["mds"]["local_ipv4"] = serde_json::json!(ip);
+            config.get_mut("mds").unwrap().as_object_mut().unwrap()
+                .insert("local_ipv4".to_string(), serde_json::json!(ip));
         }
     }
     // Validate IP uniqueness
@@ -1152,10 +1256,13 @@ pub fn create_config(json_str: &str) -> Result<String, String> {
         };
         if needs_internal {
             let ip = next_internal_ip();
-            if config.get("mds").is_none() {
-                config["mds"] = serde_json::json!({});
+            // Ensure mds object exists
+            if config.get("mds").is_none() || !config.get("mds").unwrap().is_object() {
+                config.as_object_mut().unwrap()
+                    .insert("mds".to_string(), serde_json::json!({}));
             }
-            config["mds"]["internal_ip"] = serde_json::json!(ip);
+            config.get_mut("mds").unwrap().as_object_mut().unwrap()
+                .insert("internal_ip".to_string(), serde_json::json!(ip));
         }
     }
     // Validate internal IP uniqueness
@@ -1216,12 +1323,12 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
     validate_vm_name(&smac)?;
 
     let empty_obj = serde_json::Value::Object(serde_json::Map::new());
-    let config = val.get("config").unwrap_or(&empty_obj);
+    let new_config = val.get("config").unwrap_or(&empty_obj);
 
     // Validate MAC address uniqueness (exclude this VM's own MACs)
-    validate_mac_uniqueness(config, Some(&smac))?;
+    validate_mac_uniqueness(new_config, Some(&smac))?;
     // Validate disk names
-    if let Some(disks) = config.get("disks").and_then(|d| d.as_array()) {
+    if let Some(disks) = new_config.get("disks").and_then(|d| d.as_array()) {
         for disk in disks {
             if let Some(dname) = disk.get("diskname").and_then(|v| v.as_str()) {
                 if !dname.is_empty() {
@@ -1231,7 +1338,19 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
         }
     }
 
-    let config_str = serde_json::to_string(config).unwrap_or_default();
+    // Merge: start with old config, overlay new fields (preserves mds, vnc_port, port_forwards)
+    let mut config = if let Ok(old_vm) = db::get_vm(&smac) {
+        serde_json::from_str::<serde_json::Value>(&old_vm.config).unwrap_or_default()
+    } else {
+        serde_json::Value::Object(serde_json::Map::new())
+    };
+    if let (Some(old_map), Some(new_map)) = (config.as_object_mut(), new_config.as_object()) {
+        for (k, v) in new_map {
+            old_map.insert(k.clone(), v.clone());
+        }
+    }
+
+    let config_str = serde_json::to_string(&config).unwrap_or_default();
 
     db::update_vm(&smac, &config_str)?;
 

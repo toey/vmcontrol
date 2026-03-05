@@ -9,8 +9,16 @@ pub struct VmStartConfig {
     pub features: Features,
     pub network_adapters: Vec<NetworkAdapter>,
     pub disks: Vec<DiskInfo>,
+    #[serde(default)]
+    pub pci_devices: Vec<PciDevice>,
     #[serde(default = "default_vnc_port")]
     pub vnc_port: u16,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PciDevice {
+    /// PCI address, e.g. "0000:01:00.0"
+    pub host: String,
 }
 
 fn default_one() -> String { "1".into() }

@@ -180,7 +180,13 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     // Generate meta-data (NoCloud format with full MDS fields)
     let hostname = format!("{}-{}", config.hostname_prefix, vm_name);
     let mut meta_data = String::new();
-    meta_data.push_str(&format!("instance-id: {}\n", config.instance_id));
+    // Use unique instance-id per VM to ensure cloud-init runs on cloned templates
+    let instance_id = if config.instance_id == "i-0000000000000001" || config.instance_id.is_empty() {
+        format!("i-{}", vm_name)
+    } else {
+        config.instance_id.clone()
+    };
+    meta_data.push_str(&format!("instance-id: {}\n", instance_id));
     meta_data.push_str(&format!("local-hostname: {}\n", hostname));
     meta_data.push_str(&format!("ami-id: {}\n", config.ami_id));
     meta_data.push_str(&format!("local-ipv4: {}\n", config.local_ipv4));
@@ -235,13 +241,34 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
             .map_err(|e| format!("Failed to write network-config: {}", e))?;
     }
 
-    // Create ISO using hdiutil (macOS) — safe: no shell involved
+    // Create ISO — platform-specific tool
     let _ = std::fs::remove_file(&iso_path); // remove old ISO if exists
-    run_cmd("hdiutil", &[
-        "makehybrid", "-iso", "-joliet",
-        "-default-volume-name", "cidata",
-        "-o", &iso_path, &seed_dir,
-    ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    #[cfg(target_os = "macos")]
+    {
+        run_cmd("hdiutil", &[
+            "makehybrid", "-iso", "-joliet",
+            "-default-volume-name", "cidata",
+            "-o", &iso_path, &seed_dir,
+        ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try genisoimage first, fall back to mkisofs
+        let result = run_cmd("genisoimage", &[
+            "-output", &iso_path, "-volid", "cidata",
+            "-joliet", "-rock", &seed_dir,
+        ]);
+        if result.is_err() {
+            run_cmd("mkisofs", &[
+                "-output", &iso_path, "-volid", "cidata",
+                "-joliet", "-rock", &seed_dir,
+            ]).map_err(|e| format!("Failed to create seed ISO (install genisoimage or mkisofs): {}", e))?;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Err("Seed ISO generation not supported on Windows — disable cloud-init or create ISO manually".into());
+    }
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
@@ -438,9 +465,8 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             } else {
                 mds_config.local_ipv4.clone()
             };
-            let mds_port = get_conf_or("api_port", "8080");
-            format!(",net={},host={},dns={},dhcpstart={},guestfwd=tcp:169.254.169.254:80-tcp:127.0.0.1:{}",
-                net, host, dns, dhcp_start, mds_port)
+            format!(",net={},host={},dns={},dhcpstart={}",
+                net, host, dns, dhcp_start)
         } else {
             String::new()
         }
@@ -664,19 +690,14 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         match generate_seed_iso(&ismac) {
             Ok(seed_iso_path) => {
                 output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
-                if is_aarch64 {
-                    qemu_args.push("-drive".into());
-                    qemu_args.push(format!(
-                        "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
-                    ));
-                    qemu_args.push("-device".into());
-                    qemu_args.push("virtio-blk-pci,drive=seed0".into());
-                } else {
-                    qemu_args.push("-drive".into());
-                    qemu_args.push(format!(
-                        "file={},if=ide,index=1,media=cdrom,readonly=on", seed_iso_path
-                    ));
-                }
+                // Attach seed ISO as scsi-cd on the existing virtio-scsi controller
+                // so cloud-init sees it as a CD-ROM device (/dev/sr*) with label CIDATA
+                qemu_args.push("-drive".into());
+                qemu_args.push(format!(
+                    "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
+                ));
+                qemu_args.push("-device".into());
+                qemu_args.push("scsi-cd,drive=seed0".into());
             }
             Err(e) => {
                 output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
