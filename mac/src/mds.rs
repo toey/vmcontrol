@@ -9,14 +9,13 @@ use crate::models::ApiResponse;
 // ──────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct MdsConfig {
     pub instance_id: String,
     pub ami_id: String,
     pub hostname_prefix: String,
     pub local_ipv4: String,
-    #[serde(default)]
     pub internal_ip: String,
-    #[serde(default)]
     pub vlan: String,
     pub ssh_pubkey: String,
     pub root_password: String,
@@ -121,12 +120,11 @@ pub fn generate_userdata(config: &MdsConfig) -> String {
 }
 
 /// Generate user-data for NoCloud seed ISO (no Ec2 datasource block)
+/// NOTE: datasource_list is NOT set here — cloud-init determines datasource
+/// BEFORE reading user-data. Use SMBIOS hint or /etc/cloud/cloud.cfg.d/ instead.
 pub fn generate_userdata_nocloud(config: &MdsConfig) -> String {
-    let mut ud = String::from("#cloud-config\n");
-    ud.push_str("datasource_list: [ NoCloud, None ]\n");
-    // Re-append the base content after the #cloud-config header
     let base = generate_userdata_base(config);
-    ud.push_str(base.strip_prefix("#cloud-config\n").unwrap_or(&base));
+    let mut ud = base;
 
     ud.push_str("manage_etc_hosts: true\n");
 

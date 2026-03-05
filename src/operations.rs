@@ -247,7 +247,7 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     {
         run_cmd("hdiutil", &[
             "makehybrid", "-iso", "-joliet",
-            "-default-volume-name", "cidata",
+            "-default-volume-name", "CIDATA",
             "-o", &iso_path, &seed_dir,
         ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
     }
@@ -255,12 +255,12 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     {
         // Try genisoimage first, fall back to mkisofs
         let result = run_cmd("genisoimage", &[
-            "-output", &iso_path, "-volid", "cidata",
+            "-output", &iso_path, "-volid", "CIDATA",
             "-joliet", "-rock", &seed_dir,
         ]);
         if result.is_err() {
             run_cmd("mkisofs", &[
-                "-output", &iso_path, "-volid", "cidata",
+                "-output", &iso_path, "-volid", "CIDATA",
                 "-joliet", "-rock", &seed_dir,
             ]).map_err(|e| format!("Failed to create seed ISO (install genisoimage or mkisofs): {}", e))?;
         }
@@ -272,6 +272,17 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
 
     // Cleanup seed directory
     let _ = std::fs::remove_dir_all(&seed_dir);
+
+    // Verify ISO was actually created
+    if !std::path::Path::new(&iso_path).exists() {
+        // hdiutil sometimes appends .iso automatically
+        let alt = format!("{}.iso", iso_path);
+        if std::path::Path::new(&alt).exists() {
+            let _ = std::fs::rename(&alt, &iso_path);
+        } else {
+            return Err(format!("Seed ISO not found at {} after creation", iso_path));
+        }
+    }
 
     Ok(iso_path)
 }
@@ -704,11 +715,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         };
 
-        // SMBIOS cloud-init hint (x86_64 only — aarch64 virt doesn't support SMBIOS)
-        if !is_aarch64 {
-            qemu_args.push("-smbios".into());
-            qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
-        }
+        // SMBIOS cloud-init hint — tells ds-identify to use NoCloud
+        // Works on both x86_64 and aarch64 (QEMU virt + EDK2 UEFI supports SMBIOS)
+        qemu_args.push("-smbios".into());
+        qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
     } else {
         output_log.push_str("cloud-init: disabled\n");
     }
