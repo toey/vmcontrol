@@ -678,31 +678,17 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
 
-    // CDROM — 4 named drives "cd0"–"cd3" for runtime ISO mount/unmount via monitor
-    // bootindex=0 on cd0 so UEFI/BIOS tries CD first, then falls through to disk
-    // Use virtio-scsi controller for both architectures (avoids IDE slot limits)
+    // SCSI controller (shared by seed ISO + runtime CD-ROM drives)
     qemu_args.push("-device".into());
     qemu_args.push("virtio-scsi-pci,id=scsi0".into());
-    for i in 0..4u8 {
-        let drive_id = format!("cd{}", i);
-        qemu_args.push("-drive".into());
-        qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
-        qemu_args.push("-device".into());
-        if i == 0 {
-            qemu_args.push(format!("scsi-cd,drive={},bootindex=0", drive_id));
-        } else {
-            qemu_args.push(format!("scsi-cd,drive={}", drive_id));
-        }
-    }
 
-    // Generate cloud-init seed ISO from MDS config (skip if cloud-init disabled)
+    // Cloud-init seed ISO — MUST be first scsi-cd so guest sees it as /dev/sr0
+    // (some cloud-init versions only scan sr0, or have timing issues with later devices)
     let cloudinit_enabled = cfg.features.cloudinit != "0";
     if cloudinit_enabled {
         match generate_seed_iso(&ismac) {
             Ok(seed_iso_path) => {
                 output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
-                // Attach seed ISO as scsi-cd on the existing virtio-scsi controller
-                // so cloud-init sees it as a CD-ROM device (/dev/sr*) with label CIDATA
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
                     "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
@@ -715,12 +701,29 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         };
 
-        // SMBIOS cloud-init hint — tells ds-identify to use NoCloud
-        // Works on both x86_64 and aarch64 (QEMU virt + EDK2 UEFI supports SMBIOS)
+        // SMBIOS cloud-init hints — tells ds-identify to use NoCloud
+        // type=1 serial: supported by all cloud-init versions (checks DMI product serial)
+        // type=11 OEM string: supported by cloud-init 23.x+ (checks OEM strings)
+        qemu_args.push("-smbios".into());
+        qemu_args.push("type=1,serial=ds=nocloud".into());
         qemu_args.push("-smbios".into());
         qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
     } else {
         output_log.push_str("cloud-init: disabled\n");
+    }
+
+    // CDROM — 4 named drives "cd0"–"cd3" for runtime ISO mount/unmount via monitor
+    // bootindex=0 on cd0 so UEFI/BIOS tries CD first, then falls through to disk
+    for i in 0..4u8 {
+        let drive_id = format!("cd{}", i);
+        qemu_args.push("-drive".into());
+        qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
+        qemu_args.push("-device".into());
+        if i == 0 {
+            qemu_args.push(format!("scsi-cd,drive={},bootindex=0", drive_id));
+        } else {
+            qemu_args.push(format!("scsi-cd,drive={}", drive_id));
+        }
     }
 
     // USB tablet (for mouse) — aarch64 already has xhci+kbd+tablet from above
