@@ -22,6 +22,7 @@ fn defaults() -> HashMap<String, String> {
     m.insert("mds_config_path".into(), "/opt/ctl/data/mds.json".into());
     m.insert("static_path".into(), "./static".into());
     m.insert("qemu_accel".into(), "hvf:tcg".into());
+    m.insert("qemu_cpu_x86".into(), "Haswell-v4".into());
     m.insert("qemu_machine".into(), "pc".into());
     m.insert("qemu_aarch64_path".into(), "/opt/homebrew/bin/qemu-system-aarch64".into());
     m.insert("edk2_aarch64_bios".into(), "/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into());

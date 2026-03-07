@@ -340,10 +340,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-device".into());
         qemu_args.push("usb-tablet".into());
     } else {
-        // CPU for x86_64 — use "max" to expose all host-supported features
-        // (SSE4.2, AVX, etc.) which modern software like Splunk requires
+        // CPU for x86_64 — configurable model (default: Haswell-v4)
+        // "Haswell-v4" provides SSE4.2/AVX/AVX2 with proper CPUID brand string.
+        // On native x86 with KVM, set qemu_cpu_x86=host in config.yaml for best performance.
+        let cpu_model = get_conf_or("qemu_cpu_x86", "Haswell-v4");
         qemu_args.push("-cpu".into());
-        qemu_args.push("max".into());
+        qemu_args.push(cpu_model);
         qemu_args.extend([
             "-nodefaults", "-vga", "std", "-boot", "d",
         ].map(String::from));
