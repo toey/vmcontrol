@@ -12,12 +12,12 @@ QEMU_PATH="/usr/bin/qemu-system-x86_64"
 QEMU_IMG_PATH="/usr/bin/qemu-img"
 CTL_BIN="/opt/ctl/bin"
 CONFIG_YAML="/opt/ctl/bin/config.yaml"
-PCTL_PATH="/tmp/vmcontrol"
-DISK_PATH="/tmp/vmcontrol/disks"
-ISO_PATH="/tmp/vmcontrol/iso"
-LIVE_PATH="/tmp/vmcontrol/backups"
+PCTL_PATH="/opt/ctl/data"
+DISK_PATH="/opt/ctl/data/disks"
+ISO_PATH="/opt/ctl/data/iso"
+LIVE_PATH="/opt/ctl/data/backups"
 STATIC_DIR="/opt/ctl/bin/static"
-LOG_DIR="/tmp/vmcontrol"
+LOG_DIR="/opt/ctl/data"
 SERVICE_NAME="vmcontrol"
 SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
 
@@ -169,10 +169,10 @@ if [[ ! -f "$CONFIG_YAML" ]]; then
 qemu_path: /usr/bin/qemu-system-x86_64
 qemu_img_path: /usr/bin/qemu-img
 ctl_bin_path: /opt/ctl/bin
-pctl_path: /tmp/vmcontrol
-disk_path: /tmp/vmcontrol/disks
-iso_path: /tmp/vmcontrol/iso
-live_path: /tmp/vmcontrol/backups
+pctl_path: /opt/ctl/data
+disk_path: /opt/ctl/data/disks
+iso_path: /opt/ctl/data/iso
+live_path: /opt/ctl/data/backups
 gzip_path: /usr/bin/gzip
 websockify_path: websockify
 vs_up_script: vs-up.sh

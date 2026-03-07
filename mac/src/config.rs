@@ -7,19 +7,19 @@ fn defaults() -> HashMap<String, String> {
     let mut m = HashMap::new();
     m.insert("qemu_path".into(), "/opt/homebrew/bin/qemu-system-x86_64".into());
     m.insert("ctl_bin_path".into(), "/opt/ctl/bin".into());
-    m.insert("live_path".into(), "/tmp/vmcontrol/backups".into());
+    m.insert("live_path".into(), "/opt/ctl/data/backups".into());
     m.insert("gzip_path".into(), "/usr/bin/gzip".into());
     m.insert("vs_up_script".into(), "vs-up.sh".into());
     m.insert("vs_down_script".into(), "vs-down.sh".into());
     m.insert("pctl_script".into(), "pctl.sh".into());
-    m.insert("pctl_path".into(), "/tmp/vmcontrol".into());
-    m.insert("disk_path".into(), "/tmp/vmcontrol/disks".into());
-    m.insert("iso_path".into(), "/tmp/vmcontrol/iso".into());
+    m.insert("pctl_path".into(), "/opt/ctl/data".into());
+    m.insert("disk_path".into(), "/opt/ctl/data/disks".into());
+    m.insert("iso_path".into(), "/opt/ctl/data/iso".into());
     m.insert("qemu_img_path".into(), "/opt/homebrew/bin/qemu-img".into());
     m.insert("domain".into(), "localhost".into());
     // New config keys
-    m.insert("db_path".into(), "/tmp/vmcontrol/vmcontrol.db".into());
-    m.insert("mds_config_path".into(), "/tmp/vmcontrol/mds.json".into());
+    m.insert("db_path".into(), "/opt/ctl/data/vmcontrol.db".into());
+    m.insert("mds_config_path".into(), "/opt/ctl/data/mds.json".into());
     m.insert("static_path".into(), "./static".into());
     m.insert("qemu_accel".into(), "hvf:tcg".into());
     m.insert("qemu_machine".into(), "pc".into());

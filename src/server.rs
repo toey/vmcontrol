@@ -88,6 +88,9 @@ where
             if path.starts_with("/api/vnc/resolve/") {
                 return svc.call(req).await;
             }
+            if path == "/api/apikey/generate" {
+                return svc.call(req).await;
+            }
 
             // Check X-API-Key header
             let provided = req.headers()

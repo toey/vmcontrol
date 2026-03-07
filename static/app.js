@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────
 // API Key Authentication Helper
 // ──────────────────────────────────────────
+var _authLocked = false; // prevent multiple login overlays
 function getApiKey() {
     return localStorage.getItem('vmcontrol_api_key') || '';
 }
@@ -14,18 +15,76 @@ function apiHeaders(extra) {
     if (key) h['X-API-Key'] = key;
     return h;
 }
+function showLoginOverlay(msg) {
+    if (_authLocked) return;
+    _authLocked = true;
+    var overlay = document.getElementById('login-overlay');
+    var errEl = document.getElementById('login-error');
+    if (msg) { errEl.textContent = msg; errEl.style.display = 'block'; }
+    else { errEl.style.display = 'none'; }
+    overlay.style.display = 'flex';
+    var input = document.getElementById('login-apikey-input');
+    input.value = '';
+    setTimeout(function() { input.focus(); }, 100);
+}
+function submitLogin() {
+    var input = document.getElementById('login-apikey-input');
+    var key = input.value.trim();
+    if (!key) return;
+    // Test the key with a simple API call
+    fetch('/api/vm/list', { headers: { 'X-API-Key': key } }).then(function(res) {
+        if (res.status === 401) {
+            document.getElementById('login-error').textContent = 'Invalid API key';
+            document.getElementById('login-error').style.display = 'block';
+            input.value = '';
+            input.focus();
+        } else {
+            setApiKey(key);
+            document.getElementById('login-overlay').style.display = 'none';
+            _authLocked = false;
+            initApp(); // load all data
+        }
+    });
+}
+// Allow Enter key to submit login
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && document.getElementById('login-overlay').style.display === 'flex') {
+        submitLogin();
+    }
+});
+// Generate a new API key from the login overlay (no auth needed for generate endpoint)
+async function generateAndLogin() {
+    var errEl = document.getElementById('login-error');
+    errEl.textContent = 'Generating new API key...';
+    errEl.style.display = 'block';
+    errEl.style.color = '#8b949e';
+    try {
+        var res = await fetch('/api/apikey/generate', { method: 'POST' });
+        if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
+        var text = await res.text();
+        var data;
+        try { data = JSON.parse(text); } catch (_) { throw new Error('Invalid response from server'); }
+        if (data && data.api_key) {
+            setApiKey(data.api_key);
+            document.getElementById('login-apikey-input').value = data.api_key;
+            errEl.textContent = 'New API key generated! Click Login or press Enter.';
+            errEl.style.color = '#3fb950';
+        } else {
+            errEl.textContent = 'Failed to generate API key';
+            errEl.style.color = '#f85149';
+        }
+    } catch (e) {
+        errEl.textContent = 'Error: ' + e.message;
+        errEl.style.color = '#f85149';
+    }
+}
 // Wrapper for fetch that handles 401 (auth required)
 async function apiFetch(url, opts) {
     opts = opts || {};
     opts.headers = apiHeaders(opts.headers || {});
     var res = await fetch(url, opts);
     if (res.status === 401) {
-        var key = prompt('API Key required. Enter your VMCONTROL_API_KEY:');
-        if (key) {
-            setApiKey(key);
-            opts.headers['X-API-Key'] = key;
-            res = await fetch(url, opts);
-        }
+        showLoginOverlay('Session expired. Please re-enter your API key.');
     }
     return res;
 }
@@ -2454,7 +2513,7 @@ async function syncDhcpFromVms() {
 }
 
 // Init
-window.addEventListener('DOMContentLoaded', function() {
+function initApp() {
     loadUsedMacs().then(function() {
         addNetworkAdapter(); // genMac() now avoids collisions
     });
@@ -2471,4 +2530,20 @@ window.addEventListener('DOMContentLoaded', function() {
     loadOsTemplates();
     loadVfioDevices();
     loadApikey();
+}
+window.addEventListener('DOMContentLoaded', function() {
+    // Check auth first — if API key is required and missing/invalid, show login overlay
+    var key = getApiKey();
+    var headers = {};
+    if (key) headers['X-API-Key'] = key;
+    fetch('/api/vm/list', { headers: headers }).then(function(res) {
+        if (res.status === 401) {
+            showLoginOverlay();
+        } else {
+            initApp();
+        }
+    }).catch(function() {
+        // Network error — try loading anyway
+        initApp();
+    });
 });

@@ -28,7 +28,7 @@ pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
 /// Used for QEMU instead of -daemonize which has WebSocket VNC bugs.
 /// Returns (pid, log_path) so caller can check logs on failure.
 pub fn spawn_background(program: &str, args: &[&str]) -> Result<(u32, String), String> {
-    let pctl_path = std::env::temp_dir().join("vmcontrol");
+    let pctl_path = std::path::PathBuf::from(crate::config::get_conf("pctl_path"));
     let _ = std::fs::create_dir_all(pctl_path.join("logs"));
     let log_path = pctl_path.join(format!("logs/qemu_{}.log", std::process::id()));
     let log_file = std::fs::File::create(&log_path)
