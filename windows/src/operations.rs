@@ -340,6 +340,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-device".into());
         qemu_args.push("usb-tablet".into());
     } else {
+        // CPU for x86_64 — use "max" to expose all host-supported features
+        // (SSE4.2, AVX, etc.) which modern software like Splunk requires
+        qemu_args.push("-cpu".into());
+        qemu_args.push("max".into());
         qemu_args.extend([
             "-nodefaults", "-vga", "std", "-boot", "d",
         ].map(String::from));
