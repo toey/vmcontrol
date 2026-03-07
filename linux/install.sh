@@ -143,6 +143,25 @@ mkdir -p "$LIVE_PATH"
 mkdir -p "$STATIC_DIR"
 success "Directories created"
 
+# --- Step 3b: Migrate data from /tmp/vmcontrol (if exists) ---
+OLD_DATA="/tmp/vmcontrol"
+if [[ -d "$OLD_DATA" && "$PCTL_PATH" != "$OLD_DATA" ]]; then
+    info "Migrating data from $OLD_DATA to $PCTL_PATH..."
+    for sub in disks iso backups; do
+        if [[ -d "$OLD_DATA/$sub" ]] && ls "$OLD_DATA/$sub"/* &>/dev/null; then
+            cp -a "$OLD_DATA/$sub/"* "$PCTL_PATH/$sub/" 2>/dev/null && \
+                success "Migrated $sub" || warn "Failed to migrate $sub"
+        fi
+    done
+    for f in vmcontrol.db mds.json .api_key; do
+        if [[ -f "$OLD_DATA/$f" ]]; then
+            cp -a "$OLD_DATA/$f" "$PCTL_PATH/$f" 2>/dev/null && \
+                success "Migrated $f" || warn "Failed to migrate $f"
+        fi
+    done
+    success "Data migration complete"
+fi
+
 # --- Step 4: Copy binary & static files ---
 info "Installing binary and static files..."
 
@@ -182,7 +201,14 @@ domain: localhost
 YAML
     success "config.yaml created"
 else
-    warn "config.yaml already exists — skipping (preserving your customizations)"
+    # Migrate old /tmp/vmcontrol paths to /opt/ctl/data
+    if grep -q '/tmp/vmcontrol' "$CONFIG_YAML" 2>/dev/null; then
+        info "Migrating config.yaml paths from /tmp/vmcontrol to /opt/ctl/data..."
+        sed -i 's|/tmp/vmcontrol|/opt/ctl/data|g' "$CONFIG_YAML"
+        success "config.yaml paths migrated"
+    else
+        warn "config.yaml already exists — skipping (preserving your customizations)"
+    fi
 fi
 
 # --- Step 6: Generate API key (always regenerate on install) ---
