@@ -2578,6 +2578,152 @@ async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResp
     }))
 }
 
+// ──────────────────────────────────────────
+// Disk File Editor handlers
+// ──────────────────────────────────────────
+
+async fn disk_edit_supported_handler() -> HttpResponse {
+    let supported = cfg!(target_os = "linux");
+    HttpResponse::Ok().json(serde_json::json!({
+        "supported": supported,
+        "platform": std::env::consts::OS,
+    }))
+}
+
+async fn mount_disk_handler(
+    body: web::Json<serde_json::Value>,
+    store: web::Data<crate::disk_edit::MountedDiskStore>,
+) -> HttpResponse {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Disk name required".into(), output: None,
+        });
+    }
+    let s = store.get_ref().clone();
+    let n = name.to_string();
+    match web::block(move || crate::disk_edit::mount_disk(&n, &s)).await {
+        Ok(Ok(info)) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "message": format!("Disk '{}' mounted at {}", name, info.mount_point),
+            "mount_point": info.mount_point,
+        })),
+        Ok(Err(e)) => HttpResponse::Ok().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Internal error: {}", e), output: None,
+        }),
+    }
+}
+
+async fn unmount_disk_handler(
+    body: web::Json<serde_json::Value>,
+    store: web::Data<crate::disk_edit::MountedDiskStore>,
+) -> HttpResponse {
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    if name.is_empty() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Disk name required".into(), output: None,
+        });
+    }
+    let s = store.get_ref().clone();
+    let n = name.to_string();
+    match web::block(move || crate::disk_edit::unmount_disk(&n, &s)).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(ApiResponse {
+            success: true, message: format!("Disk '{}' unmounted", name), output: None,
+        }),
+        Ok(Err(e)) => HttpResponse::Ok().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Internal error: {}", e), output: None,
+        }),
+    }
+}
+
+async fn list_mounted_disks_handler(
+    store: web::Data<crate::disk_edit::MountedDiskStore>,
+) -> HttpResponse {
+    let locked = store.lock().unwrap();
+    let list: Vec<_> = locked.values().cloned().collect();
+    HttpResponse::Ok().json(list)
+}
+
+async fn browse_disk_handler(
+    path: web::Path<String>,
+    req: actix_web::HttpRequest,
+    store: web::Data<crate::disk_edit::MountedDiskStore>,
+) -> HttpResponse {
+    let name = path.into_inner();
+    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string())
+        .unwrap_or_else(|_| web::Query(HashMap::new()));
+    let dir = query.get("path").map(|s| s.as_str()).unwrap_or("/");
+    let s = store.get_ref().clone();
+    let n = name.clone();
+    let d = dir.to_string();
+    match web::block(move || crate::disk_edit::list_files(&n, &d, &s)).await {
+        Ok(Ok(entries)) => HttpResponse::Ok().json(entries),
+        Ok(Err(e)) => HttpResponse::Ok().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Internal error: {}", e), output: None,
+        }),
+    }
+}
+
+async fn read_disk_file_handler(
+    path: web::Path<String>,
+    req: actix_web::HttpRequest,
+    store: web::Data<crate::disk_edit::MountedDiskStore>,
+) -> HttpResponse {
+    let name = path.into_inner();
+    let query = web::Query::<HashMap<String, String>>::from_query(req.query_string())
+        .unwrap_or_else(|_| web::Query(HashMap::new()));
+    let file_path = query.get("path").map(|s| s.as_str()).unwrap_or("");
+    let s = store.get_ref().clone();
+    let n = name.clone();
+    let fp = file_path.to_string();
+    match web::block(move || crate::disk_edit::read_file(&n, &fp, &s)).await {
+        Ok(Ok(content)) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "content": content,
+        })),
+        Ok(Err(e)) => HttpResponse::Ok().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Internal error: {}", e), output: None,
+        }),
+    }
+}
+
+async fn write_disk_file_handler(
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+    store: web::Data<crate::disk_edit::MountedDiskStore>,
+) -> HttpResponse {
+    let name = path.into_inner();
+    let file_path = body.get("path").and_then(|v| v.as_str()).unwrap_or("");
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let s = store.get_ref().clone();
+    let n = name.clone();
+    let fp = file_path.to_string();
+    let c = content.to_string();
+    match web::block(move || crate::disk_edit::write_file(&n, &fp, &c, &s)).await {
+        Ok(Ok(())) => HttpResponse::Ok().json(ApiResponse {
+            success: true, message: "File saved".into(), output: None,
+        }),
+        Ok(Err(e)) => HttpResponse::Ok().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Internal error: {}", e), output: None,
+        }),
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -2609,6 +2755,12 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
 
     // Shared VNC token store (one-time tokens)
     let vnc_tokens: VncTokenStore = Arc::new(Mutex::new(HashMap::new()));
+
+    // Shared mounted-disk store for disk file editor
+    let mounted_disks: crate::disk_edit::MountedDiskStore =
+        Arc::new(Mutex::new(HashMap::new()));
+    // Cleanup stale mounts from previous run
+    crate::disk_edit::cleanup_stale_mounts();
 
     // Cleanup stale VM statuses — if DB says "running" but QEMU is not actually running, set to "stopped"
     {
@@ -2657,12 +2809,14 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     // Main control panel + MDS on main port
     let api_key_for_server = shared_api_key.clone();
     let vnc_tokens_for_server = vnc_tokens.clone();
+    let mounted_disks_for_server = mounted_disks.clone();
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .wrap(ApiKeyAuth(api_key_for_server.clone()))
             .app_data(web::Data::new(api_key_for_server.clone()))
             .app_data(web::Data::new(vnc_tokens_for_server.clone()))
+            .app_data(web::Data::new(mounted_disks_for_server.clone()))
             // Allow up to 4GB uploads for ISO files
             .app_data(web::PayloadConfig::new(4_294_967_296))
             // API key management routes
@@ -2694,6 +2848,14 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/disk/delete", web::post().to(delete_disk_handler))
             .route("/api/disk/clone", web::post().to(clone_disk_handler))
             .route("/api/disk/resize", web::post().to(resize_disk_handler))
+            // Disk file editor routes
+            .route("/api/disk/edit-supported", web::get().to(disk_edit_supported_handler))
+            .route("/api/disk/mount", web::post().to(mount_disk_handler))
+            .route("/api/disk/unmount", web::post().to(unmount_disk_handler))
+            .route("/api/disk/mounted", web::get().to(list_mounted_disks_handler))
+            .route("/api/disk/browse/{name}", web::get().to(browse_disk_handler))
+            .route("/api/disk/readfile/{name}", web::get().to(read_disk_file_handler))
+            .route("/api/disk/writefile/{name}", web::post().to(write_disk_file_handler))
             // Image routes
             .route("/api/image/list", web::get().to(list_images_handler))
             .route("/api/image/upload", web::post().to(upload_image_handler))

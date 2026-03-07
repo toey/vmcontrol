@@ -30,6 +30,8 @@ fn defaults() -> HashMap<String, String> {
     m.insert("internal_mcast_port".into(), "11111".into());
     m.insert("bridge_sudo".into(), "true".into());
     m.insert("bridge_sudo_path".into(), "/usr/bin/sudo".into());
+    m.insert("qemu_nbd_path".into(), "/usr/bin/qemu-nbd".into());
+    m.insert("disk_mount_base".into(), "/tmp/vmcontrol-mnt".into());
     m
 }
 

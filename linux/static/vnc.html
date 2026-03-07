@@ -109,6 +109,23 @@
         <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
+
+    <!-- Paste modal -->
+    <div id="paste-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;justify-content:center;align-items:center;">
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:600px;width:90%;">
+            <h3 style="color:#c9d1d9;margin:0 0 12px 0;">Paste text into VM</h3>
+            <textarea id="paste-text" rows="10" style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:10px;font-family:monospace;font-size:13px;resize:vertical;box-sizing:border-box;" placeholder="Paste or type text here... (supports multi-line)"></textarea>
+            <div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
+                <label style="color:#8b949e;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none;">
+                    <input type="checkbox" id="paste-vim-mode"> Vim mode <span style="color:#6e7681;font-size:11px;">(auto :set paste)</span>
+                </label>
+                <span style="flex:1;"></span>
+                <button onclick="closePasteModal()" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:8px 16px;border-radius:6px;cursor:pointer;">Cancel</button>
+                <button onclick="executePaste()" style="background:#238636;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:bold;">Send</button>
+            </div>
+        </div>
+    </div>
+
     <div id="vnc-container">
         <div class="placeholder" id="placeholder">
             <h2>noVNC Console</h2>
@@ -196,20 +213,175 @@
             setStatus('Sent Ctrl+Alt+Del', 'status-connected');
         };
 
-        window.doPaste = function() {
-            if (!rfb) { alert('Not connected'); return; }
-            var text = prompt('Text to paste into VM:');
-            if (!text) return;
-            for (var i = 0; i < text.length; i++) {
-                var ch = text.charCodeAt(i);
-                if (text[i] === '\n') {
-                    rfb.sendKey(0xff0d);
+        // Key maps for paste (US keyboard layout)
+        var SHIFT_MAP = {
+            '~': 'Backquote', '!': 'Digit1', '@': 'Digit2', '#': 'Digit3',
+            '$': 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7',
+            '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', '_': 'Minus',
+            '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight',
+            '|': 'Backslash', ':': 'Semicolon', '"': 'Quote',
+            '<': 'Comma', '>': 'Period', '?': 'Slash',
+        };
+        var CODE_MAP = {
+            '`': 'Backquote', '-': 'Minus', '=': 'Equal',
+            '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash',
+            ';': 'Semicolon', "'": 'Quote', ',': 'Comma',
+            '.': 'Period', '/': 'Slash', ' ': 'Space',
+            '0': 'Digit0', '1': 'Digit1', '2': 'Digit2', '3': 'Digit3',
+            '4': 'Digit4', '5': 'Digit5', '6': 'Digit6', '7': 'Digit7',
+            '8': 'Digit8', '9': 'Digit9',
+        };
+
+        var _pasteInProgress = false;
+
+        // Convert a character into an array of individual key events
+        // Each event: { ks, code, down? }
+        // Shifted chars produce 4 events (shift-down, key-down, key-up, shift-up)
+        // so each sub-event gets its own delay for QEMU TCG to keep up.
+        function charToKeyEvents(ch, keysym) {
+            if (ch === '\r') return [];
+            if (ch === '\n') {
+                return [{ ks: 0xff0d, code: 'Enter' }];
+            }
+            if (ch === '\t') {
+                return [{ ks: 0xff09, code: 'Tab' }];
+            }
+            if (SHIFT_MAP[ch]) {
+                return [
+                    { ks: 0xffe1, code: 'ShiftLeft', down: true },
+                    { ks: keysym, code: SHIFT_MAP[ch], down: true },
+                    { ks: keysym, code: SHIFT_MAP[ch], down: false },
+                    { ks: 0xffe1, code: 'ShiftLeft', down: false },
+                ];
+            }
+            if (ch >= 'A' && ch <= 'Z') {
+                return [
+                    { ks: 0xffe1, code: 'ShiftLeft', down: true },
+                    { ks: keysym, code: 'Key' + ch, down: true },
+                    { ks: keysym, code: 'Key' + ch, down: false },
+                    { ks: 0xffe1, code: 'ShiftLeft', down: false },
+                ];
+            }
+            if (ch >= 'a' && ch <= 'z') {
+                return [{ ks: keysym, code: 'Key' + ch.toUpperCase() }];
+            }
+            return [{ ks: keysym, code: CODE_MAP[ch] || null }];
+        }
+
+        // Send text by scheduling individual key events with 12ms delay each.
+        // Shifted chars (like # " : A-Z) produce 4 events = 48ms total,
+        // giving QEMU TCG enough time to process shift+key properly.
+        function sendTextToVm(text, callback) {
+            // Build flat list of all key events
+            var events = [];
+            var charIndices = []; // parallel array: which char index each event belongs to
+            var charCount = 0;
+            for (var c = 0; c < text.length; c++) {
+                var ch = text[c];
+                var keysym = text.charCodeAt(c);
+                var kevs = charToKeyEvents(ch, keysym);
+                for (var j = 0; j < kevs.length; j++) {
+                    events.push(kevs[j]);
+                    charIndices.push(charCount);
+                }
+                if (kevs.length > 0) charCount++;
+            }
+
+            var total = charCount;
+            var ei = 0; // event index
+            var totalEvents = events.length;
+            _pasteInProgress = true;
+
+            function next() {
+                if (ei < totalEvents) {
+                    var ev = events[ei];
+                    if (ev.down !== undefined) {
+                        rfb.sendKey(ev.ks, ev.code, ev.down);
+                    } else {
+                        rfb.sendKey(ev.ks, ev.code);
+                    }
+                    var charsDone = charIndices[ei] + 1;
+                    ei++;
+                    // Update status every 20 chars
+                    if (ei >= totalEvents || charsDone % 20 === 0) {
+                        setStatus('Pasting... ' + charsDone + '/' + total, 'status-connected');
+                    }
+                }
+                if (ei < totalEvents) {
+                    setTimeout(next, 25);
                 } else {
-                    rfb.sendKey(ch);
+                    _pasteInProgress = false;
+                    setStatus('Typed ' + total + ' chars', 'status-connected');
+                    if (callback) callback();
                 }
             }
-            setStatus('Typed ' + text.length + ' chars', 'status-connected');
+            next();
+        }
+
+        window.doPaste = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            if (_pasteInProgress) { alert('Paste already in progress'); return; }
+            var modal = document.getElementById('paste-modal');
+            var textarea = document.getElementById('paste-text');
+            textarea.value = '';
+            modal.style.display = 'flex';
+            textarea.focus();
         };
+
+        window.closePasteModal = function() {
+            document.getElementById('paste-modal').style.display = 'none';
+        };
+
+        // Send a vim command sequence: Esc, then type the command, then Enter
+        function sendVimCommand(cmd, callback) {
+            // Esc key
+            rfb.sendKey(0xff1b, 'Escape');
+            var fullCmd = cmd + '\n';
+            var delay = 80; // wait for Esc to take effect
+            setTimeout(function() {
+                sendTextToVm(fullCmd, callback);
+            }, delay);
+        }
+
+        window.executePaste = function() {
+            var text = document.getElementById('paste-text').value;
+            var vimMode = document.getElementById('paste-vim-mode').checked;
+            document.getElementById('paste-modal').style.display = 'none';
+            if (!text || !rfb) return;
+
+            if (vimMode) {
+                // Vim mode: Esc → :set paste → Enter → i → <text> → Esc → :set nopaste → Enter
+                setStatus('Vim: setting paste mode...', 'status-connecting');
+                sendVimCommand(':set paste', function() {
+                    // Enter insert mode
+                    setTimeout(function() {
+                        rfb.sendKey(0x69, 'KeyI'); // 'i' to enter insert mode
+                        setTimeout(function() {
+                            sendTextToVm(text, function() {
+                                // After paste: Esc → :set nopaste
+                                setTimeout(function() {
+                                    sendVimCommand(':set nopaste', function() {
+                                        setStatus('Vim paste complete', 'status-connected');
+                                    });
+                                }, 100);
+                            });
+                        }, 100);
+                    }, 100);
+                });
+            } else {
+                sendTextToVm(text);
+            }
+        };
+
+        // Allow Ctrl+Enter to send from textarea
+        document.getElementById('paste-text').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                window.executePaste();
+            } else if (e.key === 'Escape') {
+                window.closePasteModal();
+            }
+        });
 
         window.toggleFullscreen = function() {
             var el = document.getElementById('vnc-container');

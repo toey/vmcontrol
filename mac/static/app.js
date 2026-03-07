@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────
 // API Key Authentication Helper
 // ──────────────────────────────────────────
+var _authLocked = false; // prevent multiple login overlays
 function getApiKey() {
     return localStorage.getItem('vmcontrol_api_key') || '';
 }
@@ -14,18 +15,76 @@ function apiHeaders(extra) {
     if (key) h['X-API-Key'] = key;
     return h;
 }
+function showLoginOverlay(msg) {
+    if (_authLocked) return;
+    _authLocked = true;
+    var overlay = document.getElementById('login-overlay');
+    var errEl = document.getElementById('login-error');
+    if (msg) { errEl.textContent = msg; errEl.style.display = 'block'; }
+    else { errEl.style.display = 'none'; }
+    overlay.style.display = 'flex';
+    var input = document.getElementById('login-apikey-input');
+    input.value = '';
+    setTimeout(function() { input.focus(); }, 100);
+}
+function submitLogin() {
+    var input = document.getElementById('login-apikey-input');
+    var key = input.value.trim();
+    if (!key) return;
+    // Test the key with a simple API call
+    fetch('/api/vm/list', { headers: { 'X-API-Key': key } }).then(function(res) {
+        if (res.status === 401) {
+            document.getElementById('login-error').textContent = 'Invalid API key';
+            document.getElementById('login-error').style.display = 'block';
+            input.value = '';
+            input.focus();
+        } else {
+            setApiKey(key);
+            document.getElementById('login-overlay').style.display = 'none';
+            _authLocked = false;
+            initApp(); // load all data
+        }
+    });
+}
+// Allow Enter key to submit login
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && document.getElementById('login-overlay').style.display === 'flex') {
+        submitLogin();
+    }
+});
+// Generate a new API key from the login overlay (no auth needed for generate endpoint)
+async function generateAndLogin() {
+    var errEl = document.getElementById('login-error');
+    errEl.textContent = 'Generating new API key...';
+    errEl.style.display = 'block';
+    errEl.style.color = '#8b949e';
+    try {
+        var res = await fetch('/api/apikey/generate', { method: 'POST' });
+        if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
+        var text = await res.text();
+        var data;
+        try { data = JSON.parse(text); } catch (_) { throw new Error('Invalid response from server'); }
+        if (data && data.api_key) {
+            setApiKey(data.api_key);
+            document.getElementById('login-apikey-input').value = data.api_key;
+            errEl.textContent = 'New API key generated! Click Login or press Enter.';
+            errEl.style.color = '#3fb950';
+        } else {
+            errEl.textContent = 'Failed to generate API key';
+            errEl.style.color = '#f85149';
+        }
+    } catch (e) {
+        errEl.textContent = 'Error: ' + e.message;
+        errEl.style.color = '#f85149';
+    }
+}
 // Wrapper for fetch that handles 401 (auth required)
 async function apiFetch(url, opts) {
     opts = opts || {};
     opts.headers = apiHeaders(opts.headers || {});
     var res = await fetch(url, opts);
     if (res.status === 401) {
-        var key = prompt('API Key required. Enter your VMCONTROL_API_KEY:');
-        if (key) {
-            setApiKey(key);
-            opts.headers['X-API-Key'] = key;
-            res = await fetch(url, opts);
-        }
+        showLoginOverlay('Session expired. Please re-enter your API key.');
     }
     return res;
 }
@@ -501,6 +560,32 @@ window.resetTplForm = function() {
     document.getElementById('tpl-form-legend').textContent = 'Add Template';
 };
 
+// Reset Create VM form to defaults
+function resetCreateForm() {
+    window._editingVm = null;
+    document.getElementById('create-title').textContent = 'Create VM';
+    document.getElementById('create-submit-btn').textContent = 'Create VM';
+    document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
+    document.getElementById('create-vm-name').value = '';
+    document.getElementById('create-vm-name').disabled = false;
+    document.getElementById('create-os-template').value = 'custom';
+    document.getElementById('create-group').value = '';
+    document.getElementById('create-group-new').value = '';
+    document.getElementById('start-vcpus').value = '2';
+    document.getElementById('start-memory-size').value = '2048';
+    document.getElementById('start-arch').value = 'x86_64';
+    document.getElementById('start-is-windows').value = '0';
+    document.getElementById('start-cloudinit').value = '1';
+    // Reset network adapters
+    document.getElementById('start-network-adapters').innerHTML = '';
+    addNetworkAdapter();
+    // Reset disks
+    document.getElementById('start-disks').innerHTML = '';
+    addDisk();
+    // Reset PCI devices
+    document.getElementById('start-pci-devices').innerHTML = '';
+}
+
 // Tab switching
 document.querySelectorAll('.tab').forEach(function(tab) {
     tab.addEventListener('click', function() {
@@ -508,14 +593,16 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        // Reset Create VM form when clicking the tab (clear edit mode leftovers)
+        if (tab.dataset.tab === 'create' && window._editingVm) { resetCreateForm(); }
         // Auto-load MDS config + SSH key list when switching to metadata tab
         if (tab.dataset.tab === 'metadata') { loadSshKeyList(); loadMdsConfig(); }
         // Auto-load ISO list when switching to mountiso tab
         if (tab.dataset.tab === 'mountiso') { loadIsoList(); }
         // Auto-load VM list when switching to vmlist tab
         if (tab.dataset.tab === 'vmlist') { loadVmListTable(); }
-        // Auto-load image list when switching to listimage tab
-        if (tab.dataset.tab === 'listimage') { loadImageList(); }
+        // Auto-load image list when switching to listimage tab (refresh disk list first for owner info)
+        if (tab.dataset.tab === 'listimage') { loadDiskList().then(function() { loadImageList(); }); }
         // Auto-load disk list when switching to createdisk tab
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
@@ -736,15 +823,7 @@ async function executeCreateVm() {
         loadVmList();
         loadVmListTable();
         loadGroupList();
-        // Reset edit mode
-        window._editingVm = null;
-        document.getElementById('create-title').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
-        document.getElementById('create-vm-name').disabled = false;
-        document.getElementById('create-os-template').value = 'custom';
-        document.getElementById('create-group').value = '';
-        document.getElementById('create-group-new').value = '';
+        resetCreateForm();
     }
     } catch (err) {
         document.getElementById('status-indicator').className = 'error';
@@ -758,9 +837,30 @@ async function executeCreateVm() {
 async function executeUpdateVm() {
     try {
     var vmName = val('create-vm-name').trim();
+    var oldName = window._editingVm;
     if (!vmName) {
         alert('Please enter a VM-NAME');
         return;
+    }
+    // If VM name changed, rename first
+    if (oldName && vmName !== oldName) {
+        var statusEl = document.getElementById('status-indicator');
+        statusEl.className = 'loading';
+        statusEl.textContent = 'Renaming VM...';
+        var renameRes = await apiFetch('/api/vm/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ old_name: oldName, new_name: vmName }),
+        });
+        var renameData = await safeJson(renameRes);
+        if (!renameData.success) {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Rename error: ' + renameData.message;
+            return;
+        }
+        // Update editing context to new name and refresh MAC cache
+        window._editingVm = vmName;
+        await loadUsedMacs();
     }
     var config = collectVmConfig();
     // Require at least one disk
@@ -783,15 +883,8 @@ async function executeUpdateVm() {
         loadVmList();
         loadVmListTable();
         loadGroupList();
-        // Reset edit mode
-        window._editingVm = null;
-        document.getElementById('create-title').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
-        document.getElementById('create-vm-name').disabled = false;
-        document.getElementById('create-os-template').value = 'custom';
-        document.getElementById('create-group').value = '';
-        document.getElementById('create-group-new').value = '';
+        loadDiskList();
+        resetCreateForm();
         // Switch to VM List tab after saving
         switchTab('vmlist');
     }
@@ -981,7 +1074,7 @@ function onIopsPresetChange(selectEl) {
 function addDisk(selectedValue, iopsKey) {
     var container = document.getElementById('start-disks');
     var count = container.querySelectorAll('.disk-row').length;
-    var presetKey = iopsKey || 'standard';
+    var presetKey = iopsKey || 'unlimited';
     var preset = IOPS_PRESETS[presetKey] || IOPS_PRESETS['standard'];
     var customDisplay = presetKey === 'custom' ? '' : 'display:none;';
     var row = document.createElement('div');
@@ -1077,11 +1170,12 @@ async function loadDiskList() {
                 var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
                 var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">→ Template</button>';
+                var editFilesBtn = _diskEditSupported ? '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>' : '';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                     '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
-                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + deleteBtn + '</span>' +
+                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -1099,7 +1193,6 @@ function populateDiskSelect(selectEl, selectedValue) {
     var current = selectedValue || selectEl.value;
     selectEl.innerHTML = '<option value="">-- select disk --</option>';
     disks.forEach(function(d) {
-        if (d.name.indexOf('template-') === 0) return; // skip template images
         // Show disk if: free (no owner) OR owned by the VM being edited OR matches current selection
         if (!d.owner || d.owner === editingVm || d.name === current) {
             var opt = document.createElement('option');
@@ -1280,6 +1373,98 @@ document.addEventListener('click', function(e) {
     }
 });
 
+// Export entire VM (config + disks) as ZIP
+function exportVm(smac) {
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Exporting VM ' + smac + '...';
+
+    apiFetch('/api/vm/export/' + encodeURIComponent(smac)).then(function(response) {
+        if (!response.ok) {
+            return response.json().then(function(data) {
+                throw new Error(data.message || 'Export failed');
+            });
+        }
+        return response.blob();
+    }).then(function(blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = smac + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        statusEl.className = 'success';
+        statusEl.textContent = 'Exported VM ' + smac + '.zip';
+    }).catch(function(err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Export error: ' + err.message;
+    });
+}
+
+// Import VM from ZIP file
+function importVm() {
+    var fileInput = document.getElementById('vm-import-file');
+    if (!fileInput.files.length) {
+        alert('Please select a .zip VM export file');
+        return;
+    }
+    var file = fileInput.files[0];
+    var statusEl = document.getElementById('status-indicator');
+    var progressDiv = document.getElementById('vm-import-progress');
+    var progressBar = document.getElementById('vm-import-progress-bar');
+    var progressText = document.getElementById('vm-import-progress-text');
+
+    progressDiv.style.display = 'inline-flex';
+    progressBar.value = 0;
+    progressText.textContent = 'Uploading...';
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Importing VM from ' + file.name + '...';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/vm/import');
+    xhr.setRequestHeader('X-Filename', file.name);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            var pct = Math.round(e.loaded / e.total * 100);
+            progressBar.value = pct;
+            progressText.textContent = pct + '% (' + formatSize(e.loaded) + ' / ' + formatSize(e.total) + ')';
+        }
+    };
+
+    xhr.onload = function() {
+        progressDiv.style.display = 'none';
+        try {
+            var data = JSON.parse(xhr.responseText);
+            if (data.success) {
+                statusEl.className = 'success';
+                statusEl.textContent = data.message;
+                fileInput.value = '';
+                loadVmListTable();
+                loadVmList();
+                loadDiskList();
+            } else {
+                statusEl.className = 'error';
+                statusEl.textContent = 'Import error: ' + data.message;
+            }
+        } catch (e) {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Import failed';
+        }
+    };
+
+    xhr.onerror = function() {
+        progressDiv.style.display = 'none';
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error during import';
+    };
+
+    xhr.send(file);
+}
+
 // ======== Switch Management ========
 
 async function loadSwitchList() {
@@ -1421,10 +1606,21 @@ async function loadImageList() {
         if (images.length === 0) {
             listDiv.innerHTML = '<em>No image files</em>';
         } else {
+            var disks = window._diskList || [];
             listDiv.innerHTML = images.map(function(img) {
+                // Check if this image is in use by a VM (match disk name without extension)
+                var baseName = img.name.replace(/\.(qcow2|img|raw|vmdk)$/, '');
+                var diskInfo = disks.find(function(d) { return d.name === baseName; });
+                var owner = diskInfo ? diskInfo.owner : '';
+                var ownerTag = owner
+                    ? ' <small style="color:#58a6ff;">[' + escapeHtml(owner) + ']</small>'
+                    : '';
+                var deleteBtn = owner
+                    ? ''
+                    : '<button class="btn-remove" onclick="deleteImage(\'' + img.name.replace(/'/g, "\\'") + '\')">X</button>';
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + escapeHtml(img.name) + ' <small>(' + escapeHtml(formatSize(img.size)) + ')</small></span>' +
-                    '<button class="btn-remove" onclick="deleteImage(\'' + img.name.replace(/'/g, "\\'") + '\')">X</button>' +
+                    '<span>' + escapeHtml(img.name) + ' <small>(' + escapeHtml(formatSize(img.size)) + ')</small>' + ownerTag + '</span>' +
+                    deleteBtn +
                     '</div>';
             }).join('');
         }
@@ -1535,11 +1731,14 @@ async function executeMountIso() {
 }
 
 // Unmount ISO
-function executeUnmountIso() {
-    apiCall('unmountiso', {
+async function executeUnmountIso() {
+    var ok = await apiCall('unmountiso', {
         smac: val('mountiso-smac'),
         drive: val('mountiso-drive'),
     });
+    if (ok) {
+        document.getElementById('mountiso-isoname').value = '';
+    }
 }
 
 // Load ISO list and populate dropdown + file list
@@ -1704,6 +1903,8 @@ function getVmVncPort(smac) {
 async function vmVncStart(smac) {
     var port = getVmVncPort(smac);
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
+    // Open window immediately (in user-click context) to avoid popup blocker
+    var vncWin = window.open('about:blank', '_blank');
     // Generate one-time VNC token
     try {
         var response = await apiFetch('/api/vnc/token', {
@@ -1715,14 +1916,14 @@ async function vmVncStart(smac) {
         if (data && data.success && data.token) {
             window._vncActive[smac] = true;
             loadVmListTable();
-            window.open('/vnc.html?token=' + encodeURIComponent(data.token), '_blank');
+            vncWin.location.href = '/vnc.html?token=' + encodeURIComponent(data.token);
             return;
         }
     } catch (e) {}
     // Fallback if token generation fails
     window._vncActive[smac] = true;
     loadVmListTable();
-    window.open('/vnc.html?smac=' + encodeURIComponent(smac), '_blank');
+    vncWin.location.href = '/vnc.html?smac=' + encodeURIComponent(smac);
 }
 
 async function vmVncStop(smac) {
@@ -2105,6 +2306,7 @@ async function loadVmListTable() {
                     // VM stopped → clear VNC active state
                     delete window._vncActive[vm.smac];
                     actions += '<button class="btn-vm-action btn-vm-start" onclick="vmAction(\'start\',\'' + vm.smac + '\')">Start</button> ';
+                    actions += '<button class="btn-vm-action btn-vm-export" onclick="exportVm(\'' + vm.smac + '\')" style="background:#1f6feb;">Export</button> ';
                 }
                 actions += '<button class="btn-vm-action btn-vm-edit" onclick="editVm(\'' + vm.smac + '\')">Edit</button> ';
                 actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
@@ -2151,9 +2353,9 @@ async function editVm(smac) {
             switchTab('create');
             // Reset template to custom when editing
             document.getElementById('create-os-template').value = 'custom';
-            // Fill form
+            // Fill form (VM name is editable for rename)
             document.getElementById('create-vm-name').value = vm.smac;
-            document.getElementById('create-vm-name').disabled = true;
+            document.getElementById('create-vm-name').disabled = false;
             document.getElementById('create-title').textContent = 'Edit VM: ' + vm.smac;
             document.getElementById('create-submit-btn').textContent = 'Save Changes';
             document.getElementById('create-submit-btn').setAttribute('onclick', 'executeUpdateVm()');
@@ -2212,9 +2414,9 @@ async function editVm(smac) {
             diskContainer.innerHTML = '';
             if (config.disks && config.disks.length > 0) {
                 config.disks.forEach(function(disk) {
-                    var iTotal = disk['iops-total'] || '9600';
-                    var iMax = disk['iops-total-max'] || '11520';
-                    var iLen = disk['iops-total-max-length'] || '60';
+                    var iTotal = disk['iops-total'] || '0';
+                    var iMax = disk['iops-total-max'] || '0';
+                    var iLen = disk['iops-total-max-length'] || '0';
                     var presetKey = matchIopsPreset(iTotal, iMax, iLen);
                     var customDisplay = presetKey === 'custom' ? '' : 'display:none;';
                     var row = document.createElement('div');
@@ -2454,13 +2656,15 @@ async function syncDhcpFromVms() {
 }
 
 // Init
-window.addEventListener('DOMContentLoaded', function() {
+function initApp() {
     loadUsedMacs().then(function() {
         addNetworkAdapter(); // genMac() now avoids collisions
     });
     // Load disk list first, then add default disk row (so dropdown is populated)
-    loadDiskList().then(function() {
-        addDisk();
+    checkDiskEditSupport().then(function() {
+        loadDiskList().then(function() {
+            addDisk();
+        });
     });
     loadVmList();
     loadIsoList();
@@ -2471,4 +2675,231 @@ window.addEventListener('DOMContentLoaded', function() {
     loadOsTemplates();
     loadVfioDevices();
     loadApikey();
+}
+window.addEventListener('DOMContentLoaded', function() {
+    // Check auth first — if API key is required and missing/invalid, show login overlay
+    var key = getApiKey();
+    var headers = {};
+    if (key) headers['X-API-Key'] = key;
+    fetch('/api/vm/list', { headers: headers }).then(function(res) {
+        if (res.status === 401) {
+            showLoginOverlay();
+        } else {
+            initApp();
+        }
+    }).catch(function() {
+        // Network error — try loading anyway
+        initApp();
+    });
 });
+
+// ──────────────────────────────────────────
+// Disk File Editor
+// ──────────────────────────────────────────
+
+var _diskEditSupported = false;
+
+async function checkDiskEditSupport() {
+    try {
+        var response = await apiFetch('/api/disk/edit-supported');
+        var data = await safeJson(response);
+        _diskEditSupported = data && data.supported;
+    } catch (e) {
+        _diskEditSupported = false;
+    }
+}
+
+var _diskEditorState = {
+    diskName: null,
+    currentPath: '/',
+    currentFile: null,
+    dirty: false,
+};
+
+async function openDiskEditor(diskName) {
+    if (!_diskEditSupported) {
+        alert('Disk file editing is only supported on Linux.\nBoot the VM and edit files via VNC console.');
+        return;
+    }
+
+    document.getElementById('disk-editor-overlay').style.display = 'block';
+    document.getElementById('disk-editor-title').textContent = 'Edit Files: ' + diskName + '.qcow2';
+    document.getElementById('disk-editor-status').textContent = 'Mounting...';
+    document.getElementById('disk-editor-filelist').innerHTML = '<em style="color:#8b949e;padding:8px 12px;display:block;">Mounting disk...</em>';
+    document.getElementById('disk-editor-content').value = '';
+    document.getElementById('disk-editor-content').readOnly = true;
+    document.getElementById('disk-editor-save-btn').style.display = 'none';
+    document.getElementById('disk-editor-filepath').textContent = '(no file selected)';
+
+    _diskEditorState = { diskName: diskName, currentPath: '/', currentFile: null, dirty: false };
+
+    try {
+        var response = await apiFetch('/api/disk/mount', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: diskName }),
+        });
+        var data = await safeJson(response);
+        if (!data.success) {
+            document.getElementById('disk-editor-status').textContent = 'Error: ' + data.message;
+            document.getElementById('disk-editor-filelist').innerHTML =
+                '<em style="color:#f85149;padding:8px 12px;display:block;">' + escapeHtml(data.message) + '</em>';
+            return;
+        }
+        document.getElementById('disk-editor-status').textContent = 'Mounted';
+        browseDiskDir('/');
+    } catch (e) {
+        document.getElementById('disk-editor-status').textContent = 'Mount failed: ' + e.message;
+    }
+}
+
+async function browseDiskDir(dirPath) {
+    _diskEditorState.currentPath = dirPath;
+    updateDiskBreadcrumb(dirPath);
+
+    var listDiv = document.getElementById('disk-editor-filelist');
+    listDiv.innerHTML = '<em style="color:#8b949e;padding:8px 12px;display:block;">Loading...</em>';
+
+    try {
+        var url = '/api/disk/browse/' + encodeURIComponent(_diskEditorState.diskName) + '?path=' + encodeURIComponent(dirPath);
+        var response = await apiFetch(url);
+        var entries = await safeJson(response);
+
+        if (entries.message) {
+            listDiv.innerHTML = '<em style="color:#f85149;padding:8px 12px;display:block;">' + escapeHtml(entries.message) + '</em>';
+            return;
+        }
+
+        var html = '';
+        if (dirPath !== '/') {
+            var parent = dirPath.replace(/\/[^/]+\/?$/, '') || '/';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;cursor:pointer;font-size:0.9em;border-bottom:1px solid #21262d;color:#58a6ff;" onclick="browseDiskDir(\'' + escapeAttr(parent) + '\')">' +
+                '<span>📁 ..</span></div>';
+        }
+
+        entries.forEach(function(e) {
+            var escapedPath = escapeAttr(e.path);
+            if (e.is_dir) {
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;cursor:pointer;font-size:0.9em;border-bottom:1px solid #21262d;color:#58a6ff;" onclick="browseDiskDir(\'' + escapedPath + '\')" onmouseover="this.style.background=\'#21262d\'" onmouseout="this.style.background=\'\'">' +
+                    '<span>📁 ' + escapeHtml(e.name) + '/</span>' +
+                    '<span style="color:#8b949e;font-size:0.8em;font-family:monospace;">' + e.permissions + '</span></div>';
+            } else {
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;cursor:pointer;font-size:0.9em;border-bottom:1px solid #21262d;color:#c9d1d9;" onclick="openDiskFile(\'' + escapedPath + '\')" onmouseover="this.style.background=\'#21262d\'" onmouseout="this.style.background=\'\'">' +
+                    '<span>📄 ' + escapeHtml(e.name) + '</span>' +
+                    '<span style="color:#8b949e;font-size:0.8em;">' + formatSize(e.size) + '</span></div>';
+            }
+        });
+
+        if (!html) {
+            html = '<em style="color:#8b949e;padding:8px 12px;display:block;">(empty directory)</em>';
+        }
+        listDiv.innerHTML = html;
+    } catch (e) {
+        listDiv.innerHTML = '<em style="color:#f85149;padding:8px 12px;display:block;">Error: ' + escapeHtml(e.message) + '</em>';
+    }
+}
+
+async function openDiskFile(filePath) {
+    if (_diskEditorState.dirty) {
+        if (!confirm('You have unsaved changes. Discard them?')) return;
+    }
+
+    document.getElementById('disk-editor-filepath').textContent = filePath;
+    document.getElementById('disk-editor-content').value = 'Loading...';
+    document.getElementById('disk-editor-content').readOnly = true;
+    document.getElementById('disk-editor-save-btn').style.display = 'none';
+
+    try {
+        var url = '/api/disk/readfile/' + encodeURIComponent(_diskEditorState.diskName) + '?path=' + encodeURIComponent(filePath);
+        var response = await apiFetch(url);
+        var data = await safeJson(response);
+
+        if (data.success) {
+            document.getElementById('disk-editor-content').value = data.content;
+            document.getElementById('disk-editor-content').readOnly = false;
+            document.getElementById('disk-editor-save-btn').style.display = 'inline-block';
+            _diskEditorState.currentFile = filePath;
+            _diskEditorState.dirty = false;
+            document.getElementById('disk-editor-status').textContent = 'Editing: ' + filePath;
+        } else {
+            document.getElementById('disk-editor-content').value = 'Error: ' + data.message;
+            document.getElementById('disk-editor-status').textContent = data.message;
+        }
+    } catch (e) {
+        document.getElementById('disk-editor-content').value = 'Error loading file: ' + e.message;
+    }
+}
+
+async function saveDiskFile() {
+    if (!_diskEditorState.currentFile) return;
+
+    var content = document.getElementById('disk-editor-content').value;
+    document.getElementById('disk-editor-status').textContent = 'Saving...';
+    try {
+        var response = await apiFetch('/api/disk/writefile/' + encodeURIComponent(_diskEditorState.diskName), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                path: _diskEditorState.currentFile,
+                content: content,
+            }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            document.getElementById('disk-editor-status').textContent = 'Saved: ' + _diskEditorState.currentFile;
+            _diskEditorState.dirty = false;
+        } else {
+            alert('Save failed: ' + data.message);
+            document.getElementById('disk-editor-status').textContent = 'Save failed';
+        }
+    } catch (e) {
+        alert('Save error: ' + e.message);
+    }
+}
+
+async function unmountAndCloseDiskEditor() {
+    if (_diskEditorState.dirty) {
+        if (!confirm('You have unsaved changes. Close anyway?')) return;
+    }
+
+    if (_diskEditorState.diskName) {
+        document.getElementById('disk-editor-status').textContent = 'Unmounting...';
+        try {
+            await apiFetch('/api/disk/unmount', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: _diskEditorState.diskName }),
+            });
+        } catch (e) {
+            console.error('Unmount error:', e);
+        }
+    }
+
+    document.getElementById('disk-editor-overlay').style.display = 'none';
+    _diskEditorState = { diskName: null, currentPath: '/', currentFile: null, dirty: false };
+}
+
+function updateDiskBreadcrumb(path) {
+    var parts = path.split('/').filter(Boolean);
+    var html = '<a href="javascript:void(0)" onclick="browseDiskDir(\'/\')" style="color:#58a6ff;text-decoration:none;">/</a>';
+    var accumulated = '';
+    parts.forEach(function(part) {
+        accumulated += '/' + part;
+        var escaped = escapeAttr(accumulated);
+        html += ' <a href="javascript:void(0)" onclick="browseDiskDir(\'' + escaped + '\')" style="color:#58a6ff;text-decoration:none;">' + escapeHtml(part) + '</a> /';
+    });
+    document.getElementById('disk-editor-breadcrumb').innerHTML = html;
+}
+
+// Track dirty state for disk editor
+(function() {
+    var editor = document.getElementById('disk-editor-content');
+    if (editor) {
+        editor.addEventListener('input', function() {
+            if (_diskEditorState.currentFile) {
+                _diskEditorState.dirty = true;
+                document.getElementById('disk-editor-status').textContent = 'Modified (unsaved)';
+            }
+        });
+    }
+})();

@@ -180,12 +180,18 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     // Generate meta-data (NoCloud format with full MDS fields)
     let hostname = format!("{}-{}", config.hostname_prefix, vm_name);
     let mut meta_data = String::new();
-    // Use unique instance-id per VM to ensure cloud-init runs on cloned templates
+    // Use unique instance-id per boot — cloud-init only re-applies hostname/config
+    // when instance-id changes. Append timestamp so every VM start is a "new instance".
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let instance_id = if config.instance_id == "i-0000000000000001" || config.instance_id.is_empty() {
-        format!("i-{}", vm_name)
+        format!("i-{}-{}", vm_name, ts)
     } else {
-        config.instance_id.clone()
+        format!("{}-{}", config.instance_id, ts)
     };
+    eprintln!("[cloud-init] instance-id={} hostname={}", instance_id, hostname);
     meta_data.push_str(&format!("instance-id: {}\n", instance_id));
     meta_data.push_str(&format!("local-hostname: {}\n", hostname));
     meta_data.push_str(&format!("ami-id: {}\n", config.ami_id));
@@ -688,8 +694,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push("-device".into());
     qemu_args.push("virtio-scsi-pci,id=scsi0".into());
 
-    // Cloud-init seed ISO — MUST be first scsi-cd so guest sees it as /dev/sr0
-    // (some cloud-init versions only scan sr0, or have timing issues with later devices)
+    // Cloud-init seed ISO — attach as virtio-blk so ALL guests can see it
+    // (virtio-scsi requires guest kernel module; virtio-blk always works since
+    //  the main disk already uses it → shows up as /dev/vdb with CIDATA label)
     let cloudinit_enabled = cfg.features.cloudinit != "0";
     if cloudinit_enabled {
         match generate_seed_iso(&ismac) {
@@ -697,10 +704,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
-                    "file={},if=none,id=seed0,media=cdrom,readonly=on", seed_iso_path
+                    "file={},if=none,id=seed0,format=raw,readonly=on", seed_iso_path
                 ));
                 qemu_args.push("-device".into());
-                qemu_args.push("scsi-cd,drive=seed0".into());
+                qemu_args.push("virtio-blk-pci,drive=seed0".into());
             }
             Err(e) => {
                 output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));

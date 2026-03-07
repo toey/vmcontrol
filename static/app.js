@@ -1170,11 +1170,12 @@ async function loadDiskList() {
                 var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
                 var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">→ Template</button>';
+                var editFilesBtn = _diskEditSupported ? '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>' : '';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
                     '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
-                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + deleteBtn + '</span>' +
+                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -2660,8 +2661,10 @@ function initApp() {
         addNetworkAdapter(); // genMac() now avoids collisions
     });
     // Load disk list first, then add default disk row (so dropdown is populated)
-    loadDiskList().then(function() {
-        addDisk();
+    checkDiskEditSupport().then(function() {
+        loadDiskList().then(function() {
+            addDisk();
+        });
     });
     loadVmList();
     loadIsoList();
@@ -2689,3 +2692,214 @@ window.addEventListener('DOMContentLoaded', function() {
         initApp();
     });
 });
+
+// ──────────────────────────────────────────
+// Disk File Editor
+// ──────────────────────────────────────────
+
+var _diskEditSupported = false;
+
+async function checkDiskEditSupport() {
+    try {
+        var response = await apiFetch('/api/disk/edit-supported');
+        var data = await safeJson(response);
+        _diskEditSupported = data && data.supported;
+    } catch (e) {
+        _diskEditSupported = false;
+    }
+}
+
+var _diskEditorState = {
+    diskName: null,
+    currentPath: '/',
+    currentFile: null,
+    dirty: false,
+};
+
+async function openDiskEditor(diskName) {
+    if (!_diskEditSupported) {
+        alert('Disk file editing is only supported on Linux.\nBoot the VM and edit files via VNC console.');
+        return;
+    }
+
+    document.getElementById('disk-editor-overlay').style.display = 'block';
+    document.getElementById('disk-editor-title').textContent = 'Edit Files: ' + diskName + '.qcow2';
+    document.getElementById('disk-editor-status').textContent = 'Mounting...';
+    document.getElementById('disk-editor-filelist').innerHTML = '<em style="color:#8b949e;padding:8px 12px;display:block;">Mounting disk...</em>';
+    document.getElementById('disk-editor-content').value = '';
+    document.getElementById('disk-editor-content').readOnly = true;
+    document.getElementById('disk-editor-save-btn').style.display = 'none';
+    document.getElementById('disk-editor-filepath').textContent = '(no file selected)';
+
+    _diskEditorState = { diskName: diskName, currentPath: '/', currentFile: null, dirty: false };
+
+    try {
+        var response = await apiFetch('/api/disk/mount', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: diskName }),
+        });
+        var data = await safeJson(response);
+        if (!data.success) {
+            document.getElementById('disk-editor-status').textContent = 'Error: ' + data.message;
+            document.getElementById('disk-editor-filelist').innerHTML =
+                '<em style="color:#f85149;padding:8px 12px;display:block;">' + escapeHtml(data.message) + '</em>';
+            return;
+        }
+        document.getElementById('disk-editor-status').textContent = 'Mounted';
+        browseDiskDir('/');
+    } catch (e) {
+        document.getElementById('disk-editor-status').textContent = 'Mount failed: ' + e.message;
+    }
+}
+
+async function browseDiskDir(dirPath) {
+    _diskEditorState.currentPath = dirPath;
+    updateDiskBreadcrumb(dirPath);
+
+    var listDiv = document.getElementById('disk-editor-filelist');
+    listDiv.innerHTML = '<em style="color:#8b949e;padding:8px 12px;display:block;">Loading...</em>';
+
+    try {
+        var url = '/api/disk/browse/' + encodeURIComponent(_diskEditorState.diskName) + '?path=' + encodeURIComponent(dirPath);
+        var response = await apiFetch(url);
+        var entries = await safeJson(response);
+
+        if (entries.message) {
+            listDiv.innerHTML = '<em style="color:#f85149;padding:8px 12px;display:block;">' + escapeHtml(entries.message) + '</em>';
+            return;
+        }
+
+        var html = '';
+        if (dirPath !== '/') {
+            var parent = dirPath.replace(/\/[^/]+\/?$/, '') || '/';
+            html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;cursor:pointer;font-size:0.9em;border-bottom:1px solid #21262d;color:#58a6ff;" onclick="browseDiskDir(\'' + escapeAttr(parent) + '\')">' +
+                '<span>📁 ..</span></div>';
+        }
+
+        entries.forEach(function(e) {
+            var escapedPath = escapeAttr(e.path);
+            if (e.is_dir) {
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;cursor:pointer;font-size:0.9em;border-bottom:1px solid #21262d;color:#58a6ff;" onclick="browseDiskDir(\'' + escapedPath + '\')" onmouseover="this.style.background=\'#21262d\'" onmouseout="this.style.background=\'\'">' +
+                    '<span>📁 ' + escapeHtml(e.name) + '/</span>' +
+                    '<span style="color:#8b949e;font-size:0.8em;font-family:monospace;">' + e.permissions + '</span></div>';
+            } else {
+                html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 12px;cursor:pointer;font-size:0.9em;border-bottom:1px solid #21262d;color:#c9d1d9;" onclick="openDiskFile(\'' + escapedPath + '\')" onmouseover="this.style.background=\'#21262d\'" onmouseout="this.style.background=\'\'">' +
+                    '<span>📄 ' + escapeHtml(e.name) + '</span>' +
+                    '<span style="color:#8b949e;font-size:0.8em;">' + formatSize(e.size) + '</span></div>';
+            }
+        });
+
+        if (!html) {
+            html = '<em style="color:#8b949e;padding:8px 12px;display:block;">(empty directory)</em>';
+        }
+        listDiv.innerHTML = html;
+    } catch (e) {
+        listDiv.innerHTML = '<em style="color:#f85149;padding:8px 12px;display:block;">Error: ' + escapeHtml(e.message) + '</em>';
+    }
+}
+
+async function openDiskFile(filePath) {
+    if (_diskEditorState.dirty) {
+        if (!confirm('You have unsaved changes. Discard them?')) return;
+    }
+
+    document.getElementById('disk-editor-filepath').textContent = filePath;
+    document.getElementById('disk-editor-content').value = 'Loading...';
+    document.getElementById('disk-editor-content').readOnly = true;
+    document.getElementById('disk-editor-save-btn').style.display = 'none';
+
+    try {
+        var url = '/api/disk/readfile/' + encodeURIComponent(_diskEditorState.diskName) + '?path=' + encodeURIComponent(filePath);
+        var response = await apiFetch(url);
+        var data = await safeJson(response);
+
+        if (data.success) {
+            document.getElementById('disk-editor-content').value = data.content;
+            document.getElementById('disk-editor-content').readOnly = false;
+            document.getElementById('disk-editor-save-btn').style.display = 'inline-block';
+            _diskEditorState.currentFile = filePath;
+            _diskEditorState.dirty = false;
+            document.getElementById('disk-editor-status').textContent = 'Editing: ' + filePath;
+        } else {
+            document.getElementById('disk-editor-content').value = 'Error: ' + data.message;
+            document.getElementById('disk-editor-status').textContent = data.message;
+        }
+    } catch (e) {
+        document.getElementById('disk-editor-content').value = 'Error loading file: ' + e.message;
+    }
+}
+
+async function saveDiskFile() {
+    if (!_diskEditorState.currentFile) return;
+
+    var content = document.getElementById('disk-editor-content').value;
+    document.getElementById('disk-editor-status').textContent = 'Saving...';
+    try {
+        var response = await apiFetch('/api/disk/writefile/' + encodeURIComponent(_diskEditorState.diskName), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                path: _diskEditorState.currentFile,
+                content: content,
+            }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            document.getElementById('disk-editor-status').textContent = 'Saved: ' + _diskEditorState.currentFile;
+            _diskEditorState.dirty = false;
+        } else {
+            alert('Save failed: ' + data.message);
+            document.getElementById('disk-editor-status').textContent = 'Save failed';
+        }
+    } catch (e) {
+        alert('Save error: ' + e.message);
+    }
+}
+
+async function unmountAndCloseDiskEditor() {
+    if (_diskEditorState.dirty) {
+        if (!confirm('You have unsaved changes. Close anyway?')) return;
+    }
+
+    if (_diskEditorState.diskName) {
+        document.getElementById('disk-editor-status').textContent = 'Unmounting...';
+        try {
+            await apiFetch('/api/disk/unmount', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: _diskEditorState.diskName }),
+            });
+        } catch (e) {
+            console.error('Unmount error:', e);
+        }
+    }
+
+    document.getElementById('disk-editor-overlay').style.display = 'none';
+    _diskEditorState = { diskName: null, currentPath: '/', currentFile: null, dirty: false };
+}
+
+function updateDiskBreadcrumb(path) {
+    var parts = path.split('/').filter(Boolean);
+    var html = '<a href="javascript:void(0)" onclick="browseDiskDir(\'/\')" style="color:#58a6ff;text-decoration:none;">/</a>';
+    var accumulated = '';
+    parts.forEach(function(part) {
+        accumulated += '/' + part;
+        var escaped = escapeAttr(accumulated);
+        html += ' <a href="javascript:void(0)" onclick="browseDiskDir(\'' + escaped + '\')" style="color:#58a6ff;text-decoration:none;">' + escapeHtml(part) + '</a> /';
+    });
+    document.getElementById('disk-editor-breadcrumb').innerHTML = html;
+}
+
+// Track dirty state for disk editor
+(function() {
+    var editor = document.getElementById('disk-editor-content');
+    if (editor) {
+        editor.addEventListener('input', function() {
+            if (_diskEditorState.currentFile) {
+                _diskEditorState.dirty = true;
+                document.getElementById('disk-editor-status').textContent = 'Modified (unsaved)';
+            }
+        });
+    }
+})();

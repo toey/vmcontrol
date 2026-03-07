@@ -1,6 +1,7 @@
 pub mod api_helpers;
 pub mod config;
 pub mod db;
+pub mod disk_edit;
 pub mod mds;
 pub mod models;
 pub mod operations;
