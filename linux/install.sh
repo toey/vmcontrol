@@ -143,22 +143,24 @@ mkdir -p "$LIVE_PATH"
 mkdir -p "$STATIC_DIR"
 success "Directories created"
 
-# --- Step 3b: Migrate data from /tmp/vmcontrol (if exists) ---
+# --- Step 3b: Migrate data from /tmp/vmcontrol (one-time, skip if already migrated) ---
 OLD_DATA="/tmp/vmcontrol"
-if [[ -d "$OLD_DATA" && "$PCTL_PATH" != "$OLD_DATA" ]]; then
-    info "Migrating data from $OLD_DATA to $PCTL_PATH..."
+MIGRATE_MARKER="${PCTL_PATH}/.migrated_from_tmp"
+if [[ -d "$OLD_DATA" && "$PCTL_PATH" != "$OLD_DATA" && ! -f "$MIGRATE_MARKER" ]]; then
+    info "Migrating data from $OLD_DATA to $PCTL_PATH (one-time)..."
     for sub in disks iso backups; do
         if [[ -d "$OLD_DATA/$sub" ]] && ls "$OLD_DATA/$sub"/* &>/dev/null; then
-            cp -a "$OLD_DATA/$sub/"* "$PCTL_PATH/$sub/" 2>/dev/null && \
+            cp -an "$OLD_DATA/$sub/"* "$PCTL_PATH/$sub/" 2>/dev/null && \
                 success "Migrated $sub" || warn "Failed to migrate $sub"
         fi
     done
     for f in vmcontrol.db mds.json .api_key; do
-        if [[ -f "$OLD_DATA/$f" ]]; then
+        if [[ -f "$OLD_DATA/$f" && ! -f "$PCTL_PATH/$f" ]]; then
             cp -a "$OLD_DATA/$f" "$PCTL_PATH/$f" 2>/dev/null && \
                 success "Migrated $f" || warn "Failed to migrate $f"
         fi
     done
+    touch "$MIGRATE_MARKER"
     success "Data migration complete"
 fi
 
