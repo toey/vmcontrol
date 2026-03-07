@@ -560,6 +560,32 @@ window.resetTplForm = function() {
     document.getElementById('tpl-form-legend').textContent = 'Add Template';
 };
 
+// Reset Create VM form to defaults
+function resetCreateForm() {
+    window._editingVm = null;
+    document.getElementById('create-title').textContent = 'Create VM';
+    document.getElementById('create-submit-btn').textContent = 'Create VM';
+    document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
+    document.getElementById('create-vm-name').value = '';
+    document.getElementById('create-vm-name').disabled = false;
+    document.getElementById('create-os-template').value = 'custom';
+    document.getElementById('create-group').value = '';
+    document.getElementById('create-group-new').value = '';
+    document.getElementById('start-vcpus').value = '2';
+    document.getElementById('start-memory-size').value = '2048';
+    document.getElementById('start-arch').value = 'x86_64';
+    document.getElementById('start-is-windows').value = '0';
+    document.getElementById('start-cloudinit').value = '1';
+    // Reset network adapters
+    document.getElementById('start-network-adapters').innerHTML = '';
+    addNetworkAdapter();
+    // Reset disks
+    document.getElementById('start-disks').innerHTML = '';
+    addDisk();
+    // Reset PCI devices
+    document.getElementById('start-pci-devices').innerHTML = '';
+}
+
 // Tab switching
 document.querySelectorAll('.tab').forEach(function(tab) {
     tab.addEventListener('click', function() {
@@ -567,6 +593,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         document.querySelectorAll('.tab-panel').forEach(function(p) { p.classList.remove('active'); });
         tab.classList.add('active');
         document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+        // Reset Create VM form when clicking the tab (clear edit mode leftovers)
+        if (tab.dataset.tab === 'create' && window._editingVm) { resetCreateForm(); }
         // Auto-load MDS config + SSH key list when switching to metadata tab
         if (tab.dataset.tab === 'metadata') { loadSshKeyList(); loadMdsConfig(); }
         // Auto-load ISO list when switching to mountiso tab
@@ -795,15 +823,7 @@ async function executeCreateVm() {
         loadVmList();
         loadVmListTable();
         loadGroupList();
-        // Reset edit mode
-        window._editingVm = null;
-        document.getElementById('create-title').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
-        document.getElementById('create-vm-name').disabled = false;
-        document.getElementById('create-os-template').value = 'custom';
-        document.getElementById('create-group').value = '';
-        document.getElementById('create-group-new').value = '';
+        resetCreateForm();
     }
     } catch (err) {
         document.getElementById('status-indicator').className = 'error';
@@ -842,15 +862,7 @@ async function executeUpdateVm() {
         loadVmList();
         loadVmListTable();
         loadGroupList();
-        // Reset edit mode
-        window._editingVm = null;
-        document.getElementById('create-title').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').textContent = 'Create VM';
-        document.getElementById('create-submit-btn').setAttribute('onclick', 'executeCreateVm()');
-        document.getElementById('create-vm-name').disabled = false;
-        document.getElementById('create-os-template').value = 'custom';
-        document.getElementById('create-group').value = '';
-        document.getElementById('create-group-new').value = '';
+        resetCreateForm();
         // Switch to VM List tab after saving
         switchTab('vmlist');
     }
@@ -1040,7 +1052,7 @@ function onIopsPresetChange(selectEl) {
 function addDisk(selectedValue, iopsKey) {
     var container = document.getElementById('start-disks');
     var count = container.querySelectorAll('.disk-row').length;
-    var presetKey = iopsKey || 'standard';
+    var presetKey = iopsKey || 'unlimited';
     var preset = IOPS_PRESETS[presetKey] || IOPS_PRESETS['standard'];
     var customDisplay = presetKey === 'custom' ? '' : 'display:none;';
     var row = document.createElement('div');
@@ -1594,11 +1606,14 @@ async function executeMountIso() {
 }
 
 // Unmount ISO
-function executeUnmountIso() {
-    apiCall('unmountiso', {
+async function executeUnmountIso() {
+    var ok = await apiCall('unmountiso', {
         smac: val('mountiso-smac'),
         drive: val('mountiso-drive'),
     });
+    if (ok) {
+        document.getElementById('mountiso-isoname').value = '';
+    }
 }
 
 // Load ISO list and populate dropdown + file list
@@ -2273,9 +2288,9 @@ async function editVm(smac) {
             diskContainer.innerHTML = '';
             if (config.disks && config.disks.length > 0) {
                 config.disks.forEach(function(disk) {
-                    var iTotal = disk['iops-total'] || '9600';
-                    var iMax = disk['iops-total-max'] || '11520';
-                    var iLen = disk['iops-total-max-length'] || '60';
+                    var iTotal = disk['iops-total'] || '0';
+                    var iMax = disk['iops-total-max'] || '0';
+                    var iLen = disk['iops-total-max-length'] || '0';
                     var presetKey = matchIopsPreset(iTotal, iMax, iLen);
                     var customDisplay = presetKey === 'custom' ? '' : 'display:none;';
                     var row = document.createElement('div');
