@@ -263,6 +263,44 @@ pub fn list_groups() -> Result<Vec<String>, String> {
     Ok(groups)
 }
 
+/// Rename a VM (update smac primary key and all disk owner references)
+pub fn rename_vm(old_smac: &str, new_smac: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    // Use a transaction to keep both tables consistent
+    conn.execute_batch("BEGIN TRANSACTION")
+        .map_err(|e| format!("DB transaction error: {}", e))?;
+    // Insert new row with all data from old row
+    let result = (|| {
+        conn.execute(
+            "INSERT INTO vms (smac, mac, disk_size, config, status, created_at, group_name)
+             SELECT ?2, mac, disk_size, config, status, created_at, group_name FROM vms WHERE smac = ?1",
+            params![old_smac, new_smac],
+        ).map_err(|e| format!("DB rename insert error: {}", e))?;
+        // Update disk owners
+        conn.execute(
+            "UPDATE disks SET owner = ?2 WHERE owner = ?1",
+            params![old_smac, new_smac],
+        ).map_err(|e| format!("DB rename disk owner error: {}", e))?;
+        // Delete old row
+        conn.execute(
+            "DELETE FROM vms WHERE smac = ?1",
+            params![old_smac],
+        ).map_err(|e| format!("DB rename delete error: {}", e))?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| format!("DB commit error: {}", e))?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 // ======== Disk operations ========
 
 /// Insert a new disk record (INSERT OR IGNORE to avoid duplicate errors on auto-sync)

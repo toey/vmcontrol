@@ -166,6 +166,23 @@ async fn update_config_vm(body: web::Json<serde_json::Value>) -> HttpResponse {
     handle_operation(body, "update-config", operations::update_config).await
 }
 
+async fn rename_vm_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let old_name = body.get("old_name").and_then(|v| v.as_str()).unwrap_or("");
+    let new_name = body.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
+    match operations::rename_vm(old_name, new_name) {
+        Ok(msg) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: msg,
+            output: None,
+        }),
+        Err(e) => HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
 async fn get_vm_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
     if let Err(e) = crate::ssh::sanitize_name(&smac) {
@@ -2658,6 +2675,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/powerdown", web::post().to(powerdown_vm))
             .route("/api/vm/create-config", web::post().to(create_config_vm))
             .route("/api/vm/update-config", web::post().to(update_config_vm))
+            .route("/api/vm/rename", web::post().to(rename_vm_handler))
             .route("/api/vm/get/{smac}", web::get().to(get_vm_handler))
             .route("/api/vm/{smac}/mds", web::get().to(get_vm_mds_handler))
             .route("/api/vm/{smac}/mds", web::post().to(save_vm_mds_handler))

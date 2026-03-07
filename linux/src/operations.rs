@@ -1407,6 +1407,42 @@ pub fn update_config(json_str: &str) -> Result<String, String> {
     Ok(format!("VM '{}' config updated\n", smac))
 }
 
+pub fn rename_vm(old_name: &str, new_name: &str) -> Result<String, String> {
+    if old_name.is_empty() || new_name.is_empty() {
+        return Err("Both old and new VM names are required".into());
+    }
+    if old_name == new_name {
+        return Ok("No rename needed".into());
+    }
+    validate_vm_name(new_name)?;
+
+    // Check old VM exists
+    let vm = db::get_vm(old_name).map_err(|_| format!("VM '{}' not found", old_name))?;
+
+    // Must be stopped
+    if vm.status == "running" {
+        return Err("Cannot rename a running VM. Stop it first.".into());
+    }
+
+    // Check new name is not taken
+    if db::get_vm(new_name).is_ok() {
+        return Err(format!("VM name '{}' already exists", new_name));
+    }
+
+    // Rename the QEMU monitor socket file if it exists
+    let pctl_path = get_conf("pctl_path");
+    let old_sock = format!("{}/{}", pctl_path, old_name);
+    let new_sock = format!("{}/{}", pctl_path, new_name);
+    if std::path::Path::new(&old_sock).exists() {
+        let _ = std::fs::rename(&old_sock, &new_sock);
+    }
+
+    // Rename in database (VM + disk owners)
+    db::rename_vm(old_name, new_name)?;
+
+    Ok(format!("VM renamed from '{}' to '{}'", old_name, new_name))
+}
+
 pub fn mountiso(json_str: &str) -> Result<String, String> {
     let cmd: MountIsoCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;

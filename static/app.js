@@ -601,8 +601,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'mountiso') { loadIsoList(); }
         // Auto-load VM list when switching to vmlist tab
         if (tab.dataset.tab === 'vmlist') { loadVmListTable(); }
-        // Auto-load image list when switching to listimage tab
-        if (tab.dataset.tab === 'listimage') { loadImageList(); }
+        // Auto-load image list when switching to listimage tab (refresh disk list first for owner info)
+        if (tab.dataset.tab === 'listimage') { loadDiskList().then(function() { loadImageList(); }); }
         // Auto-load disk list when switching to createdisk tab
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
@@ -837,9 +837,29 @@ async function executeCreateVm() {
 async function executeUpdateVm() {
     try {
     var vmName = val('create-vm-name').trim();
+    var oldName = window._editingVm;
     if (!vmName) {
         alert('Please enter a VM-NAME');
         return;
+    }
+    // If VM name changed, rename first
+    if (oldName && vmName !== oldName) {
+        var statusEl = document.getElementById('status-indicator');
+        statusEl.className = 'loading';
+        statusEl.textContent = 'Renaming VM...';
+        var renameRes = await apiFetch('/api/vm/rename', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ old_name: oldName, new_name: vmName }),
+        });
+        var renameData = await safeJson(renameRes);
+        if (!renameData.success) {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Rename error: ' + renameData.message;
+            return;
+        }
+        // Update editing context to new name
+        window._editingVm = vmName;
     }
     var config = collectVmConfig();
     // Require at least one disk
@@ -862,6 +882,7 @@ async function executeUpdateVm() {
         loadVmList();
         loadVmListTable();
         loadGroupList();
+        loadDiskList();
         resetCreateForm();
         // Switch to VM List tab after saving
         switchTab('vmlist');
@@ -1583,10 +1604,21 @@ async function loadImageList() {
         if (images.length === 0) {
             listDiv.innerHTML = '<em>No image files</em>';
         } else {
+            var disks = window._diskList || [];
             listDiv.innerHTML = images.map(function(img) {
+                // Check if this image is in use by a VM (match disk name without extension)
+                var baseName = img.name.replace(/\.(qcow2|img|raw|vmdk)$/, '');
+                var diskInfo = disks.find(function(d) { return d.name === baseName; });
+                var owner = diskInfo ? diskInfo.owner : '';
+                var ownerTag = owner
+                    ? ' <small style="color:#58a6ff;">[' + escapeHtml(owner) + ']</small>'
+                    : '';
+                var deleteBtn = owner
+                    ? ''
+                    : '<button class="btn-remove" onclick="deleteImage(\'' + img.name.replace(/'/g, "\\'") + '\')">X</button>';
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + escapeHtml(img.name) + ' <small>(' + escapeHtml(formatSize(img.size)) + ')</small></span>' +
-                    '<button class="btn-remove" onclick="deleteImage(\'' + img.name.replace(/'/g, "\\'") + '\')">X</button>' +
+                    '<span>' + escapeHtml(img.name) + ' <small>(' + escapeHtml(formatSize(img.size)) + ')</small>' + ownerTag + '</span>' +
+                    deleteBtn +
                     '</div>';
             }).join('');
         }
@@ -2319,9 +2351,9 @@ async function editVm(smac) {
             switchTab('create');
             // Reset template to custom when editing
             document.getElementById('create-os-template').value = 'custom';
-            // Fill form
+            // Fill form (VM name is editable for rename)
             document.getElementById('create-vm-name').value = vm.smac;
-            document.getElementById('create-vm-name').disabled = true;
+            document.getElementById('create-vm-name').disabled = false;
             document.getElementById('create-title').textContent = 'Edit VM: ' + vm.smac;
             document.getElementById('create-submit-btn').textContent = 'Save Changes';
             document.getElementById('create-submit-btn').setAttribute('onclick', 'executeUpdateVm()');
