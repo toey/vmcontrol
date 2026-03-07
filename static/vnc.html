@@ -109,6 +109,19 @@
         <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
+
+    <!-- Paste modal -->
+    <div id="paste-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;justify-content:center;align-items:center;">
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:600px;width:90%;">
+            <h3 style="color:#c9d1d9;margin:0 0 12px 0;">Paste text into VM</h3>
+            <textarea id="paste-text" rows="10" style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:10px;font-family:monospace;font-size:13px;resize:vertical;box-sizing:border-box;" placeholder="Paste or type text here... (supports multi-line)"></textarea>
+            <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;">
+                <button onclick="closePasteModal()" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:8px 16px;border-radius:6px;cursor:pointer;">Cancel</button>
+                <button onclick="executePaste()" style="background:#238636;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:bold;">Send</button>
+            </div>
+        </div>
+    </div>
+
     <div id="vnc-container">
         <div class="placeholder" id="placeholder">
             <h2>noVNC Console</h2>
@@ -196,46 +209,40 @@
             setStatus('Sent Ctrl+Alt+Del', 'status-connected');
         };
 
-        window.doPaste = function() {
-            if (!rfb) { alert('Not connected'); return; }
-            var text = prompt('Text to paste into VM:');
-            if (!text) return;
+        // Key maps for paste (US keyboard layout)
+        var SHIFT_MAP = {
+            '~': 'Backquote', '!': 'Digit1', '@': 'Digit2', '#': 'Digit3',
+            '$': 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7',
+            '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', '_': 'Minus',
+            '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight',
+            '|': 'Backslash', ':': 'Semicolon', '"': 'Quote',
+            '<': 'Comma', '>': 'Period', '?': 'Slash',
+        };
+        var CODE_MAP = {
+            '`': 'Backquote', '-': 'Minus', '=': 'Equal',
+            '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash',
+            ';': 'Semicolon', "'": 'Quote', ',': 'Comma',
+            '.': 'Period', '/': 'Slash', ' ': 'Space',
+            '0': 'Digit0', '1': 'Digit1', '2': 'Digit2', '3': 'Digit3',
+            '4': 'Digit4', '5': 'Digit5', '6': 'Digit6', '7': 'Digit7',
+            '8': 'Digit8', '9': 'Digit9',
+        };
 
-            // Shifted char → base key code (US keyboard layout)
-            var SHIFT_MAP = {
-                '~': 'Backquote', '!': 'Digit1', '@': 'Digit2', '#': 'Digit3',
-                '$': 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7',
-                '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', '_': 'Minus',
-                '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight',
-                '|': 'Backslash', ':': 'Semicolon', '"': 'Quote',
-                '<': 'Comma', '>': 'Period', '?': 'Slash',
-            };
-            // Normal char → key code
-            var CODE_MAP = {
-                '`': 'Backquote', '-': 'Minus', '=': 'Equal',
-                '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash',
-                ';': 'Semicolon', "'": 'Quote', ',': 'Comma',
-                '.': 'Period', '/': 'Slash', ' ': 'Space',
-                '0': 'Digit0', '1': 'Digit1', '2': 'Digit2', '3': 'Digit3',
-                '4': 'Digit4', '5': 'Digit5', '6': 'Digit6', '7': 'Digit7',
-                '8': 'Digit8', '9': 'Digit9',
-            };
-
+        function sendTextToVm(text) {
             for (var i = 0; i < text.length; i++) {
                 var ch = text[i];
                 var keysym = text.charCodeAt(i);
+                if (ch === '\r') continue; // skip \r in \r\n
                 if (ch === '\n') {
                     rfb.sendKey(0xff0d, 'Enter');
                 } else if (ch === '\t') {
                     rfb.sendKey(0xff09, 'Tab');
                 } else if (SHIFT_MAP[ch]) {
-                    // Shifted character: Shift down → key → Shift up
                     rfb.sendKey(0xffe1, 'ShiftLeft', true);
                     rfb.sendKey(keysym, SHIFT_MAP[ch], true);
                     rfb.sendKey(keysym, SHIFT_MAP[ch], false);
                     rfb.sendKey(0xffe1, 'ShiftLeft', false);
                 } else if (ch >= 'A' && ch <= 'Z') {
-                    // Uppercase letter: Shift + letter key
                     rfb.sendKey(0xffe1, 'ShiftLeft', true);
                     rfb.sendKey(keysym, 'Key' + ch, true);
                     rfb.sendKey(keysym, 'Key' + ch, false);
@@ -246,8 +253,38 @@
                     rfb.sendKey(keysym, CODE_MAP[ch] || null);
                 }
             }
+        }
+
+        window.doPaste = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            var modal = document.getElementById('paste-modal');
+            var textarea = document.getElementById('paste-text');
+            textarea.value = '';
+            modal.style.display = 'flex';
+            textarea.focus();
+        };
+
+        window.closePasteModal = function() {
+            document.getElementById('paste-modal').style.display = 'none';
+        };
+
+        window.executePaste = function() {
+            var text = document.getElementById('paste-text').value;
+            document.getElementById('paste-modal').style.display = 'none';
+            if (!text || !rfb) return;
+            sendTextToVm(text);
             setStatus('Typed ' + text.length + ' chars', 'status-connected');
         };
+
+        // Allow Ctrl+Enter to send from textarea
+        document.getElementById('paste-text').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                e.preventDefault();
+                window.executePaste();
+            } else if (e.key === 'Escape') {
+                window.closePasteModal();
+            }
+        });
 
         window.toggleFullscreen = function() {
             var el = document.getElementById('vnc-container');
