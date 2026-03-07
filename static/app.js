@@ -1763,6 +1763,8 @@ function getVmVncPort(smac) {
 async function vmVncStart(smac) {
     var port = getVmVncPort(smac);
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
+    // Open window immediately (in user-click context) to avoid popup blocker
+    var vncWin = window.open('about:blank', '_blank');
     // Generate one-time VNC token
     try {
         var response = await apiFetch('/api/vnc/token', {
@@ -1774,14 +1776,14 @@ async function vmVncStart(smac) {
         if (data && data.success && data.token) {
             window._vncActive[smac] = true;
             loadVmListTable();
-            window.open('/vnc.html?token=' + encodeURIComponent(data.token), '_blank');
+            vncWin.location.href = '/vnc.html?token=' + encodeURIComponent(data.token);
             return;
         }
     } catch (e) {}
     // Fallback if token generation fails
     window._vncActive[smac] = true;
     loadVmListTable();
-    window.open('/vnc.html?smac=' + encodeURIComponent(smac), '_blank');
+    vncWin.location.href = '/vnc.html?smac=' + encodeURIComponent(smac);
 }
 
 async function vmVncStop(smac) {
