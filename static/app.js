@@ -1170,7 +1170,6 @@ function populateDiskSelect(selectEl, selectedValue) {
     var current = selectedValue || selectEl.value;
     selectEl.innerHTML = '<option value="">-- select disk --</option>';
     disks.forEach(function(d) {
-        if (d.name.indexOf('template-') === 0) return; // skip template images
         // Show disk if: free (no owner) OR owned by the VM being edited OR matches current selection
         if (!d.owner || d.owner === editingVm || d.name === current) {
             var opt = document.createElement('option');

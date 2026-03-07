@@ -200,12 +200,50 @@
             if (!rfb) { alert('Not connected'); return; }
             var text = prompt('Text to paste into VM:');
             if (!text) return;
+
+            // Shifted char → base key code (US keyboard layout)
+            var SHIFT_MAP = {
+                '~': 'Backquote', '!': 'Digit1', '@': 'Digit2', '#': 'Digit3',
+                '$': 'Digit4', '%': 'Digit5', '^': 'Digit6', '&': 'Digit7',
+                '*': 'Digit8', '(': 'Digit9', ')': 'Digit0', '_': 'Minus',
+                '+': 'Equal', '{': 'BracketLeft', '}': 'BracketRight',
+                '|': 'Backslash', ':': 'Semicolon', '"': 'Quote',
+                '<': 'Comma', '>': 'Period', '?': 'Slash',
+            };
+            // Normal char → key code
+            var CODE_MAP = {
+                '`': 'Backquote', '-': 'Minus', '=': 'Equal',
+                '[': 'BracketLeft', ']': 'BracketRight', '\\': 'Backslash',
+                ';': 'Semicolon', "'": 'Quote', ',': 'Comma',
+                '.': 'Period', '/': 'Slash', ' ': 'Space',
+                '0': 'Digit0', '1': 'Digit1', '2': 'Digit2', '3': 'Digit3',
+                '4': 'Digit4', '5': 'Digit5', '6': 'Digit6', '7': 'Digit7',
+                '8': 'Digit8', '9': 'Digit9',
+            };
+
             for (var i = 0; i < text.length; i++) {
-                var ch = text.charCodeAt(i);
-                if (text[i] === '\n') {
-                    rfb.sendKey(0xff0d);
+                var ch = text[i];
+                var keysym = text.charCodeAt(i);
+                if (ch === '\n') {
+                    rfb.sendKey(0xff0d, 'Enter');
+                } else if (ch === '\t') {
+                    rfb.sendKey(0xff09, 'Tab');
+                } else if (SHIFT_MAP[ch]) {
+                    // Shifted character: Shift down → key → Shift up
+                    rfb.sendKey(0xffe1, 'ShiftLeft', true);
+                    rfb.sendKey(keysym, SHIFT_MAP[ch], true);
+                    rfb.sendKey(keysym, SHIFT_MAP[ch], false);
+                    rfb.sendKey(0xffe1, 'ShiftLeft', false);
+                } else if (ch >= 'A' && ch <= 'Z') {
+                    // Uppercase letter: Shift + letter key
+                    rfb.sendKey(0xffe1, 'ShiftLeft', true);
+                    rfb.sendKey(keysym, 'Key' + ch, true);
+                    rfb.sendKey(keysym, 'Key' + ch, false);
+                    rfb.sendKey(0xffe1, 'ShiftLeft', false);
+                } else if (ch >= 'a' && ch <= 'z') {
+                    rfb.sendKey(keysym, 'Key' + ch.toUpperCase());
                 } else {
-                    rfb.sendKey(ch);
+                    rfb.sendKey(keysym, CODE_MAP[ch] || null);
                 }
             }
             setStatus('Typed ' + text.length + ' chars', 'status-connected');
