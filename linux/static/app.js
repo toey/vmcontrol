@@ -1170,7 +1170,7 @@ async function loadDiskList() {
                 var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
                 var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">→ Template</button>';
-                var editFilesBtn = _diskEditSupported ? '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>' : '';
+                var editFilesBtn = '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>';
                 var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
@@ -2714,6 +2714,7 @@ var _diskEditorState = {
     currentPath: '/',
     currentFile: null,
     dirty: false,
+    readOnly: false,
 };
 
 async function openDiskEditor(diskName) {
@@ -2731,7 +2732,7 @@ async function openDiskEditor(diskName) {
     document.getElementById('disk-editor-save-btn').style.display = 'none';
     document.getElementById('disk-editor-filepath').textContent = '(no file selected)';
 
-    _diskEditorState = { diskName: diskName, currentPath: '/', currentFile: null, dirty: false };
+    _diskEditorState = { diskName: diskName, currentPath: '/', currentFile: null, dirty: false, readOnly: false };
 
     try {
         var response = await apiFetch('/api/disk/mount', {
@@ -2746,7 +2747,12 @@ async function openDiskEditor(diskName) {
                 '<em style="color:#f85149;padding:8px 12px;display:block;">' + escapeHtml(data.message) + '</em>';
             return;
         }
-        document.getElementById('disk-editor-status').textContent = 'Mounted';
+        _diskEditorState.readOnly = !!data.read_only;
+        if (data.read_only) {
+            document.getElementById('disk-editor-status').textContent = 'Mounted (read-only — install fuse-ext2 for write support)';
+        } else {
+            document.getElementById('disk-editor-status').textContent = 'Mounted';
+        }
         browseDiskDir('/');
     } catch (e) {
         document.getElementById('disk-editor-status').textContent = 'Mount failed: ' + e.message;
@@ -2816,11 +2822,17 @@ async function openDiskFile(filePath) {
 
         if (data.success) {
             document.getElementById('disk-editor-content').value = data.content;
-            document.getElementById('disk-editor-content').readOnly = false;
-            document.getElementById('disk-editor-save-btn').style.display = 'inline-block';
+            if (_diskEditorState.readOnly) {
+                document.getElementById('disk-editor-content').readOnly = true;
+                document.getElementById('disk-editor-save-btn').style.display = 'none';
+                document.getElementById('disk-editor-status').textContent = 'Viewing (read-only): ' + filePath;
+            } else {
+                document.getElementById('disk-editor-content').readOnly = false;
+                document.getElementById('disk-editor-save-btn').style.display = 'inline-block';
+                document.getElementById('disk-editor-status').textContent = 'Editing: ' + filePath;
+            }
             _diskEditorState.currentFile = filePath;
             _diskEditorState.dirty = false;
-            document.getElementById('disk-editor-status').textContent = 'Editing: ' + filePath;
         } else {
             document.getElementById('disk-editor-content').value = 'Error: ' + data.message;
             document.getElementById('disk-editor-status').textContent = data.message;
@@ -2876,7 +2888,7 @@ async function unmountAndCloseDiskEditor() {
     }
 
     document.getElementById('disk-editor-overlay').style.display = 'none';
-    _diskEditorState = { diskName: null, currentPath: '/', currentFile: null, dirty: false };
+    _diskEditorState = { diskName: null, currentPath: '/', currentFile: null, dirty: false, readOnly: false };
 }
 
 function updateDiskBreadcrumb(path) {

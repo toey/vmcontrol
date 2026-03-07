@@ -2583,7 +2583,7 @@ async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResp
 // ──────────────────────────────────────────
 
 async fn disk_edit_supported_handler() -> HttpResponse {
-    let supported = cfg!(target_os = "linux");
+    let supported = cfg!(target_os = "linux") || cfg!(target_os = "macos");
     HttpResponse::Ok().json(serde_json::json!({
         "supported": supported,
         "platform": std::env::consts::OS,
@@ -2607,6 +2607,7 @@ async fn mount_disk_handler(
             "success": true,
             "message": format!("Disk '{}' mounted at {}", name, info.mount_point),
             "mount_point": info.mount_point,
+            "read_only": info.read_only,
         })),
         Ok(Err(e)) => HttpResponse::Ok().json(ApiResponse {
             success: false, message: e, output: None,

@@ -14,6 +14,10 @@ pub struct MountedDisk {
     pub partition_path: String,
     pub mounted_at: String,
     pub lvm_vg: Option<String>,
+    /// macOS only: path to temporary raw file for qcow2↔raw conversion
+    pub raw_file: Option<String>,
+    /// true if mounted read-only (e.g. ext4fuse on macOS)
+    pub read_only: bool,
 }
 
 pub type MountedDiskStore = Arc<Mutex<HashMap<String, MountedDisk>>>;
@@ -173,6 +177,8 @@ pub fn mount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDi
         partition_path: part_path,
         mounted_at: now,
         lvm_vg,
+        raw_file: None,
+        read_only: false,
     };
 
     store.lock().unwrap().insert(disk_name.to_string(), info.clone());
@@ -271,7 +277,7 @@ fn get_mount_info(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDi
         .ok_or_else(|| format!("Disk '{}' is not mounted", disk_name))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn format_permissions(meta: &std::fs::Metadata) -> String {
     use std::os::unix::fs::PermissionsExt;
     let mode = meta.permissions().mode();
@@ -287,7 +293,7 @@ fn format_permissions(meta: &std::fs::Metadata) -> String {
     s
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(unix))]
 fn format_permissions(_meta: &std::fs::Metadata) -> String {
     "---------".to_string()
 }
@@ -378,6 +384,11 @@ pub fn write_file(
     store: &MountedDiskStore,
 ) -> Result<(), String> {
     let info = get_mount_info(disk_name, store)?;
+
+    if info.read_only {
+        return Err("Disk is mounted read-only (ext4fuse). Install fuse-ext2 for write support.".into());
+    }
+
     let full_path = resolve_safe_path(&info.mount_point, rel_path)?;
 
     // Re-check disk is not in use (race protection)
@@ -387,20 +398,306 @@ pub fn write_file(
 }
 
 // ──────────────────────────────────────────
-// macOS / Windows stubs
+// macOS implementation (qemu-img convert + hdiutil + fuse-ext2/ext4fuse)
 // ──────────────────────────────────────────
 
-#[cfg(not(target_os = "linux"))]
-pub fn mount_disk(_disk_name: &str, _store: &MountedDiskStore) -> Result<MountedDisk, String> {
-    Err("Disk file editing requires Linux. Boot the VM and edit files via VNC console.".into())
+/// Check which ext4 FUSE tool is available.
+/// Returns (tool_path, is_read_write).
+#[cfg(target_os = "macos")]
+fn find_ext4_tool() -> Result<(String, bool), String> {
+    // Try fuse-ext2 first (supports read-write)
+    if let Ok(output) = run_cmd("which", &["fuse-ext2"]) {
+        let path = output.trim().to_string();
+        if !path.is_empty() {
+            return Ok((path, true));
+        }
+    }
+    // Fall back to ext4fuse (read-only)
+    if let Ok(output) = run_cmd("which", &["ext4fuse"]) {
+        let path = output.trim().to_string();
+        if !path.is_empty() {
+            return Ok((path, false));
+        }
+    }
+    Err(
+        "ext4 support not found.\nInstall with:\n  brew install --cask macfuse\n  brew install fuse-ext2\nOr read-only:\n  brew install ext4fuse"
+            .into(),
+    )
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn unmount_disk(_disk_name: &str, _store: &MountedDiskStore) -> Result<(), String> {
-    Err("Disk file editing requires Linux.".into())
+/// Check if a device path is a partition slice (e.g. /dev/disk4s2 vs /dev/disk4)
+#[cfg(target_os = "macos")]
+fn is_partition_slice(dev: &str) -> bool {
+    if let Some(s_pos) = dev.rfind('s') {
+        if s_pos > 0
+            && !dev[s_pos + 1..].is_empty()
+            && dev[s_pos + 1..].chars().all(|c| c.is_ascii_digit())
+        {
+            return dev.as_bytes()[s_pos - 1].is_ascii_digit();
+        }
+    }
+    false
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Parse hdiutil attach output to find the main disk device and the Linux partition.
+/// Returns (disk_device, partition_device).
+#[cfg(target_os = "macos")]
+fn find_linux_partition(hdiutil_output: &str) -> Result<(String, String), String> {
+    let mut disk_dev = String::new();
+    let mut candidates = Vec::new();
+
+    for line in hdiutil_output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let dev = parts[0];
+        if !dev.starts_with("/dev/disk") {
+            continue;
+        }
+
+        let type_hint = if parts.len() > 1 {
+            parts[1..].join(" ").to_lowercase()
+        } else {
+            String::new()
+        };
+
+        if is_partition_slice(dev) {
+            // Skip EFI, partition map, swap
+            if type_hint.contains("efi")
+                || type_hint.contains("partition_scheme")
+                || type_hint.contains("partition_map")
+                || type_hint.contains("swap")
+            {
+                continue;
+            }
+            candidates.push(dev.to_string());
+        } else {
+            disk_dev = dev.to_string();
+        }
+    }
+
+    if disk_dev.is_empty() {
+        return Err("No disk device found in hdiutil output".into());
+    }
+
+    if candidates.is_empty() {
+        // No partition table — raw filesystem on whole disk
+        return Ok((disk_dev.clone(), disk_dev));
+    }
+
+    // Pick the last non-EFI partition (usually the main filesystem)
+    let partition = candidates.last().unwrap().clone();
+    Ok((disk_dev, partition))
+}
+
+#[cfg(target_os = "macos")]
+pub fn mount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDisk, String> {
+    crate::ssh::sanitize_name(disk_name)?;
+
+    // Check not already mounted
+    {
+        let locked = store.lock().unwrap();
+        if locked.contains_key(disk_name) {
+            return Err(format!("Disk '{}' is already mounted", disk_name));
+        }
+    }
+
+    // Check disk not in use by running VM
+    crate::operations::check_disk_not_in_use(disk_name)?;
+
+    // Find ext4 FUSE tool
+    let (ext4_tool, is_rw) = find_ext4_tool()?;
+
+    // Verify disk file exists
+    let disk_path = get_conf("disk_path");
+    let qcow2_file = format!("{}/{}.qcow2", disk_path, disk_name);
+    if !std::path::Path::new(&qcow2_file).exists() {
+        return Err(format!("Disk file not found: {}", qcow2_file));
+    }
+
+    let mount_base = get_conf("disk_mount_base");
+    let _ = std::fs::create_dir_all(&mount_base);
+    let raw_file = format!("{}/{}.raw", mount_base, disk_name);
+    let mount_point = format!("{}/{}", mount_base, disk_name);
+    let _ = std::fs::create_dir_all(&mount_point);
+
+    // Step 1: Convert qcow2 → raw
+    eprintln!("[disk-edit] Converting {} to raw...", qcow2_file);
+    let qemu_img = get_conf("qemu_img_path");
+    if let Err(e) = run_cmd(
+        &qemu_img,
+        &["convert", "-f", "qcow2", "-O", "raw", &qcow2_file, &raw_file],
+    ) {
+        let _ = std::fs::remove_file(&raw_file);
+        return Err(format!("qemu-img convert to raw failed: {}", e));
+    }
+
+    // Step 2: Attach raw image with hdiutil
+    eprintln!("[disk-edit] Attaching raw image with hdiutil...");
+    let hdiutil_output = match run_cmd("hdiutil", &["attach", "-nomount", &raw_file]) {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = std::fs::remove_file(&raw_file);
+            return Err(format!("hdiutil attach failed: {}", e));
+        }
+    };
+
+    // Step 3: Find disk device and Linux partition
+    let (disk_dev, partition) = match find_linux_partition(&hdiutil_output) {
+        Ok(r) => r,
+        Err(e) => {
+            // Try to detach whatever was attached
+            for line in hdiutil_output.lines() {
+                let dev = line.split_whitespace().next().unwrap_or("");
+                if dev.starts_with("/dev/disk") && !is_partition_slice(dev) {
+                    let _ = run_cmd("hdiutil", &["detach", dev]);
+                    break;
+                }
+            }
+            let _ = std::fs::remove_file(&raw_file);
+            return Err(e);
+        }
+    };
+
+    // Step 4: Mount partition using ext4 FUSE tool
+    eprintln!(
+        "[disk-edit] Mounting {} at {} using {} (rw={})",
+        partition, mount_point, ext4_tool, is_rw
+    );
+    let mount_result = if ext4_tool.contains("fuse-ext2") {
+        run_cmd(&ext4_tool, &[&partition, &mount_point, "-o", "rw+"])
+    } else {
+        // ext4fuse (read-only)
+        run_cmd(&ext4_tool, &[&partition, &mount_point])
+    };
+
+    if let Err(e) = mount_result {
+        let _ = run_cmd("hdiutil", &["detach", &disk_dev]);
+        let _ = std::fs::remove_file(&raw_file);
+        return Err(format!("ext4 mount failed: {}", e));
+    }
+
+    let now = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+    let info = MountedDisk {
+        disk_name: disk_name.to_string(),
+        nbd_device: disk_dev, // stores /dev/diskN for hdiutil detach
+        mount_point,
+        partition_path: partition,
+        mounted_at: now,
+        lvm_vg: None,
+        raw_file: Some(raw_file),
+        read_only: !is_rw,
+    };
+
+    store
+        .lock()
+        .unwrap()
+        .insert(disk_name.to_string(), info.clone());
+    Ok(info)
+}
+
+#[cfg(target_os = "macos")]
+pub fn unmount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<(), String> {
+    let info = {
+        let locked = store.lock().unwrap();
+        locked
+            .get(disk_name)
+            .cloned()
+            .ok_or_else(|| format!("Disk '{}' is not mounted", disk_name))?
+    };
+
+    // Step 1: Unmount FUSE filesystem
+    run_cmd("umount", &[&info.mount_point])
+        .map_err(|e| format!("Unmount failed: {}", e))?;
+
+    // Step 2: Detach hdiutil device
+    let _ = run_cmd("hdiutil", &["detach", &info.nbd_device]);
+
+    // Step 3: If read-write, convert raw back to qcow2
+    if !info.read_only {
+        if let Some(ref raw_file) = info.raw_file {
+            let disk_path = get_conf("disk_path");
+            let qcow2_file = format!("{}/{}.qcow2", disk_path, disk_name);
+            let qemu_img = get_conf("qemu_img_path");
+
+            // Convert to a temp file first for safety
+            let temp_qcow2 = format!("{}.tmp.qcow2", qcow2_file);
+            eprintln!(
+                "[disk-edit] Converting raw back to qcow2: {} → {}",
+                raw_file, qcow2_file
+            );
+            match run_cmd(
+                &qemu_img,
+                &["convert", "-f", "raw", "-O", "qcow2", raw_file, &temp_qcow2],
+            ) {
+                Ok(_) => {
+                    if let Err(e) = std::fs::rename(&temp_qcow2, &qcow2_file) {
+                        // Rename failed — try to clean up temp
+                        let _ = std::fs::remove_file(&temp_qcow2);
+                        eprintln!("[disk-edit] WARNING: rename failed: {}", e);
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&temp_qcow2);
+                    // Don't fail the unmount — original qcow2 is still intact
+                    eprintln!(
+                        "[disk-edit] WARNING: raw→qcow2 conversion failed: {}. Original disk unchanged.",
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    // Step 4: Cleanup raw file and mount point
+    if let Some(ref raw_file) = info.raw_file {
+        let _ = std::fs::remove_file(raw_file);
+    }
+    let _ = std::fs::remove_dir(&info.mount_point);
+
+    store.lock().unwrap().remove(disk_name);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn cleanup_stale_mounts() {
-    // Nothing to do on non-Linux
+    let mount_base = get_conf("disk_mount_base");
+    if !std::path::Path::new(&mount_base).exists() {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(&mount_base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = run_cmd("umount", &[&path.to_string_lossy()]);
+                let _ = std::fs::remove_dir(&path);
+            } else if path.extension().map(|e| e == "raw").unwrap_or(false) {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+// ──────────────────────────────────────────
+// Windows stubs
+// ──────────────────────────────────────────
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn mount_disk(_disk_name: &str, _store: &MountedDiskStore) -> Result<MountedDisk, String> {
+    Err("Disk file editing is not supported on Windows.".into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn unmount_disk(_disk_name: &str, _store: &MountedDiskStore) -> Result<(), String> {
+    Err("Disk file editing is not supported on Windows.".into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn cleanup_stale_mounts() {
+    // Nothing to do on Windows
 }
