@@ -628,6 +628,53 @@ async fn upload_iso_handler(
     }
 }
 
+// List PCI devices currently bound to vfio-pci driver (Linux only)
+async fn list_vfio_devices() -> HttpResponse {
+    let devices: Vec<serde_json::Value> = Vec::new();
+
+    #[cfg(target_os = "linux")]
+    {
+        let vfio_path = std::path::Path::new("/sys/bus/pci/drivers/vfio-pci");
+        if vfio_path.exists() {
+            if let Ok(entries) = std::fs::read_dir(vfio_path) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    // PCI addresses look like 0000:01:00.0
+                    if !name.contains(':') { continue; }
+
+                    // Read vendor and device IDs from sysfs
+                    let base = format!("/sys/bus/pci/devices/{}", name);
+                    let vendor = std::fs::read_to_string(format!("{}/vendor", base))
+                        .unwrap_or_default().trim().to_string();
+                    let device = std::fs::read_to_string(format!("{}/device", base))
+                        .unwrap_or_default().trim().to_string();
+                    let class = std::fs::read_to_string(format!("{}/class", base))
+                        .unwrap_or_default().trim().to_string();
+
+                    // Try to get device description via lspci
+                    let desc = std::process::Command::new("lspci")
+                        .args(&["-s", &name, "-mm"])
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .unwrap_or_default()
+                        .trim().to_string();
+
+                    devices.push(serde_json::json!({
+                        "address": name,
+                        "vendor": vendor,
+                        "device": device,
+                        "class": class,
+                        "description": desc,
+                    }));
+                }
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(devices)
+}
+
 async fn list_disks_handler() -> HttpResponse {
     let disk_path = get_conf("disk_path");
 
@@ -2161,6 +2208,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
         println!("API key authentication enabled");
     }
 
+    // Repair VMs missing mds IPs (from old update_config bug)
+    operations::repair_missing_mds_ips();
+
     // Shared API key state for runtime updates
     let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));
 
@@ -2242,6 +2292,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/livemigrate", web::post().to(livemigrate_vm))
             .route("/api/vm/backup", web::post().to(backup_vm))
             .route("/api/vm/list", web::get().to(list_vms_handler))
+            // Device routes
+            .route("/api/devices/vfio", web::get().to(list_vfio_devices))
             // Disk routes
             .route("/api/disk/list", web::get().to(list_disks_handler))
             .route("/api/disk/create", web::post().to(create_disk_handler))

@@ -630,7 +630,7 @@ async fn upload_iso_handler(
 
 // List PCI devices currently bound to vfio-pci driver (Linux only)
 async fn list_vfio_devices() -> HttpResponse {
-    let mut devices: Vec<serde_json::Value> = Vec::new();
+    let devices: Vec<serde_json::Value> = Vec::new();
 
     #[cfg(target_os = "linux")]
     {
