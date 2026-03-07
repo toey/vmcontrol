@@ -555,17 +555,11 @@ if not exist "%CONFIG_YAML%" (
 
 echo.
 
-:: --- Step 8: Generate API key ---
+:: --- Step 8: Generate API key (always regenerate on install) ---
 set "API_KEY_FILE=%PCTL_PATH%\.api_key"
-if exist "%API_KEY_FILE%" (
-    set /p API_KEY=<"%API_KEY_FILE%"
-    echo [INFO] Using existing API key from %API_KEY_FILE%
-) else (
-    :: Generate 64-char hex key using PowerShell
-    for /f "delims=" %%K in ('powershell -NoProfile -Command "[System.BitConverter]::ToString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('-','')"') do set "API_KEY=%%K"
-    echo !API_KEY!> "%API_KEY_FILE%"
-    echo [OK]   API key generated and saved to %API_KEY_FILE%
-)
+for /f "delims=" %%K in ('powershell -NoProfile -Command "[System.BitConverter]::ToString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('-','')"') do set "API_KEY=%%K"
+echo !API_KEY!> "%API_KEY_FILE%"
+echo [OK]   API key generated and saved to %API_KEY_FILE%
 
 :: Set system environment variable so it persists across reboots
 setx VMCONTROL_API_KEY "!API_KEY!" /M >nul 2>&1

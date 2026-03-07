@@ -167,17 +167,12 @@ else
     warn "config.yaml already exists — skipping (preserving your customizations)"
 fi
 
-# --- Step 6: Generate API key ---
+# --- Step 6: Generate API key (always regenerate on install) ---
 API_KEY_FILE="${PCTL_PATH}/.api_key"
-if [[ -f "$API_KEY_FILE" ]]; then
-    API_KEY=$(cat "$API_KEY_FILE")
-    info "Using existing API key from $API_KEY_FILE"
-else
-    API_KEY=$(openssl rand -hex 32 2>/dev/null || LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 64)
-    echo "$API_KEY" > "$API_KEY_FILE"
-    chmod 600 "$API_KEY_FILE"
-    success "API key generated and saved to $API_KEY_FILE"
-fi
+API_KEY=$(openssl rand -hex 32 2>/dev/null || LC_ALL=C tr -dc 'a-f0-9' < /dev/urandom | head -c 64)
+echo "$API_KEY" > "$API_KEY_FILE"
+chmod 600 "$API_KEY_FILE"
+success "API key generated and saved to $API_KEY_FILE"
 
 # --- Step 7: Set up launchd service ---
 info "Setting up launchd service..."
