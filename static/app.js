@@ -858,8 +858,9 @@ async function executeUpdateVm() {
             statusEl.textContent = 'Rename error: ' + renameData.message;
             return;
         }
-        // Update editing context to new name
+        // Update editing context to new name and refresh MAC cache
         window._editingVm = vmName;
+        await loadUsedMacs();
     }
     var config = collectVmConfig();
     // Require at least one disk
