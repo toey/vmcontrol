@@ -45,6 +45,14 @@
         <!-- VM List -->
         <div id="tab-vmlist" class="tab-panel active">
             <h2>VM List</h2>
+            <div style="margin-bottom:12px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                <input type="file" id="vm-import-file" accept=".zip" style="max-width:300px;">
+                <button class="execute-btn" onclick="importVm()">Import VM</button>
+                <div id="vm-import-progress" style="display:none; align-items:center; gap:6px;">
+                    <progress id="vm-import-progress-bar" value="0" max="100" style="width:180px;"></progress>
+                    <span id="vm-import-progress-text" style="font-size:0.85rem;color:#8b949e;"></span>
+                </div>
+            </div>
             <div id="vm-list-table-wrap">
                 <table id="vm-list-table">
                     <thead>
@@ -390,6 +398,6 @@
         </div>
     </section>
 
-    <script src="/app.js?v=18"></script>
+    <script src="/app.js?v=19"></script>
 </body>
 </html>

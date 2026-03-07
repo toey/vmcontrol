@@ -96,7 +96,7 @@ pub fn check_iso_not_mounted(iso_name: &str) -> Result<(), String> {
 }
 
 /// Validate VM name — only alphanumeric, underscore, dash allowed
-fn validate_vm_name(name: &str) -> Result<(), String> {
+pub fn validate_vm_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("VM name is required".into());
     }
@@ -1161,9 +1161,28 @@ fn used_macs(exclude_smac: Option<&str>) -> Vec<(String, String)> {
     macs
 }
 
+/// Generate a random MAC address with 52:54:00 prefix (QEMU convention).
+/// Uses system time + process ID for randomness to avoid requiring the rand crate.
+pub fn generate_random_mac() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let pid = std::process::id();
+    // Simple LCG-based pseudo-random using nanos and pid
+    let mut rng = nanos.wrapping_mul(1664525).wrapping_add(pid);
+    let mut octets = [0u8; 3];
+    for o in &mut octets {
+        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+        *o = (rng >> 16) as u8;
+    }
+    format!("52:54:00:{:02x}:{:02x}:{:02x}", octets[0], octets[1], octets[2])
+}
+
 /// Validate that MAC addresses in a config are unique across all VMs.
 /// exclude_smac: if updating a VM, exclude its own MACs from the check.
-fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str>) -> Result<(), String> {
+pub fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str>) -> Result<(), String> {
     let new_macs: Vec<String> = config
         .get("network_adapters")
         .and_then(|a| a.as_array())
@@ -1202,7 +1221,7 @@ fn validate_mac_uniqueness(config: &serde_json::Value, exclude_smac: Option<&str
 }
 
 /// Find next available VNC port starting from VNC_PORT_MIN, step by VNC_PORT_STEP
-fn next_vnc_port() -> Result<u16, String> {
+pub fn next_vnc_port() -> Result<u16, String> {
     let used = used_vnc_ports();
     let mut port = VNC_PORT_MIN;
     while used.contains(&port) && port < VNC_PORT_MAX {

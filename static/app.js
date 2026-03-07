@@ -1350,6 +1350,98 @@ document.addEventListener('click', function(e) {
     }
 });
 
+// Export entire VM (config + disks) as ZIP
+function exportVm(smac) {
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Exporting VM ' + smac + '...';
+
+    apiFetch('/api/vm/export/' + encodeURIComponent(smac)).then(function(response) {
+        if (!response.ok) {
+            return response.json().then(function(data) {
+                throw new Error(data.message || 'Export failed');
+            });
+        }
+        return response.blob();
+    }).then(function(blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = smac + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        statusEl.className = 'success';
+        statusEl.textContent = 'Exported VM ' + smac + '.zip';
+    }).catch(function(err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Export error: ' + err.message;
+    });
+}
+
+// Import VM from ZIP file
+function importVm() {
+    var fileInput = document.getElementById('vm-import-file');
+    if (!fileInput.files.length) {
+        alert('Please select a .zip VM export file');
+        return;
+    }
+    var file = fileInput.files[0];
+    var statusEl = document.getElementById('status-indicator');
+    var progressDiv = document.getElementById('vm-import-progress');
+    var progressBar = document.getElementById('vm-import-progress-bar');
+    var progressText = document.getElementById('vm-import-progress-text');
+
+    progressDiv.style.display = 'inline-flex';
+    progressBar.value = 0;
+    progressText.textContent = 'Uploading...';
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Importing VM from ' + file.name + '...';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/vm/import');
+    xhr.setRequestHeader('X-Filename', file.name);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            var pct = Math.round(e.loaded / e.total * 100);
+            progressBar.value = pct;
+            progressText.textContent = pct + '% (' + formatSize(e.loaded) + ' / ' + formatSize(e.total) + ')';
+        }
+    };
+
+    xhr.onload = function() {
+        progressDiv.style.display = 'none';
+        try {
+            var data = JSON.parse(xhr.responseText);
+            if (data.success) {
+                statusEl.className = 'success';
+                statusEl.textContent = data.message;
+                fileInput.value = '';
+                loadVmListTable();
+                loadVmList();
+                loadDiskList();
+            } else {
+                statusEl.className = 'error';
+                statusEl.textContent = 'Import error: ' + data.message;
+            }
+        } catch (e) {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Import failed';
+        }
+    };
+
+    xhr.onerror = function() {
+        progressDiv.style.display = 'none';
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error during import';
+    };
+
+    xhr.send(file);
+}
+
 // ======== Switch Management ========
 
 async function loadSwitchList() {
@@ -2180,6 +2272,7 @@ async function loadVmListTable() {
                     // VM stopped → clear VNC active state
                     delete window._vncActive[vm.smac];
                     actions += '<button class="btn-vm-action btn-vm-start" onclick="vmAction(\'start\',\'' + vm.smac + '\')">Start</button> ';
+                    actions += '<button class="btn-vm-action btn-vm-export" onclick="exportVm(\'' + vm.smac + '\')" style="background:#1f6feb;">Export</button> ';
                 }
                 actions += '<button class="btn-vm-action btn-vm-edit" onclick="editVm(\'' + vm.smac + '\')">Edit</button> ';
                 actions += '<button class="btn-vm-action btn-vm-delete" onclick="deleteVmFromList(\'' + vm.smac + '\')">Delete</button>';
