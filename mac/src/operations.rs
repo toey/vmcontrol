@@ -737,8 +737,18 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             "iops-total-max-length : {}\n",
             disk.iops_total_max_length
         ));
-        // auto-create disk if not exists
+        // Validate backing chain integrity before starting
         let disk_file = format!("{}/{}.qcow2", disk_path, disk.diskname);
+        if let Ok(Some(backing)) = get_disk_backing_info(&disk.diskname) {
+            let backing_path = format!("{}/{}.qcow2", disk_path, backing);
+            if !std::path::Path::new(&backing_path).exists() {
+                return Err(format!(
+                    "Disk '{}' depends on backing file '{}' which is missing! Flatten the disk or restore the backing file.",
+                    disk.diskname, backing
+                ));
+            }
+        }
+        // auto-create disk if not exists
         if !std::path::Path::new(&disk_file).exists() {
             let qemu_img = get_conf("qemu_img_path");
             output_log.push_str(&format!("auto-creating disk: {}\n", disk_file));
@@ -1889,6 +1899,29 @@ pub fn backup(json_str: &str) -> Result<String, String> {
     sanitize_name(&cmd.smac)?;
     let output = send_cmd_pctl("backup", &cmd.smac);
     Ok(output)
+}
+
+/// Query the actual backing file from a qcow2 disk header using qemu-img info
+pub fn get_disk_backing_info(disk_name: &str) -> Result<Option<String>, String> {
+    let disk_path = get_conf("disk_path");
+    let qemu_img = get_conf("qemu_img_path");
+    let disk_file = format!("{}/{}.qcow2", disk_path, disk_name);
+    if !std::path::Path::new(&disk_file).exists() {
+        return Ok(None);
+    }
+    let output = crate::ssh::run_cmd(&qemu_img, &["info", "--output=json", &disk_file])?;
+    let info: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse qemu-img info: {}", e))?;
+    Ok(info.get("backing-filename")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            // Extract just the disk name (without path and .qcow2 extension)
+            std::path::Path::new(s)
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or(s)
+                .to_string()
+        }))
 }
 
 /// Create a standalone disk — creates .qcow2 file + saves to SQLite

@@ -9,6 +9,8 @@ pub struct DiskRecord {
     pub size: String,
     pub owner: String,
     pub created_at: String,
+    pub backing_file: String,
+    pub is_template: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -89,6 +91,24 @@ fn open_db() -> Result<Connection, String> {
     if !has_group {
         conn.execute_batch("ALTER TABLE vms ADD COLUMN group_name TEXT NOT NULL DEFAULT '';")
             .map_err(|e| format!("DB migrate group error: {}", e))?;
+    }
+
+    // Migration: add backing_file column to disks if not exists
+    let has_backing: bool = conn
+        .prepare("SELECT backing_file FROM disks LIMIT 0")
+        .is_ok();
+    if !has_backing {
+        conn.execute_batch("ALTER TABLE disks ADD COLUMN backing_file TEXT NOT NULL DEFAULT '';")
+            .map_err(|e| format!("DB migrate backing_file error: {}", e))?;
+    }
+
+    // Migration: add is_template column to disks if not exists
+    let has_template: bool = conn
+        .prepare("SELECT is_template FROM disks LIMIT 0")
+        .is_ok();
+    if !has_template {
+        conn.execute_batch("ALTER TABLE disks ADD COLUMN is_template TEXT NOT NULL DEFAULT '0';")
+            .map_err(|e| format!("DB migrate is_template error: {}", e))?;
     }
 
     conn.execute_batch(
@@ -318,7 +338,7 @@ pub fn insert_disk(name: &str, size: &str) -> Result<(), String> {
 pub fn list_disks() -> Result<Vec<DiskRecord>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare("SELECT name, size, COALESCE(owner,''), created_at FROM disks ORDER BY created_at DESC")
+        .prepare("SELECT name, size, COALESCE(owner,''), created_at, COALESCE(backing_file,''), COALESCE(is_template,'0') FROM disks ORDER BY created_at DESC")
         .map_err(|e| format!("DB query error: {}", e))?;
     let rows = stmt
         .query_map([], |row| {
@@ -327,6 +347,8 @@ pub fn list_disks() -> Result<Vec<DiskRecord>, String> {
                 size: row.get(1)?,
                 owner: row.get(2)?,
                 created_at: row.get(3)?,
+                backing_file: row.get(4)?,
+                is_template: row.get(5)?,
             })
         })
         .map_err(|e| format!("DB query error: {}", e))?;
@@ -375,6 +397,53 @@ pub fn clear_disk_owner_by_vm(smac: &str) -> Result<(), String> {
         params![smac],
     )
     .map_err(|e| format!("DB clear disk owner error: {}", e))?;
+    Ok(())
+}
+
+/// Insert a new disk with backing file reference (linked clone)
+pub fn insert_disk_with_backing(name: &str, size: &str, backing_file: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO disks (name, size, backing_file) VALUES (?1, ?2, ?3)",
+        params![name, size, backing_file],
+    )
+    .map_err(|e| format!("DB insert disk with backing error: {}", e))?;
+    Ok(())
+}
+
+/// Count how many disks use this disk as backing_file
+pub fn count_linked_clones(backing_name: &str) -> Result<i64, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM disks WHERE backing_file = ?1",
+        params![backing_name],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("DB count linked clones error: {}", e))
+}
+
+/// Set backing_file for a disk
+pub fn set_disk_backing(name: &str, backing_file: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "UPDATE disks SET backing_file = ?2 WHERE name = ?1",
+        params![name, backing_file],
+    )
+    .map_err(|e| format!("DB set disk backing error: {}", e))?;
+    Ok(())
+}
+
+/// Set is_template flag for a disk
+pub fn set_disk_template(name: &str, is_template: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    let updated = conn.execute(
+        "UPDATE disks SET is_template = ?2 WHERE name = ?1",
+        params![name, is_template],
+    )
+    .map_err(|e| format!("DB set disk template error: {}", e))?;
+    if updated == 0 {
+        return Err(format!("Disk '{}' not found", name));
+    }
     Ok(())
 }
 

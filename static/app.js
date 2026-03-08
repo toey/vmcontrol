@@ -1171,24 +1171,40 @@ async function loadDiskList() {
             listDiv.innerHTML = disks.map(function(d) {
                 var safeName = d.name.replace(/'/g, "\\'");
                 var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
+                // Backing file info badge
+                var backingBadge = d.backing_file ? ' <small style="color:#d29922;">[linked: ' + escapeHtml(d.backing_file) + ']</small>' : '';
+                // Clone count badge
+                var cloneCountBadge = (d.clone_count && d.clone_count > 0) ? ' <small style="color:#f0883e;">[' + d.clone_count + ' clone' + (d.clone_count > 1 ? 's' : '') + ']</small>' : '';
+                // Template badge
+                var templateBadge = (d.is_template === '1') ? ' <small style="color:#a371f7;font-weight:bold;">[TEMPLATE]</small>' : '';
+                var isTemplate = d.is_template === '1';
+                var hasClones = d.clone_count && d.clone_count > 0;
+                var isLinked = !!d.backing_file;
+
                 var exportBtn = '<span class="export-dropdown">' +
                     '<button class="btn-export" onclick="this.parentElement.classList.toggle(\'open\')" title="Export / Download">Export ▾</button>' +
                     '<span class="export-dropdown-content">' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">⬇ qcow2 (original)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">⬇ VMDK (VMware)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">⬇ VDI (VirtualBox)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">⬇ VHDX (Hyper-V)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">⬇ Raw image</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">qcow2 (original)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">VMDK (VMware)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">VDI (VirtualBox)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">VHDX (Hyper-V)</a>' +
+                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">Raw image</a>' +
                     '</span></span>';
-                var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
+                // Hide resize for templates
+                var resizeBtn = isTemplate ? '' : '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
                 var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
-                var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">→ Template</button>';
+                var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">Clone Template</button>';
+                // Flatten button for linked clones
+                var flattenBtn = isLinked ? '<button class="btn-clone" onclick="flattenDisk(\'' + safeName + '\')" title="Merge backing chain into standalone disk" style="background:#7c3aed;color:#fff;">Flatten</button>' : '';
+                // Template toggle button
+                var templateToggleBtn = '<button class="btn-clone" onclick="toggleTemplate(\'' + safeName + '\', ' + (isTemplate ? 'false' : 'true') + ')" title="' + (isTemplate ? 'Unlock template' : 'Lock as template') + '" style="background:' + (isTemplate ? '#da3633' : '#a371f7') + ';color:#fff;">' + (isTemplate ? 'Unlock' : 'Lock') + '</button>';
                 var editFilesBtn = '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>';
-                var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
+                // Hide delete for templates, disks with clones, or disks in use
+                var deleteBtn = (d.owner || isTemplate || hasClones) ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
                 var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
                 return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
-                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
+                    '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + backingBadge + cloneCountBadge + templateBadge + '</span>' +
+                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + flattenBtn + ' ' + templateToggleBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
         }
@@ -1211,6 +1227,8 @@ function populateDiskSelect(selectEl, selectedValue) {
             var opt = document.createElement('option');
             opt.value = d.name;
             var label = d.name + ' (' + (d.disk_size || formatSize(d.size)) + ')';
+            if (d.backing_file) label += ' [linked:' + d.backing_file + ']';
+            if (d.is_template === '1') label += ' [TPL]';
             if (d.owner && d.owner !== editingVm) {
                 label += ' [' + d.owner + ']';
             }
@@ -1287,14 +1305,16 @@ async function cloneDisk(source) {
     if (!newName) return;
     newName = newName.trim();
     if (!newName) return;
+    // Ask for clone type
+    var linked = confirm('Use linked clone (fast, saves space)?\n\nOK = Linked clone (uses backing file)\nCancel = Full copy (independent, slower)');
     var statusEl = document.getElementById('status-indicator');
     statusEl.className = 'loading';
-    statusEl.textContent = 'Cloning ' + source + ' -> ' + newName + '...';
+    statusEl.textContent = (linked ? 'Linked-cloning ' : 'Full-copying ') + source + ' -> ' + newName + '...';
     try {
         var response = await apiFetch('/api/disk/clone', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source: source, name: newName }),
+            body: JSON.stringify({ source: source, name: newName, linked: linked }),
         });
         var data = await safeJson(response);
         if (data.success) {
@@ -1328,6 +1348,62 @@ async function cloneDiskAsTemplate(source) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source: source, name: newName }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            loadDiskList();
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// Flatten a linked clone disk into standalone
+async function flattenDisk(name) {
+    if (!confirm('Flatten "' + name + '"?\n\nThis will merge the backing chain into a standalone disk.\nThe disk will become independent (larger file, no longer linked).')) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Flattening ' + name + '...';
+    try {
+        var response = await apiFetch('/api/disk/flatten', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            loadDiskList();
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// Toggle template lock on a disk
+async function toggleTemplate(name, lock) {
+    var action = lock ? 'lock as template' : 'unlock template';
+    if (!confirm((lock ? 'Lock' : 'Unlock') + ' "' + name + '" as template?\n\n' +
+        (lock ? 'Template disks cannot be deleted or resized while locked.' : 'This will allow deletion and modification.'))) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = (lock ? 'Locking' : 'Unlocking') + ' ' + name + '...';
+    try {
+        var response = await apiFetch('/api/disk/set-template', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, is_template: lock ? '1' : '0' }),
         });
         var data = await safeJson(response);
         if (data.success) {

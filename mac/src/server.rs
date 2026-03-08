@@ -1131,6 +1131,10 @@ async fn list_disks_handler() -> HttpResponse {
                     let base = fname.trim_end_matches(".qcow2");
                     if !base.is_empty() && !db_names.contains(base) {
                         let _ = crate::db::insert_disk(base, "");
+                        // Detect backing file from qcow2 header and save to DB
+                        if let Ok(Some(backing)) = operations::get_disk_backing_info(base) {
+                            let _ = crate::db::set_disk_backing(base, &backing);
+                        }
                     }
                 }
             }
@@ -1143,12 +1147,16 @@ async fn list_disks_handler() -> HttpResponse {
                 // Get actual file size from filesystem
                 let file_path = format!("{}/{}.qcow2", disk_path, d.name);
                 let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+                let clone_count = crate::db::count_linked_clones(&d.name).unwrap_or(0);
                 serde_json::json!({
                     "name": d.name,
                     "filename": format!("{}.qcow2", d.name),
                     "disk_size": d.size,
                     "size": file_size,
                     "owner": d.owner,
+                    "backing_file": d.backing_file,
+                    "is_template": d.is_template,
+                    "clone_count": clone_count,
                 })
             }).collect();
             HttpResponse::Ok().json(result)
@@ -1197,6 +1205,30 @@ async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse
                 return HttpResponse::BadRequest().json(ApiResponse {
                     success: false,
                     message: format!("Disk '{}' is assigned to VM '{}'. Remove it from the VM first.", name, d.owner),
+                    output: None,
+                });
+            }
+        }
+    }
+
+    // Check if disk has linked clones depending on it
+    if let Ok(clone_count) = crate::db::count_linked_clones(name) {
+        if clone_count > 0 {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: format!("Cannot delete '{}': {} linked clone(s) depend on it. Flatten or delete them first.", name, clone_count),
+                output: None,
+            });
+        }
+    }
+
+    // Check if disk is a locked template
+    if let Ok(disks) = crate::db::list_disks() {
+        for d in &disks {
+            if d.name == name && d.is_template == "1" {
+                return HttpResponse::BadRequest().json(ApiResponse {
+                    success: false,
+                    message: format!("Disk '{}' is locked as a template. Unset template first.", name),
                     output: None,
                 });
             }
@@ -1282,23 +1314,37 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
         });
     }
 
-    // Copy file (blocking)
+    // Linked clone (default) or full copy
+    let linked = body.get("linked").and_then(|v| v.as_bool()).unwrap_or(true);
+
     let src = src_file.clone();
     let dst = dst_file.clone();
     let nn = new_name.clone();
+    let sn = source.clone();
     let result = web::block(move || {
-        std::fs::copy(&src, &dst)
-            .map_err(|e| format!("Copy failed: {}", e))?;
-        // Get file size for DB
-        let size = std::fs::metadata(&dst)
-            .map(|m| {
-                let mb = m.len() / 1024 / 1024;
-                if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) }
-            })
-            .unwrap_or_else(|_| "0".into());
-        crate::db::insert_disk(&nn, &size)
-            .map_err(|e| format!("DB insert error: {}", e))?;
-        Ok::<String, String>(format!("Cloned '{}' -> '{}'", src, dst))
+        if linked {
+            // Linked clone: qemu-img create -b source -F qcow2 dest
+            let qemu_img = get_conf("qemu_img_path");
+            crate::ssh::run_cmd(&qemu_img, &[
+                "create", "-f", "qcow2", "-b", &src, "-F", "qcow2", &dst
+            ]).map_err(|e| format!("Linked clone failed: {}", e))?;
+            crate::db::insert_disk_with_backing(&nn, "", &sn)
+                .map_err(|e| format!("DB insert error: {}", e))?;
+            Ok::<String, String>(format!("Linked clone '{}' -> '{}' (backing: {})", sn, nn, sn))
+        } else {
+            // Full copy (legacy behavior)
+            std::fs::copy(&src, &dst)
+                .map_err(|e| format!("Copy failed: {}", e))?;
+            let size = std::fs::metadata(&dst)
+                .map(|m| {
+                    let mb = m.len() / 1024 / 1024;
+                    if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) }
+                })
+                .unwrap_or_else(|_| "0".into());
+            crate::db::insert_disk(&nn, &size)
+                .map_err(|e| format!("DB insert error: {}", e))?;
+            Ok::<String, String>(format!("Full copy '{}' -> '{}'", sn, nn))
+        }
     })
     .await;
 
@@ -1317,6 +1363,89 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
             success: false,
             message: e.to_string(),
             output: None,
+        }),
+    }
+}
+
+async fn flatten_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false, message: "Missing 'name' field".into(), output: None,
+            });
+        }
+    };
+    if name.contains('/') || name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Invalid disk name".into(), output: None,
+        });
+    }
+
+    // Must not be in use by a running VM
+    if let Err(e) = operations::check_disk_not_in_use(&name) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: e, output: None,
+        });
+    }
+
+    let disk_path = get_conf("disk_path");
+    let src = format!("{}/{}.qcow2", disk_path, name);
+    let tmp = format!("{}/{}_flatten_tmp.qcow2", disk_path, name);
+    let nn = name.clone();
+
+    let result = web::block(move || {
+        // Convert (flatten) to temp file
+        let qemu_img = get_conf("qemu_img_path");
+        crate::ssh::run_cmd(&qemu_img, &["convert", "-O", "qcow2", &src, &tmp])
+            .map_err(|e| format!("Flatten failed: {}", e))?;
+        // Replace original
+        std::fs::rename(&tmp, &src)
+            .map_err(|e| format!("Rename failed: {}", e))?;
+        // Update DB: clear backing_file
+        let _ = crate::db::set_disk_backing(&nn, "");
+        // Update size in DB
+        if let Ok(meta) = std::fs::metadata(&src) {
+            let mb = meta.len() / 1024 / 1024;
+            let size = if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) };
+            let _ = crate::db::update_disk_size(&nn, &size);
+        }
+        Ok::<String, String>(format!("Flattened '{}'", nn))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse {
+            success: true, message: format!("Disk '{}' flattened to standalone", name), output: Some(msg),
+        }),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e.to_string(), output: None,
+        }),
+    }
+}
+
+async fn set_template_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false, message: "Missing 'name' field".into(), output: None,
+            });
+        }
+    };
+    let is_template = body.get("is_template").and_then(|v| v.as_str()).unwrap_or("0");
+
+    match crate::db::set_disk_template(name, is_template) {
+        Ok(()) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Disk '{}' template = {}", name, if is_template == "1" { "locked" } else { "unlocked" }),
+            output: None,
+        }),
+        Err(e) => HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: e, output: None,
         }),
     }
 }
@@ -1829,17 +1958,53 @@ async fn export_vm_handler(
         zip.write_all(meta_json.as_bytes())
             .map_err(|e| format!("ZIP write error: {}", e))?;
 
-        // Write each disk file into disks/ folder (streaming, not loading all into memory)
+        // Write each disk file into disks/ folder
+        // For linked clones, auto-flatten to standalone before adding to ZIP
+        let qemu_img = get_conf("qemu_img_path");
+        let mut tmp_flattened: Vec<String> = Vec::new();
+
         for disk_name in &config_disk_names {
             let qcow2_path = format!("{}/{}.qcow2", dp, disk_name);
-            if std::path::Path::new(&qcow2_path).exists() {
-                zip.start_file(format!("disks/{}.qcow2", disk_name), options)
-                    .map_err(|e| format!("ZIP error: {}", e))?;
-                let mut disk_file = std::fs::File::open(&qcow2_path)
-                    .map_err(|e| format!("Failed to read disk {}: {}", disk_name, e))?;
-                std::io::copy(&mut disk_file, &mut zip)
-                    .map_err(|e| format!("ZIP write error for {}: {}", disk_name, e))?;
+            if !std::path::Path::new(&qcow2_path).exists() {
+                continue;
             }
+
+            // Check if this disk has a backing file (linked clone)
+            let has_backing = crate::operations::get_disk_backing_info(disk_name)
+                .unwrap_or(None)
+                .is_some();
+
+            let source_path = if has_backing {
+                // Flatten to a temp file for export
+                let tmp_path = format!("{}/{}_export_flat_{}.qcow2", dp, disk_name, std::process::id());
+                let result = crate::ssh::run_cmd(
+                    &qemu_img,
+                    &["convert", "-O", "qcow2", &qcow2_path, &tmp_path],
+                );
+                if let Err(e) = result {
+                    // Clean up any temp files created so far
+                    for p in &tmp_flattened {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return Err(format!("Failed to flatten linked clone {}: {}", disk_name, e));
+                }
+                tmp_flattened.push(tmp_path.clone());
+                tmp_path
+            } else {
+                qcow2_path.clone()
+            };
+
+            zip.start_file(format!("disks/{}.qcow2", disk_name), options)
+                .map_err(|e| format!("ZIP error: {}", e))?;
+            let mut disk_file = std::fs::File::open(&source_path)
+                .map_err(|e| format!("Failed to read disk {}: {}", disk_name, e))?;
+            std::io::copy(&mut disk_file, &mut zip)
+                .map_err(|e| format!("ZIP write error for {}: {}", disk_name, e))?;
+        }
+
+        // Clean up temp flattened files
+        for p in &tmp_flattened {
+            let _ = std::fs::remove_file(p);
         }
 
         zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
@@ -3341,6 +3506,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/disk/delete", web::post().to(delete_disk_handler))
             .route("/api/disk/clone", web::post().to(clone_disk_handler))
             .route("/api/disk/resize", web::post().to(resize_disk_handler))
+            .route("/api/disk/flatten", web::post().to(flatten_disk_handler))
+            .route("/api/disk/set-template", web::post().to(set_template_handler))
             // Disk file editor routes
             .route("/api/disk/edit-supported", web::get().to(disk_edit_supported_handler))
             .route("/api/disk/mount", web::post().to(mount_disk_handler))
