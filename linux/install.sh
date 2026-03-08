@@ -116,6 +116,9 @@ else
     success "No running vm_ctl processes found"
 fi
 
+# Delete old API key so fresh install starts without auth
+rm -f "${PCTL_PATH}/.api_key"
+
 echo ""
 
 # --- Step 2: Build from source ---

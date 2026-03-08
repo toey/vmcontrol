@@ -87,11 +87,20 @@ where
             if path.starts_with("/api/vnc/resolve/") {
                 return svc.call(req).await;
             }
-            // Allow /api/apikey/generate without auth ONLY when no key exists yet (first-time setup).
-            // Once a key is configured, generating a new one requires authentication.
-            // Note: api_key is non-empty here (empty case returns early above).
-            // So this block is intentionally unreachable — generate always requires auth
-            // when a key is set. This comment documents the security rationale.
+            // Allow /api/apikey/generate without auth when .api_key file has been
+            // deleted (e.g., by install.sh before rebuild). Even if the server still
+            // has an old key in memory, the missing file signals a fresh install.
+            // Only bypasses if the key did NOT come from VMCONTROL_API_KEY env var.
+            if path == "/api/apikey/generate"
+                && req.method() == actix_web::http::Method::POST
+                && std::env::var("VMCONTROL_API_KEY").unwrap_or_default().is_empty()
+            {
+                let pctl_path = crate::config::get_conf("pctl_path");
+                let key_file = format!("{}/.api_key", pctl_path);
+                if !std::path::Path::new(&key_file).exists() {
+                    return svc.call(req).await;
+                }
+            }
 
             // Check X-API-Key header
             let provided = req.headers()
