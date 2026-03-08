@@ -26,6 +26,8 @@ fn defaults() -> HashMap<String, String> {
     m.insert("qemu_machine".into(), "pc".into());
     m.insert("qemu_aarch64_path".into(), "/opt/homebrew/bin/qemu-system-aarch64".into());
     m.insert("edk2_aarch64_bios".into(), "/opt/homebrew/share/qemu/edk2-aarch64-code.fd".into());
+    m.insert("edk2_aarch64_secure_code".into(), "/opt/homebrew/share/qemu/AAVMF_CODE.secboot.fd".into());
+    m.insert("edk2_aarch64_secure_vars".into(), "/opt/homebrew/share/qemu/AAVMF_VARS.ms.fd".into());
     m.insert("ovs_vsctl_path".into(), "/opt/homebrew/bin/ovs-vsctl".into());
     m.insert("internal_mcast_port".into(), "11111".into());
     m.insert("bridge_sudo".into(), "true".into());

@@ -339,25 +339,61 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.extend([
             "-nodefaults", "-boot", "d",
         ].map(String::from));
-        // UEFI firmware required for aarch64 — use pflash for persistent NVRAM
-        // (Windows needs writable UEFI variables for boot entries)
-        let bios = get_conf("edk2_aarch64_bios");
-        if !std::path::Path::new(&bios).exists() {
-            return Err(format!("aarch64 requires UEFI firmware but '{}' not found. Install EDK2 or set edk2_aarch64_bios in config.", bios));
-        }
-        // Per-VM NVRAM file (copy from template if not exists)
+
+        // aarch64 Windows: use Secure Boot firmware (Debian AAVMF with Microsoft keys)
+        // aarch64 Linux: use standard edk2 firmware
+        let use_aarch64_secboot = is_windows && {
+            let sc = get_conf_or("edk2_aarch64_secure_code",
+                "/opt/homebrew/share/qemu/AAVMF_CODE.secboot.fd");
+            std::path::Path::new(&sc).exists()
+        };
+
+        let bios;
         let nvram_file = format!("{}/{}_efivars.fd", pctl_path, ismac);
-        if !std::path::Path::new(&nvram_file).exists() {
-            // Try to copy from edk2-arm-vars.fd template
-            let vars_template = get_conf("edk2_aarch64_bios")
-                .replace("aarch64-code.fd", "arm-vars.fd");
-            if std::path::Path::new(&vars_template).exists() {
-                let _ = std::fs::copy(&vars_template, &nvram_file);
-            } else {
-                // Create empty 64MB vars file
-                let _ = std::fs::write(&nvram_file, vec![0u8; 64 * 1024 * 1024]);
+
+        if use_aarch64_secboot {
+            // Secure Boot firmware from Debian qemu-efi-aarch64 package
+            let secure_code = get_conf_or("edk2_aarch64_secure_code",
+                "/opt/homebrew/share/qemu/AAVMF_CODE.secboot.fd");
+            let secure_vars = get_conf_or("edk2_aarch64_secure_vars",
+                "/opt/homebrew/share/qemu/AAVMF_VARS.ms.fd");
+            bios = secure_code;
+            // Copy NVRAM template with pre-enrolled Microsoft Secure Boot keys
+            if !std::path::Path::new(&nvram_file).exists() {
+                if std::path::Path::new(&secure_vars).exists() {
+                    let _ = std::fs::copy(&secure_vars, &nvram_file);
+                } else {
+                    // Create empty 64MB vars file as fallback
+                    let _ = std::fs::write(&nvram_file, vec![0u8; 64 * 1024 * 1024]);
+                }
+            }
+            output_log.push_str("Secure Boot: ENABLED (AAVMF Debian aarch64 firmware)\n");
+        } else {
+            // Standard non-secure firmware
+            bios = get_conf("edk2_aarch64_bios");
+            if !std::path::Path::new(&bios).exists() {
+                return Err(format!("aarch64 requires UEFI firmware but '{}' not found. Install EDK2 or set edk2_aarch64_bios in config.", bios));
+            }
+            // Per-VM NVRAM file (copy from template if not exists)
+            if !std::path::Path::new(&nvram_file).exists() {
+                // Try to copy from edk2-arm-vars.fd template
+                let vars_template = get_conf("edk2_aarch64_bios")
+                    .replace("aarch64-code.fd", "arm-vars.fd");
+                if std::path::Path::new(&vars_template).exists() {
+                    let _ = std::fs::copy(&vars_template, &nvram_file);
+                } else {
+                    // Create empty 64MB vars file
+                    let _ = std::fs::write(&nvram_file, vec![0u8; 64 * 1024 * 1024]);
+                }
+            }
+            if is_windows {
+                output_log.push_str(&format!(
+                    "Secure Boot: DISABLED (aarch64 secure firmware not found)\n"));
+                output_log.push_str("  Install AAVMF_CODE.secboot.fd + AAVMF_VARS.ms.fd for Secure Boot\n");
+                output_log.push_str("  Use Win11 Bypass button to skip Secure Boot check\n");
             }
         }
+
         // pflash0 = firmware code (read-only), pflash1 = NVRAM (read-write)
         qemu_args.push("-drive".into());
         qemu_args.push(format!("if=pflash,format=raw,readonly=on,file={}", bios));
@@ -388,6 +424,42 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.extend([
             "-nodefaults", "-vga", "std", "-boot", "d",
         ].map(String::from));
+
+        // x86_64 Windows: enable UEFI Secure Boot via pflash if firmware available
+        if is_windows {
+            let secure_code = get_conf_or("edk2_x86_secure_code",
+                "/opt/homebrew/share/qemu/edk2-x86_64-secure-code.fd");
+            let vars_template = get_conf_or("edk2_x86_vars",
+                "/opt/homebrew/share/qemu/edk2-i386-vars.fd");
+
+            if std::path::Path::new(&secure_code).exists() {
+                // Per-VM NVRAM file (copy from template if not exists)
+                let nvram_file = format!("{}/{}_efivars.fd", pctl_path, ismac);
+                if !std::path::Path::new(&nvram_file).exists() {
+                    if std::path::Path::new(&vars_template).exists() {
+                        let _ = std::fs::copy(&vars_template, &nvram_file);
+                    } else {
+                        let _ = std::fs::write(&nvram_file, vec![0u8; 256 * 1024]);
+                    }
+                }
+                // pflash0 = secure firmware code (read-only)
+                // pflash1 = NVRAM with Secure Boot keys (read-write)
+                qemu_args.push("-drive".into());
+                qemu_args.push(format!(
+                    "if=pflash,format=raw,readonly=on,file={}", secure_code));
+                qemu_args.push("-drive".into());
+                qemu_args.push(format!(
+                    "if=pflash,format=raw,file={}", nvram_file));
+                // SMM required for Secure Boot on x86_64
+                qemu_args.push("-global".into());
+                qemu_args.push("driver=cfi.pflash01,property=secure,value=on".into());
+                output_log.push_str("Secure Boot: ENABLED (edk2 secure pflash)\n");
+            } else {
+                output_log.push_str(&format!(
+                    "Secure Boot: DISABLED (firmware not found: {})\n", secure_code));
+                output_log.push_str("  Use Win11 Bypass button to skip Secure Boot check\n");
+            }
+        }
     }
 
     // Windows localtime (use RTC base=localtime instead of deprecated -localtime)
@@ -775,10 +847,19 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     }
 
     // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
+    // Windows x86_64 with Secure Boot needs q35 + smm=on
+    let use_secureboot = is_windows && !is_aarch64 && {
+        let sc = get_conf_or("edk2_x86_secure_code",
+            "/opt/homebrew/share/qemu/edk2-x86_64-secure-code.fd");
+        std::path::Path::new(&sc).exists()
+    };
     qemu_args.push("-machine".into());
     if is_aarch64 {
         // virt machine: highmem=on for PCI MMIO above 4GB (required by Windows ARM64)
         qemu_args.push(format!("type={},accel={},highmem=on", qemu_machine, qemu_accel));
+    } else if use_secureboot {
+        // q35 + smm=on required for UEFI Secure Boot
+        qemu_args.push(format!("type=q35,accel={},smm=on", qemu_accel));
     } else {
         qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
     }
