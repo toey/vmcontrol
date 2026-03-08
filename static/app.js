@@ -1157,65 +1157,85 @@ function onPciSelectChange(sel) {
 // ======== Disk Management ========
 
 // Load disk list from API and cache it
+function renderDiskRow(d) {
+    var safeName = d.name.replace(/'/g, "\\'");
+    var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
+    var backingBadge = d.backing_file ? ' <small style="color:#d29922;">[linked: ' + escapeHtml(d.backing_file) + ']</small>' : '';
+    var cloneCountBadge = (d.clone_count && d.clone_count > 0) ? ' <small style="color:#f0883e;">[' + d.clone_count + ' clone' + (d.clone_count > 1 ? 's' : '') + ']</small>' : '';
+    var isTemplate = d.is_template === '1';
+    var hasClones = d.clone_count && d.clone_count > 0;
+    var isLinked = !!d.backing_file;
+
+    var exportBtn = '<span class="export-dropdown">' +
+        '<button class="btn-export" onclick="this.parentElement.classList.toggle(\'open\')" title="Export / Download">Export ▾</button>' +
+        '<span class="export-dropdown-content">' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">qcow2 (original)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">VMDK (VMware)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">VDI (VirtualBox)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">VHDX (Hyper-V)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">Raw image</a>' +
+        '</span></span>';
+    var resizeBtn = isTemplate ? '' : '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
+    var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
+    var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">Clone Template</button>';
+    var flattenBtn = isLinked ? '<button class="btn-clone" onclick="flattenDisk(\'' + safeName + '\')" title="Merge backing chain into standalone disk" style="background:#7c3aed;color:#fff;">Flatten</button>' : '';
+    var templateToggleBtn = '<button class="btn-clone" onclick="toggleTemplate(\'' + safeName + '\', ' + (isTemplate ? 'false' : 'true') + ')" title="' + (isTemplate ? 'Unlock template' : 'Lock as template') + '" style="background:' + (isTemplate ? '#da3633' : '#a371f7') + ';color:#fff;">' + (isTemplate ? 'Unlock' : 'Lock') + '</button>';
+    var editFilesBtn = '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>';
+    var deleteBtn = (d.owner || isTemplate || hasClones) ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
+    var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
+        '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + backingBadge + cloneCountBadge + '</span>' +
+        '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + flattenBtn + ' ' + templateToggleBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
+        '</div>';
+}
+
+function renderDiskSummary(diskArr, label) {
+    var totalBytes = 0;
+    diskArr.forEach(function(d) { totalBytes += (d.size || 0); });
+    return '<div style="padding:8px 0 4px 0;border-top:2px solid #30363d;margin-top:4px;display:flex;justify-content:space-between;align-items:center;">' +
+        '<span style="color:#8b949e;font-size:13px;">' + label + ': <strong style="color:#c9d1d9;">' + diskArr.length + '</strong> disks</span>' +
+        '<span style="color:#8b949e;font-size:13px;">Size: <strong style="color:#f0883e;">' + formatSize(totalBytes) + '</strong></span>' +
+        '</div>';
+}
+
 async function loadDiskList() {
     try {
         var response = await apiFetch('/api/disk/list');
         var disks = await safeJson(response);
         window._diskList = disks;
-        // Render file list in Create Disk tab
-        var listDiv = document.getElementById('disk-file-list');
-        if (!listDiv) return;
-        if (disks.length === 0) {
-            listDiv.innerHTML = '<em>No disk files</em>';
-        } else {
-            listDiv.innerHTML = disks.map(function(d) {
-                var safeName = d.name.replace(/'/g, "\\'");
-                var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
-                // Backing file info badge
-                var backingBadge = d.backing_file ? ' <small style="color:#d29922;">[linked: ' + escapeHtml(d.backing_file) + ']</small>' : '';
-                // Clone count badge
-                var cloneCountBadge = (d.clone_count && d.clone_count > 0) ? ' <small style="color:#f0883e;">[' + d.clone_count + ' clone' + (d.clone_count > 1 ? 's' : '') + ']</small>' : '';
-                // Template badge
-                var templateBadge = (d.is_template === '1') ? ' <small style="color:#a371f7;font-weight:bold;">[TEMPLATE]</small>' : '';
-                var isTemplate = d.is_template === '1';
-                var hasClones = d.clone_count && d.clone_count > 0;
-                var isLinked = !!d.backing_file;
 
-                var exportBtn = '<span class="export-dropdown">' +
-                    '<button class="btn-export" onclick="this.parentElement.classList.toggle(\'open\')" title="Export / Download">Export ▾</button>' +
-                    '<span class="export-dropdown-content">' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">qcow2 (original)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">VMDK (VMware)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">VDI (VirtualBox)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">VHDX (Hyper-V)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">Raw image</a>' +
-                    '</span></span>';
-                // Hide resize for templates
-                var resizeBtn = isTemplate ? '' : '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
-                var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
-                var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">Clone Template</button>';
-                // Flatten button for linked clones
-                var flattenBtn = isLinked ? '<button class="btn-clone" onclick="flattenDisk(\'' + safeName + '\')" title="Merge backing chain into standalone disk" style="background:#7c3aed;color:#fff;">Flatten</button>' : '';
-                // Template toggle button
-                var templateToggleBtn = '<button class="btn-clone" onclick="toggleTemplate(\'' + safeName + '\', ' + (isTemplate ? 'false' : 'true') + ')" title="' + (isTemplate ? 'Unlock template' : 'Lock as template') + '" style="background:' + (isTemplate ? '#da3633' : '#a371f7') + ';color:#fff;">' + (isTemplate ? 'Unlock' : 'Lock') + '</button>';
-                var editFilesBtn = '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>';
-                // Hide delete for templates, disks with clones, or disks in use
-                var deleteBtn = (d.owner || isTemplate || hasClones) ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
-                var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
-                return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + backingBadge + cloneCountBadge + templateBadge + '</span>' +
-                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + flattenBtn + ' ' + templateToggleBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
-                    '</div>';
-            }).join('');
-            // Calculate and display total disk usage
-            var totalBytes = 0;
-            var diskCount = disks.length;
-            disks.forEach(function(d) { totalBytes += (d.size || 0); });
-            listDiv.innerHTML += '<div style="padding:8px 0 4px 0;border-top:2px solid #30363d;margin-top:4px;display:flex;justify-content:space-between;align-items:center;">' +
-                '<span style="color:#8b949e;font-size:13px;">Total: <strong style="color:#c9d1d9;">' + diskCount + '</strong> disks</span>' +
-                '<span style="color:#8b949e;font-size:13px;">Total size: <strong style="color:#f0883e;">' + formatSize(totalBytes) + '</strong></span>' +
-                '</div>';
+        var listDiv = document.getElementById('disk-file-list');
+        var tplDiv = document.getElementById('disk-template-list');
+
+        // Separate templates (name starts with "template-" OR is_template=1 OR has clones) from regular disks
+        var templates = [];
+        var regular = [];
+        disks.forEach(function(d) {
+            if (d.name.indexOf('template-') === 0 || d.is_template === '1' || (d.clone_count && d.clone_count > 0)) {
+                templates.push(d);
+            } else {
+                regular.push(d);
+            }
+        });
+
+        // Render template list
+        if (tplDiv) {
+            if (templates.length === 0) {
+                tplDiv.innerHTML = '<em style="color:#8b949e;">No template disks</em>';
+            } else {
+                tplDiv.innerHTML = templates.map(renderDiskRow).join('') + renderDiskSummary(templates, 'Templates');
+            }
         }
+
+        // Render regular disk list
+        if (listDiv) {
+            if (regular.length === 0) {
+                listDiv.innerHTML = '<em style="color:#8b949e;">No disk files</em>';
+            } else {
+                listDiv.innerHTML = regular.map(renderDiskRow).join('') + renderDiskSummary(regular, 'Disks');
+            }
+        }
+
         // Refresh any disk selects on the page
         refreshAllDiskSelects();
     } catch (err) {
