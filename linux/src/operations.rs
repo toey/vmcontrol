@@ -1070,10 +1070,18 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         output_log.push_str("cloud-init: disabled\n");
     }
 
+    // USB xHCI controller for x86_64 (aarch64 already has one from above)
+    // Must be BEFORE usb-storage CD-ROM devices so the USB bus exists
+    if !is_aarch64 {
+        qemu_args.push("-device".into());
+        qemu_args.push("qemu-xhci,id=xhci".into());
+        qemu_args.push("-device".into());
+        qemu_args.push("usb-tablet,bus=xhci.0".into());
+    }
+
     // CDROM — 4 named drives "cd0"–"cd3" for runtime ISO mount/unmount via monitor
     // bootindex=0 on cd0 so UEFI/BIOS tries CD first, then falls through to disk
-    // aarch64: use usb-storage (more compatible with Windows ARM64 bootloader)
-    // x86_64:  use scsi-cd (traditional approach)
+    // All platforms use usb-storage (no extra drivers needed)
     //
     // For Windows VMs: auto-mount virtio-win ISO on cd3 if available
     // (provides virtio drivers for network, balloon, etc. during installation)
@@ -1122,14 +1130,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         }
     }
 
-    // USB tablet (for mouse) — aarch64 already has xhci+kbd+tablet from above
-    if !is_aarch64 {
-        // Use xHCI controller (supports many USB devices: 4 CD-ROMs + tablet)
-        qemu_args.push("-device".into());
-        qemu_args.push("qemu-xhci,id=xhci".into());
-        qemu_args.push("-device".into());
-        qemu_args.push("usb-tablet,bus=xhci.0".into());
-    }
+    // (USB xHCI + tablet already added before CD-ROM loop above)
 
     // Monitor socket
     qemu_args.push("-monitor".into());
