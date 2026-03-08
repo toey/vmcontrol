@@ -87,9 +87,7 @@ where
             if path.starts_with("/api/vnc/resolve/") {
                 return svc.call(req).await;
             }
-            if path == "/api/apikey/generate" {
-                return svc.call(req).await;
-            }
+            // /api/apikey/generate requires auth (do NOT skip)
 
             // Check X-API-Key header
             let provided = req.headers()
@@ -801,11 +799,15 @@ async fn vnc_token_handler(
         if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
             let _ = f.read_exact(&mut bytes);
         } else {
+            // Fallback: mix timestamp + pid + pointer address for entropy
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            bytes[..16].copy_from_slice(&ts.to_le_bytes());
+            let pid = std::process::id() as u128;
+            let mix = ts ^ (pid << 64) ^ ((&bytes as *const _ as u128) << 32);
+            bytes[..16].copy_from_slice(&mix.to_le_bytes());
+            bytes[16..].copy_from_slice(&ts.to_le_bytes()[..8]);
         }
         bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
     };
@@ -3029,11 +3031,18 @@ async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResp
         *key = new_key.clone();
     }
 
-    // Save to .api_key file
+    // Save to .api_key file with restrictive permissions
     let pctl_path = get_conf("pctl_path");
     let key_file = format!("{}/.api_key", pctl_path);
     if let Err(e) = std::fs::write(&key_file, &new_key) {
         eprintln!("Failed to save API key to {}: {}", key_file, e);
+    } else {
+        // Set permissions to owner-only (0600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600));
+        }
     }
 
     // Also update env var for this process

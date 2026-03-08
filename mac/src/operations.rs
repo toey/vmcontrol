@@ -1830,6 +1830,7 @@ pub fn rename_vm(old_name: &str, new_name: &str) -> Result<String, String> {
     if old_name == new_name {
         return Ok("No rename needed".into());
     }
+    validate_vm_name(old_name)?;
     validate_vm_name(new_name)?;
 
     // Check old VM exists

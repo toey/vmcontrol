@@ -86,14 +86,27 @@ fn generate_userdata_base(config: &MdsConfig) -> String {
     ud.push_str("  - qemu-guest-agent\n");
     ud.push_str("runcmd:\n");
     ud.push_str("  - systemctl enable --now qemu-guest-agent\n");
+    // Sanitize root_password: strip newlines and YAML-dangerous chars
+    let safe_password = config.root_password
+        .replace('\n', "")
+        .replace('\r', "")
+        .replace(':', "");
     ud.push_str("chpasswd:\n");
     ud.push_str("  list: |\n");
-    ud.push_str(&format!("    root:{}\n", config.root_password));
+    ud.push_str(&format!("    root:{}\n", safe_password));
     ud.push_str("  expire: False\n");
 
     if !config.ssh_pubkey.is_empty() {
-        ud.push_str("ssh_authorized_keys:\n");
-        ud.push_str(&format!("  - {}\n", config.ssh_pubkey));
+        // Sanitize ssh_pubkey: must be single line
+        let safe_key = config.ssh_pubkey
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !safe_key.is_empty() {
+            ud.push_str("ssh_authorized_keys:\n");
+            ud.push_str(&format!("  - {}\n", safe_key));
+        }
     }
 
     ud

@@ -183,6 +183,12 @@
         window._rfb = null;  // expose for debugging/paste
         window._vncSmac = null;  // resolved VM name (from token or smac param)
 
+        // HTML escaping helper for preventing XSS
+        function escapeHtml(s) {
+            if (!s) return '';
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+        }
+
         // API key helper — read from localStorage (shared with main app)
         function getApiKey() {
             return localStorage.getItem('vmcontrol_api_key') || '';
@@ -621,7 +627,7 @@
                     var errMsg = 'HTTP ' + xhr.status;
                     try { errMsg = JSON.parse(xhr.responseText).message || errMsg; } catch(e) {}
                     document.getElementById('sendfiles-status').innerHTML =
-                        '<span style="color:#f85149;">Error: ' + errMsg + '</span>';
+                        '<span style="color:#f85149;">Error: ' + escapeHtml(errMsg) + '</span>';
                     return;
                 }
                 try {
@@ -629,16 +635,16 @@
                     if (data.success) {
                         document.getElementById('sendfiles-progress').value = 100;
                         document.getElementById('sendfiles-status').innerHTML =
-                            '<span style="color:#3fb950;">' + data.message + '</span>';
+                            '<span style="color:#3fb950;">' + escapeHtml(data.message) + '</span>';
                         window._sendfilesIso = { drive: data.drive, iso_name: data.iso_name };
                         loadBlockInfo();
                     } else {
                         document.getElementById('sendfiles-status').innerHTML =
-                            '<span style="color:#f85149;">Error: ' + data.message + '</span>';
+                            '<span style="color:#f85149;">Error: ' + escapeHtml(data.message) + '</span>';
                     }
                 } catch (e) {
                     document.getElementById('sendfiles-status').innerHTML =
-                        '<span style="color:#f85149;">Error: ' + xhr.responseText + '</span>';
+                        '<span style="color:#f85149;">Error: ' + escapeHtml(xhr.responseText) + '</span>';
                 }
             };
 
@@ -700,7 +706,7 @@
                 } catch (err) {
                     document.getElementById('sendfiles-send-btn').disabled = false;
                     document.getElementById('sendfiles-status').innerHTML =
-                        '<span style="color:#f85149;">Error on ' + file.name + ': ' + err.message + '</span>';
+                        '<span style="color:#f85149;">Error on ' + escapeHtml(file.name) + ': ' + escapeHtml(err.message) + '</span>';
                     return;
                 }
             }
@@ -778,8 +784,8 @@
             var actionSpan = document.getElementById('cd-drive-action');
             var info = (window._blockInfo && window._blockInfo[drive]) || { mounted: false, file: '' };
             if (info.mounted) {
-                actionSpan.innerHTML = '<span class="cd-file" title="' + info.file + '">' + info.file + '</span> ' +
-                    '<button class="btn-unmount" onclick="doUnmountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Unmount</button>';
+                actionSpan.innerHTML = '<span class="cd-file" title="' + escapeHtml(info.file) + '">' + escapeHtml(info.file) + '</span> ' +
+                    '<button class="btn-unmount" onclick="doUnmountDrive(\'' + escapeHtml(drive) + '\')" style="font-size:11px;padding:2px 8px;">Unmount</button>';
             } else {
                 actionSpan.innerHTML = '<select id="iso-sel-active" style="min-width:120px;font-size:12px;padding:2px 4px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:3px;">' + isoOptionsHtml() + '</select> ' +
                     '<button class="btn-action" onclick="doMountDrive(\'' + drive + '\')" style="font-size:11px;padding:2px 8px;">Mount</button>';
@@ -907,9 +913,7 @@
         var token = params.get('token');
         var smac = params.get('smac');
 
-        if (params.get('host')) {
-            document.getElementById('vnc-host').textContent = params.get('host');
-        }
+        // Note: host is determined server-side, not from URL parameters (security)
 
         if (token) {
             // --- Token flow: resolve one-time token (no API key needed) ---

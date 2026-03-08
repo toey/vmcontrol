@@ -173,6 +173,12 @@ function escapeHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+// Escape for safe use inside HTML attribute values (single-quoted onclick etc.)
+function escapeAttr(str) {
+    if (str == null) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/\\/g,'\\\\');
+}
+
 // OS Templates — loaded from DB, keyed by template key
 // { 'ubuntu-server': { vcpus: '2', memory: '2048', is_windows: '0', arch: 'x86_64', image: 'ubuntu-server', name: 'Ubuntu Server', id: 1 }, ... }
 var OS_TEMPLATES = { 'custom': null };
