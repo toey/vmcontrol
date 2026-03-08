@@ -110,6 +110,7 @@
         <button id="btn-alt-shift" onclick="doSendAltShift()" style="background:#f59e0b;color:#000;display:none;">Alt+Shift</button>
         <button id="btn-win11-bypass" onclick="doBypassTPM()" style="background:#ef4444;color:#fff;display:none;">Win11 Bypass</button>
         <button class="btn-action" onclick="doPaste()">Paste</button>
+        <button onclick="doSendFiles()" style="background:#059669;color:#fff;padding:5px 14px;border:none;border-radius:4px;font-size:13px;cursor:pointer;font-weight:600;">Send Files</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
 
@@ -119,12 +120,50 @@
             <h3 style="color:#c9d1d9;margin:0 0 12px 0;">Paste text into VM</h3>
             <textarea id="paste-text" rows="10" style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:10px;font-family:monospace;font-size:13px;resize:vertical;box-sizing:border-box;" placeholder="Paste or type text here... (supports multi-line)"></textarea>
             <div style="display:flex;gap:8px;margin-top:12px;align-items:center;">
-                <label style="color:#8b949e;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none;">
+                <label id="paste-vim-label" style="color:#8b949e;font-size:13px;cursor:pointer;display:flex;align-items:center;gap:4px;user-select:none;">
                     <input type="checkbox" id="paste-vim-mode"> Vim mode <span style="color:#6e7681;font-size:11px;">(auto :set paste)</span>
                 </label>
                 <span style="flex:1;"></span>
                 <button onclick="closePasteModal()" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:8px 16px;border-radius:6px;cursor:pointer;">Cancel</button>
                 <button onclick="executePaste()" style="background:#238636;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:bold;">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Send Files modal -->
+    <div id="sendfiles-modal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);z-index:9999;justify-content:center;align-items:center;">
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;max-width:600px;width:90%;">
+            <h3 style="color:#c9d1d9;margin:0 0 12px 0;">Send Files to VM</h3>
+            <div id="sendfiles-dropzone" style="border:2px dashed #30363d;border-radius:8px;padding:24px;text-align:center;margin-bottom:12px;cursor:pointer;"
+                 ondragover="event.preventDefault();this.style.borderColor='#58a6ff';"
+                 ondragleave="this.style.borderColor='#30363d';"
+                 ondrop="event.preventDefault();this.style.borderColor='#30363d';document.getElementById('sendfiles-input').files=event.dataTransfer.files;updateFileList();"
+                 onclick="document.getElementById('sendfiles-input').click();">
+                <p style="color:#8b949e;margin:0;">Drag &amp; drop files here, or click to browse</p>
+                <input type="file" id="sendfiles-input" multiple style="display:none;" onchange="updateFileList()">
+                <div id="sendfiles-filelist" style="color:#c9d1d9;font-size:12px;margin-top:8px;"></div>
+            </div>
+            <div style="margin-bottom:12px;">
+                <label style="color:#c9d1d9;display:block;margin-bottom:6px;font-weight:600;font-size:13px;">Transfer Method:</label>
+                <label style="color:#c9d1d9;display:block;cursor:pointer;margin-bottom:4px;font-size:13px;">
+                    <input type="radio" name="sendfiles-method" value="iso" id="sendfiles-method-iso" checked onchange="toggleGaOpts()">
+                    CD Drive (ISO) &mdash; works on all VMs
+                </label>
+                <label id="sendfiles-ga-label" style="color:#8b949e;display:block;cursor:pointer;font-size:13px;">
+                    <input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" disabled onchange="toggleGaOpts()">
+                    Direct (Guest Agent) &mdash; checking...
+                </label>
+            </div>
+            <div id="sendfiles-ga-opts" style="display:none;margin-bottom:12px;">
+                <label style="color:#8b949e;font-size:13px;">Target path in VM:</label>
+                <input type="text" id="sendfiles-ga-path" value="/tmp/"
+                    style="width:100%;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px;padding:6px 8px;font-family:monospace;font-size:13px;box-sizing:border-box;margin-top:4px;">
+            </div>
+            <progress id="sendfiles-progress" value="0" max="100" style="width:100%;height:8px;margin-bottom:8px;appearance:none;-webkit-appearance:none;border:none;background:#21262d;border-radius:4px;"></progress>
+            <div id="sendfiles-status" style="color:#8b949e;font-size:12px;min-height:18px;margin-bottom:12px;"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;">
+                <button onclick="closeSendFilesModal()" style="background:#21262d;color:#c9d1d9;border:1px solid #30363d;padding:8px 16px;border-radius:6px;cursor:pointer;">Cancel</button>
+                <button id="sendfiles-send-btn" onclick="executeSendFiles()" style="background:#238636;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-weight:bold;">Send</button>
             </div>
         </div>
     </div>
@@ -417,6 +456,204 @@
             }
         });
 
+        // ===== Send Files functions =====
+        window._isWindows = false;
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+            return (bytes / 1073741824).toFixed(1) + ' GB';
+        }
+
+        window.updateFileList = function() {
+            var files = document.getElementById('sendfiles-input').files;
+            var html = '';
+            var totalSize = 0;
+            for (var i = 0; i < files.length; i++) {
+                html += files[i].name + ' (' + formatBytes(files[i].size) + ')<br>';
+                totalSize += files[i].size;
+            }
+            if (files.length > 1) {
+                html += '<strong>Total: ' + formatBytes(totalSize) + '</strong>';
+            }
+            document.getElementById('sendfiles-filelist').innerHTML = html;
+        };
+
+        window.toggleGaOpts = function() {
+            var isGa = document.getElementById('sendfiles-method-ga').checked;
+            document.getElementById('sendfiles-ga-opts').style.display = isGa ? '' : 'none';
+        };
+
+        window.doSendFiles = async function() {
+            if (!window._vncSmac) { alert('No VM connected'); return; }
+            // Reset modal
+            document.getElementById('sendfiles-input').value = '';
+            document.getElementById('sendfiles-filelist').innerHTML = '';
+            document.getElementById('sendfiles-progress').value = 0;
+            document.getElementById('sendfiles-status').textContent = '';
+            document.getElementById('sendfiles-method-iso').checked = true;
+            document.getElementById('sendfiles-ga-opts').style.display = 'none';
+            document.getElementById('sendfiles-send-btn').disabled = false;
+            document.getElementById('sendfiles-ga-path').value = window._isWindows ? 'C:\\Users\\Public\\' : '/tmp/';
+            document.getElementById('sendfiles-modal').style.display = 'flex';
+
+            // Check guest agent availability
+            var gaRadio = document.getElementById('sendfiles-method-ga');
+            var gaLabel = document.getElementById('sendfiles-ga-label');
+            try {
+                var res = await apiFetch('/api/vm/guest-agent/' + encodeURIComponent(window._vncSmac));
+                var data = await res.json();
+                if (data.available) {
+                    gaRadio.disabled = false;
+                    gaLabel.style.color = '#3fb950';
+                    gaLabel.innerHTML = '<input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" onchange="toggleGaOpts()"> Direct (Guest Agent) &mdash; available';
+                } else {
+                    gaRadio.disabled = true;
+                    gaLabel.style.color = '#6e7681';
+                    var hint = window._isWindows
+                        ? 'not available &mdash; run <b>D:\\virtio-win-guest-tools.exe</b> or <b>D:\\guest-agent\\qemu-ga-x86_64.msi</b> in VM'
+                        : 'not available &mdash; run <b>apt install qemu-guest-agent</b> in VM';
+                    gaLabel.innerHTML = '<input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" disabled onchange="toggleGaOpts()"> Direct (Guest Agent) &mdash; ' + hint;
+                }
+            } catch (e) {
+                gaRadio.disabled = true;
+                gaLabel.style.color = '#6e7681';
+                var hintFail = window._isWindows
+                    ? 'check failed &mdash; run <b>D:\\virtio-win-guest-tools.exe</b> in VM'
+                    : 'check failed &mdash; run <b>apt install qemu-guest-agent</b> in VM';
+                gaLabel.innerHTML = '<input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" disabled onchange="toggleGaOpts()"> Direct (Guest Agent) &mdash; ' + hintFail;
+            }
+        };
+
+        window.closeSendFilesModal = function() {
+            document.getElementById('sendfiles-modal').style.display = 'none';
+        };
+
+        window.executeSendFiles = function() {
+            var method = document.querySelector('input[name="sendfiles-method"]:checked');
+            if (!method) return;
+            if (method.value === 'ga') {
+                executeSendFilesGA();
+            } else {
+                executeSendFilesISO();
+            }
+        };
+
+        function executeSendFilesISO() {
+            var files = document.getElementById('sendfiles-input').files;
+            if (!files || !files.length) { alert('Select at least one file'); return; }
+
+            var formData = new FormData();
+            for (var i = 0; i < files.length; i++) {
+                formData.append('files', files[i], files[i].name);
+            }
+
+            var smac = window._vncSmac;
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/vm/sendfiles/' + encodeURIComponent(smac));
+            var key = getApiKey();
+            if (key) xhr.setRequestHeader('X-API-Key', key);
+
+            document.getElementById('sendfiles-send-btn').disabled = true;
+
+            xhr.upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    var pct = Math.round((e.loaded / e.total) * 100);
+                    document.getElementById('sendfiles-progress').value = pct;
+                    document.getElementById('sendfiles-status').textContent =
+                        'Uploading... ' + pct + '% (' + formatBytes(e.loaded) + ' / ' + formatBytes(e.total) + ')';
+                }
+            };
+
+            xhr.onload = function() {
+                document.getElementById('sendfiles-send-btn').disabled = false;
+                try {
+                    var data = JSON.parse(xhr.responseText);
+                    if (data.success) {
+                        document.getElementById('sendfiles-progress').value = 100;
+                        document.getElementById('sendfiles-status').innerHTML =
+                            '<span style="color:#3fb950;">' + data.message + '</span>';
+                        window._sendfilesIso = { drive: data.drive, iso_name: data.iso_name };
+                        loadBlockInfo();
+                    } else {
+                        document.getElementById('sendfiles-status').innerHTML =
+                            '<span style="color:#f85149;">Error: ' + data.message + '</span>';
+                    }
+                } catch (e) {
+                    document.getElementById('sendfiles-status').innerHTML =
+                        '<span style="color:#f85149;">Error: ' + xhr.responseText + '</span>';
+                }
+            };
+
+            xhr.onerror = function() {
+                document.getElementById('sendfiles-send-btn').disabled = false;
+                document.getElementById('sendfiles-status').innerHTML =
+                    '<span style="color:#f85149;">Network error</span>';
+            };
+
+            document.getElementById('sendfiles-status').textContent = 'Uploading...';
+            xhr.send(formData);
+        }
+
+        async function executeSendFilesGA() {
+            var files = document.getElementById('sendfiles-input').files;
+            if (!files || !files.length) { alert('Select at least one file'); return; }
+
+            var targetPath = document.getElementById('sendfiles-ga-path').value || '/tmp/';
+            var smac = window._vncSmac;
+            document.getElementById('sendfiles-send-btn').disabled = true;
+
+            for (var i = 0; i < files.length; i++) {
+                var file = files[i];
+                document.getElementById('sendfiles-status').textContent =
+                    'Sending file ' + (i + 1) + '/' + files.length + ': ' + file.name + '...';
+
+                try {
+                    await new Promise(function(resolve, reject) {
+                        var xhr = new XMLHttpRequest();
+                        xhr.open('POST', '/api/vm/guestfile/' + encodeURIComponent(smac));
+                        var key = getApiKey();
+                        if (key) xhr.setRequestHeader('X-API-Key', key);
+                        xhr.setRequestHeader('X-Guest-Path', targetPath);
+                        xhr.setRequestHeader('X-Filename', file.name);
+
+                        xhr.upload.onprogress = function(e) {
+                            if (e.lengthComputable) {
+                                var pct = Math.round((e.loaded / e.total) * 100);
+                                document.getElementById('sendfiles-progress').value = pct;
+                            }
+                        };
+
+                        xhr.onload = function() {
+                            try {
+                                var data = JSON.parse(xhr.responseText);
+                                if (data.success) resolve();
+                                else reject(new Error(data.message));
+                            } catch (e) { reject(new Error(xhr.responseText)); }
+                        };
+                        xhr.onerror = function() { reject(new Error('Network error')); };
+                        xhr.send(file);
+                    });
+                } catch (err) {
+                    document.getElementById('sendfiles-send-btn').disabled = false;
+                    document.getElementById('sendfiles-status').innerHTML =
+                        '<span style="color:#f85149;">Error on ' + file.name + ': ' + err.message + '</span>';
+                    return;
+                }
+            }
+
+            document.getElementById('sendfiles-send-btn').disabled = false;
+            document.getElementById('sendfiles-progress').value = 100;
+            document.getElementById('sendfiles-status').innerHTML =
+                '<span style="color:#3fb950;">All ' + files.length + ' file(s) sent successfully!</span>';
+        }
+
+        // Allow Escape to close sendfiles modal
+        document.getElementById('sendfiles-modal').addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeSendFilesModal();
+        });
+
         window.toggleFullscreen = function() {
             var el = document.getElementById('vnc-container');
             if (!document.fullscreenElement) {
@@ -566,13 +803,16 @@
             setTimeout(function() { if (rfb) rfb.focus(); }, 150);
         });
 
-        // Show/hide Windows-specific toolbar buttons
+        // Show/hide Windows-specific toolbar buttons + hide vim mode for Windows
         function showWindowsButtons(show) {
             var ids = ['btn-shift-f10', 'btn-alt-shift', 'btn-win11-bypass'];
             ids.forEach(function(id) {
                 var el = document.getElementById(id);
                 if (el) el.style.display = show ? '' : 'none';
             });
+            // Hide vim mode checkbox for Windows VMs
+            var vimLabel = document.getElementById('paste-vim-label');
+            if (vimLabel) vimLabel.style.display = show ? 'none' : '';
         }
 
         // Helper: set up VNC page after resolving VM info
@@ -622,6 +862,7 @@
                     }
                     var data = await res.json();
                     // data = { smac, vnc_port, status, is_windows }
+                    window._isWindows = !!data.is_windows;
                     if (data.is_windows) showWindowsButtons(true);
                     setupVm(data.smac, data.vnc_port, data.status);
                 } catch(e) {
@@ -648,6 +889,7 @@
                             isWin = cfg.features && cfg.features.is_windows === '1';
                         } catch(e) {}
                     }
+                    window._isWindows = isWin;
                     if (isWin) showWindowsButtons(true);
                     setupVm(smac, port, vm.status);
                 } catch(e) {

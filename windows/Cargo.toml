@@ -17,3 +17,5 @@ rusqlite = { version = "0.38", features = ["bundled"] }
 chrono = "0.4"
 zip = "2"
 futures-util = "0.3"
+actix-multipart = "0.7"
+base64 = "0.22"

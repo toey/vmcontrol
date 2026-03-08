@@ -306,6 +306,128 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     Ok(iso_path)
 }
 
+/// Create an ISO from files in a directory and auto-mount on a free CD drive
+pub fn create_and_mount_sendfiles_iso(
+    smac: &str,
+    temp_dir: &str,
+) -> Result<(String, String), String> {
+    let iso_dir = get_conf("iso_path");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let safe_name = sanitize_name(smac).unwrap_or(smac);
+    let iso_name = format!("sendfiles_{}_{}.iso", safe_name, timestamp);
+    let iso_path = format!("{}/{}", iso_dir, iso_name);
+
+    // Create ISO — same platform-specific approach as generate_seed_iso
+    let _ = std::fs::remove_file(&iso_path);
+    #[cfg(target_os = "macos")]
+    {
+        run_cmd(
+            "hdiutil",
+            &[
+                "makehybrid",
+                "-iso",
+                "-joliet",
+                "-default-volume-name",
+                "SENDFILES",
+                "-o",
+                &iso_path,
+                temp_dir,
+            ],
+        )
+        .map_err(|e| format!("Failed to create sendfiles ISO: {}", e))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let result = run_cmd(
+            "genisoimage",
+            &[
+                "-output",
+                &iso_path,
+                "-volid",
+                "SENDFILES",
+                "-joliet",
+                "-rock",
+                temp_dir,
+            ],
+        );
+        if result.is_err() {
+            run_cmd(
+                "mkisofs",
+                &[
+                    "-output",
+                    &iso_path,
+                    "-volid",
+                    "SENDFILES",
+                    "-joliet",
+                    "-rock",
+                    temp_dir,
+                ],
+            )
+            .map_err(|e| {
+                format!(
+                    "Failed to create sendfiles ISO (install genisoimage or mkisofs): {}",
+                    e
+                )
+            })?;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return Err("ISO creation not supported on Windows host".into());
+    }
+
+    // Handle hdiutil auto-appending .iso
+    if !std::path::Path::new(&iso_path).exists() {
+        let alt = format!("{}.iso", iso_path);
+        if std::path::Path::new(&alt).exists() {
+            let _ = std::fs::rename(&alt, &iso_path);
+        } else {
+            return Err(format!("Sendfiles ISO not found at {} after creation", iso_path));
+        }
+    }
+
+    // Cleanup temp directory
+    let _ = std::fs::remove_dir_all(temp_dir);
+
+    // Find first free CD drive (cd0–cd3)
+    let block_info =
+        crate::api_helpers::qemu_monitor_cmd(smac, "info block").unwrap_or_default();
+    let mut free_drive = None;
+    for i in 0..4 {
+        let drive_id = format!("cd{}", i);
+        let mut is_used = false;
+        for line in block_info.lines() {
+            let trimmed = line.trim();
+            if (trimmed.starts_with(&format!("{} ", drive_id))
+                || trimmed.starts_with(&format!("{}:", drive_id)))
+                && !trimmed.contains("[not inserted]")
+                && !trimmed.contains("not inserted")
+            {
+                is_used = true;
+                break;
+            }
+        }
+        if !is_used {
+            free_drive = Some(drive_id);
+            break;
+        }
+    }
+
+    let drive = free_drive.ok_or("No free CD drive (cd0–cd3) available")?;
+
+    // Mount ISO on the free drive — send_cmd_pctl("mountiso", "vmname isoname drive")
+    let mount_arg = format!("{} {} {}", smac, iso_name, drive);
+    let result = crate::api_helpers::send_cmd_pctl("mountiso", &mount_arg);
+    if result.contains("Error:") && !result.contains("OK") {
+        return Err(format!("Failed to mount sendfiles ISO: {}", result));
+    }
+
+    Ok((drive, iso_name))
+}
+
 /// Start a QEMU VM from config stored in the database
 fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, String> {
     let is_aarch64 = cfg.features.arch == "aarch64";
@@ -980,6 +1102,20 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     // Monitor socket
     qemu_args.push("-monitor".into());
     qemu_args.push(format!("unix:{}/{},server,nowait", pctl_path, ismac));
+
+    // Guest Agent socket — for direct file transfer via QEMU Guest Agent (qemu-ga)
+    let qga_sock = format!("{}/{}_qga", pctl_path, ismac);
+    let _ = std::fs::remove_file(&qga_sock); // Remove stale socket
+    qemu_args.push("-chardev".into());
+    qemu_args.push(format!(
+        "socket,id=qga0,path={},server=on,wait=off",
+        qga_sock
+    ));
+    qemu_args.push("-device".into());
+    qemu_args.push("virtio-serial-pci".into());
+    qemu_args.push("-device".into());
+    qemu_args.push("virtserialport,chardev=qga0,name=org.qemu.guest_agent.0".into());
+    output_log.push_str(&format!("guest-agent: socket {}\n", qga_sock));
 
     // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
     // Bridge/vmnet modes require sudo on macOS

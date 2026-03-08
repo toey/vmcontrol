@@ -81,6 +81,11 @@ fn generate_userdata_base(config: &MdsConfig) -> String {
     ud.push_str("    lock_passwd: false\n");
     ud.push_str("    shell: /bin/bash\n");
     ud.push_str("resize_rootfs: True\n");
+    ud.push_str("package_update: true\n");
+    ud.push_str("packages:\n");
+    ud.push_str("  - qemu-guest-agent\n");
+    ud.push_str("runcmd:\n");
+    ud.push_str("  - systemctl enable --now qemu-guest-agent\n");
     ud.push_str("chpasswd:\n");
     ud.push_str("  list: |\n");
     ud.push_str(&format!("    root:{}\n", config.root_password));

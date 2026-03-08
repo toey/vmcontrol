@@ -406,6 +406,314 @@ async fn blockinfo_handler(path: web::Path<String>) -> HttpResponse {
     }
 }
 
+/// Send files to VM — upload multipart files, create ISO, auto-mount on free CD drive
+async fn sendfiles_handler(
+    path: web::Path<String>,
+    mut payload: actix_multipart::Multipart,
+) -> HttpResponse {
+    use futures_util::StreamExt;
+
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+
+    // Create temp directory for uploaded files
+    let pctl_path = crate::config::get_conf("pctl_path");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let temp_dir = format!("{}/sendfiles_{}_{}", pctl_path, smac, timestamp);
+    if let Err(e) = std::fs::create_dir_all(&temp_dir) {
+        return HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Failed to create temp dir: {}", e),
+            output: None,
+        });
+    }
+
+    // Process multipart fields — stream each file to disk
+    let mut file_count = 0u32;
+    let mut total_size = 0u64;
+    const MAX_TOTAL: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+
+    while let Some(item) = payload.next().await {
+        let mut field = match item {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                return HttpResponse::BadRequest().json(ApiResponse {
+                    success: false,
+                    message: format!("Multipart error: {}", e),
+                    output: None,
+                });
+            }
+        };
+
+        // Get filename — sanitize
+        let filename = field
+            .content_disposition()
+            .and_then(|cd| cd.get_filename().map(|s| s.to_string()))
+            .unwrap_or_else(|| "file".to_string());
+        // Basic sanitize: keep alphanumeric, dash, underscore, dot
+        let safe_name: String = filename
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe_name = if safe_name.is_empty() {
+            format!("file_{}", file_count)
+        } else {
+            safe_name
+        };
+
+        let file_path = format!("{}/{}", temp_dir, safe_name);
+        let mut file = match std::fs::File::create(&file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to create file: {}", e),
+                    output: None,
+                });
+            }
+        };
+
+        // Stream chunks to file
+        while let Some(chunk) = field.next().await {
+            match chunk {
+                Ok(data) => {
+                    total_size += data.len() as u64;
+                    if total_size > MAX_TOTAL {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        return HttpResponse::BadRequest().json(ApiResponse {
+                            success: false,
+                            message: "Total file size exceeds 4GB limit".into(),
+                            output: None,
+                        });
+                    }
+                    use std::io::Write;
+                    if let Err(e) = file.write_all(&data) {
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                        return HttpResponse::InternalServerError().json(ApiResponse {
+                            success: false,
+                            message: format!("Write error: {}", e),
+                            output: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: format!("Upload stream error: {}", e),
+                        output: None,
+                    });
+                }
+            }
+        }
+        file_count += 1;
+    }
+
+    if file_count == 0 {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "No files uploaded".into(),
+            output: None,
+        });
+    }
+
+    // Create ISO and mount (blocking I/O)
+    let smac_clone = smac.clone();
+    let temp_dir_clone = temp_dir.clone();
+    match actix_web::web::block(move || {
+        crate::operations::create_and_mount_sendfiles_iso(&smac_clone, &temp_dir_clone)
+    })
+    .await
+    {
+        Ok(Ok((drive, iso_name))) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "message": format!("{} file(s) mounted on {} as {}", file_count, drive, iso_name),
+            "drive": drive,
+            "iso_name": iso_name,
+            "file_count": file_count,
+            "total_size": total_size,
+        })),
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: e,
+                output: None,
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: format!("Internal error: {}", e),
+                output: None,
+            })
+        }
+    }
+}
+
+/// Cleanup sendfiles ISO — unmount drive and delete temp ISO
+async fn cleanup_sendfiles_handler(
+    path: web::Path<String>,
+    body: web::Json<serde_json::Value>,
+) -> HttpResponse {
+    let smac = path.into_inner();
+    let drive = body
+        .get("drive")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cd0");
+    let iso_name = body
+        .get("iso_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    // Unmount drive
+    let unmount_arg = format!("{} {}", smac, drive);
+    let _ = crate::api_helpers::send_cmd_pctl("unmountiso", &unmount_arg);
+
+    // Delete temp ISO file
+    if !iso_name.is_empty() && iso_name.starts_with("sendfiles_") {
+        let iso_path = format!("{}/{}", crate::config::get_conf("iso_path"), iso_name);
+        let _ = std::fs::remove_file(&iso_path);
+    }
+
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        message: format!("Cleaned up {} on {}", iso_name, drive),
+        output: None,
+    })
+}
+
+/// Check if QEMU Guest Agent is available for a VM
+async fn guest_agent_status_handler(path: web::Path<String>) -> HttpResponse {
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+    let smac_clone = smac.clone();
+    let available = actix_web::web::block(move || crate::guest_agent::guest_ping(&smac_clone))
+        .await
+        .unwrap_or(false);
+    HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "available": available,
+    }))
+}
+
+/// Write a file to VM filesystem via QEMU Guest Agent
+async fn guest_file_write_handler(
+    path: web::Path<String>,
+    req: actix_web::HttpRequest,
+    mut payload: web::Payload,
+) -> HttpResponse {
+    use futures_util::StreamExt;
+
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+
+    // Get target path and filename from headers
+    let guest_path = req
+        .headers()
+        .get("X-Guest-Path")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("/tmp/");
+    let filename = req
+        .headers()
+        .get("X-Filename")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("upload");
+
+    // Build full guest file path
+    let full_path = if guest_path.ends_with('/') || guest_path.ends_with('\\') {
+        format!("{}{}", guest_path, filename)
+    } else {
+        format!("{}/{}", guest_path, filename)
+    };
+
+    // Stream payload into memory (QGA requires full file for base64 encoding)
+    // Limit to 256MB for guest agent transfers
+    let mut data = Vec::new();
+    const MAX_QGA_SIZE: usize = 256 * 1024 * 1024;
+    while let Some(chunk) = payload.next().await {
+        match chunk {
+            Ok(bytes) => {
+                data.extend_from_slice(&bytes);
+                if data.len() > MAX_QGA_SIZE {
+                    return HttpResponse::BadRequest().json(ApiResponse {
+                        success: false,
+                        message: format!(
+                            "File too large for guest agent (max {} MB). Use ISO method instead.",
+                            MAX_QGA_SIZE / (1024 * 1024)
+                        ),
+                        output: None,
+                    });
+                }
+            }
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Stream error: {}", e),
+                    output: None,
+                });
+            }
+        }
+    }
+
+    let data_len = data.len();
+    let smac_clone = smac.clone();
+    let path_clone = full_path.clone();
+    match actix_web::web::block(move || {
+        crate::guest_agent::guest_file_write(&smac_clone, &path_clone, &data)
+    })
+    .await
+    {
+        Ok(Ok(())) => HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "message": format!("File written to {} ({} bytes)", full_path, data_len),
+            "path": full_path,
+            "size": data_len,
+        })),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Internal error: {}", e),
+            output: None,
+        }),
+    }
+}
+
 /// Generate a one-time VNC access token for a VM
 async fn vnc_token_handler(
     body: web::Json<serde_json::Value>,
@@ -3014,6 +3322,11 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/os-templates/delete", web::post().to(delete_os_template_handler))
             // Block info route (per-drive mount status)
             .route("/api/vm/blockinfo/{smac}", web::get().to(blockinfo_handler))
+            // Send files to VM routes
+            .route("/api/vm/sendfiles/{smac}", web::post().to(sendfiles_handler))
+            .route("/api/vm/sendfiles-cleanup/{smac}", web::post().to(cleanup_sendfiles_handler))
+            .route("/api/vm/guest-agent/{smac}", web::get().to(guest_agent_status_handler))
+            .route("/api/vm/guestfile/{smac}", web::post().to(guest_file_write_handler))
             // VNC routes
             .route("/api/vnc/start", web::post().to(vnc_start_handler))
             .route("/api/vnc/stop", web::post().to(vnc_stop_handler))
