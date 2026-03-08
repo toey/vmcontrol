@@ -352,7 +352,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         // CPU for aarch64 — use "host" with HVF on Apple Silicon for best performance
         qemu_args.push("-cpu".into());
         qemu_args.push("host".into());
-        // VGA via virtio-gpu
+        // Display: ramfb for early UEFI boot + virtio-gpu for OS
+        qemu_args.push("-device".into());
+        qemu_args.push("ramfb".into());
         qemu_args.push("-device".into());
         qemu_args.push("virtio-gpu-pci".into());
         // USB controller + keyboard + tablet (virt machine has no PS/2)
@@ -737,27 +739,38 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         };
 
         // SMBIOS cloud-init hints — tells ds-identify to use NoCloud
-        // type=1 serial: supported by all cloud-init versions (checks DMI product serial)
-        // type=11 OEM string: supported by cloud-init 23.x+ (checks OEM strings)
-        qemu_args.push("-smbios".into());
-        qemu_args.push("type=1,serial=ds=nocloud".into());
-        qemu_args.push("-smbios".into());
-        qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
+        // (aarch64 virt machine has no SMBIOS, skip for ARM VMs)
+        if !is_aarch64 {
+            qemu_args.push("-smbios".into());
+            qemu_args.push("type=1,serial=ds=nocloud".into());
+            qemu_args.push("-smbios".into());
+            qemu_args.push("type=11,value=cloud-init:ds=nocloud".into());
+        }
     } else {
         output_log.push_str("cloud-init: disabled\n");
     }
 
     // CDROM — 4 named drives "cd0"–"cd3" for runtime ISO mount/unmount via monitor
     // bootindex=0 on cd0 so UEFI/BIOS tries CD first, then falls through to disk
+    // aarch64: use usb-storage (more compatible with Windows ARM64 bootloader)
+    // x86_64:  use scsi-cd (traditional approach)
     for i in 0..4u8 {
         let drive_id = format!("cd{}", i);
         qemu_args.push("-drive".into());
         qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
         qemu_args.push("-device".into());
-        if i == 0 {
-            qemu_args.push(format!("scsi-cd,drive={},bootindex=0", drive_id));
+        if is_aarch64 {
+            if i == 0 {
+                qemu_args.push(format!("usb-storage,drive={},removable=true,bootindex=0", drive_id));
+            } else {
+                qemu_args.push(format!("usb-storage,drive={},removable=true", drive_id));
+            }
         } else {
-            qemu_args.push(format!("scsi-cd,drive={}", drive_id));
+            if i == 0 {
+                qemu_args.push(format!("scsi-cd,drive={},bootindex=0", drive_id));
+            } else {
+                qemu_args.push(format!("scsi-cd,drive={}", drive_id));
+            }
         }
     }
 
