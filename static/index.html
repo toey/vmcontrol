@@ -222,14 +222,37 @@
             <button class="execute-btn" onclick="executeLiveMigrate()">Live Migrate</button>
         </div>
 
-        <!-- Backup -->
+        <!-- Backup & Snapshot -->
         <div id="tab-backup" class="tab-panel">
-            <h2>Backup VM</h2>
-            <label>VM-NAME <select id="backup-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeBackup()">Backup VM</button>
+            <h2>Backup & Snapshot</h2>
+
+            <!-- Memory Dump (existing) -->
+            <fieldset>
+                <legend>Memory Dump (QEMU Migrate)</legend>
+                <p style="color:#8b949e;font-size:12px;margin:0 0 8px 0;">Saves running VM memory state as .gz file. VM must be running.</p>
+                <label>VM-NAME <select id="backup-smac"><option value="">-- select VM --</option></select></label>
+                <button class="execute-btn" onclick="executeBackup()">Create Memory Dump</button>
+                <div id="backup-list" style="font-size:0.9em;margin-top:12px;"></div>
+            </fieldset>
+
+            <!-- Full Backup -->
             <fieldset style="margin-top:16px;">
-                <legend>Backup History</legend>
-                <div id="backup-list" style="font-size:0.9em;"></div>
+                <legend>Full Backup (Disk Copy)</legend>
+                <p style="color:#8b949e;font-size:12px;margin:0 0 8px 0;">Copies all VM disk files to backup storage. VM must be stopped. Linked clones are auto-flattened.</p>
+                <label>VM-NAME <select id="fullbackup-vm"><option value="">-- select VM --</option></select></label>
+                <label>Note <input type="text" id="fullbackup-note" placeholder="Optional description" style="width:250px;"></label>
+                <button class="execute-btn" onclick="createFullBackup()">Create Full Backup</button>
+                <div id="fullbackup-list" style="font-size:0.9em;margin-top:12px;"></div>
+            </fieldset>
+
+            <!-- Snapshot -->
+            <fieldset style="margin-top:16px;">
+                <legend>Snapshot (qcow2 Internal)</legend>
+                <p style="color:#8b949e;font-size:12px;margin:0 0 8px 0;">Point-in-time snapshot inside qcow2 file. Fast, uses delta storage. VM must be stopped. Does not work on linked clones.</p>
+                <label>VM-NAME <select id="snapshot-vm" onchange="loadSnapshotList()"><option value="">-- select VM --</option></select></label>
+                <label>Note <input type="text" id="snapshot-note" placeholder="Optional description" style="width:250px;"></label>
+                <button class="execute-btn" onclick="createSnapshot()">Create Snapshot</button>
+                <div id="snapshot-list" style="font-size:0.9em;margin-top:12px;"></div>
             </fieldset>
         </div>
         <!-- Metadata Service (per-VM) -->

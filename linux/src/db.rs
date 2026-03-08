@@ -154,6 +154,33 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB os_templates table init error: {}", e))?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS backups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backup_id TEXT NOT NULL UNIQUE,
+            vm_name TEXT NOT NULL DEFAULT '',
+            disk_names TEXT NOT NULL DEFAULT '',
+            backup_type TEXT NOT NULL DEFAULT 'full',
+            note TEXT NOT NULL DEFAULT '',
+            total_size INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .map_err(|e| format!("DB backups table init error: {}", e))?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL,
+            disk_name TEXT NOT NULL,
+            vm_name TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(snapshot_id, disk_name)
+        );",
+    )
+    .map_err(|e| format!("DB snapshots table init error: {}", e))?;
+
     Ok(conn)
 }
 
@@ -764,5 +791,134 @@ pub fn delete_os_template(id: i64) -> Result<(), String> {
     if changed == 0 {
         return Err(format!("OS template id {} not found", id));
     }
+    Ok(())
+}
+
+// ======== Backup operations ========
+
+#[derive(Debug, Serialize, Clone)]
+pub struct BackupRecord {
+    pub id: i64,
+    pub backup_id: String,
+    pub vm_name: String,
+    pub disk_names: String,
+    pub backup_type: String,
+    pub note: String,
+    pub total_size: i64,
+    pub created_at: String,
+}
+
+pub fn insert_backup(backup_id: &str, vm_name: &str, disk_names: &str, backup_type: &str, note: &str, total_size: i64) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO backups (backup_id, vm_name, disk_names, backup_type, note, total_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![backup_id, vm_name, disk_names, backup_type, note, total_size],
+    ).map_err(|e| format!("DB insert backup error: {}", e))?;
+    Ok(())
+}
+
+pub fn list_backups() -> Result<Vec<BackupRecord>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, backup_id, vm_name, disk_names, backup_type, note, total_size, created_at FROM backups ORDER BY created_at DESC"
+    ).map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(BackupRecord {
+            id: row.get(0)?,
+            backup_id: row.get(1)?,
+            vm_name: row.get(2)?,
+            disk_names: row.get(3)?,
+            backup_type: row.get(4)?,
+            note: row.get(5)?,
+            total_size: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }).map_err(|e| format!("DB query error: {}", e))?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(result)
+}
+
+pub fn get_backup(backup_id: &str) -> Result<BackupRecord, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT id, backup_id, vm_name, disk_names, backup_type, note, total_size, created_at FROM backups WHERE backup_id = ?1",
+        params![backup_id],
+        |row| Ok(BackupRecord {
+            id: row.get(0)?,
+            backup_id: row.get(1)?,
+            vm_name: row.get(2)?,
+            disk_names: row.get(3)?,
+            backup_type: row.get(4)?,
+            note: row.get(5)?,
+            total_size: row.get(6)?,
+            created_at: row.get(7)?,
+        }),
+    ).map_err(|e| format!("Backup '{}' not found: {}", backup_id, e))
+}
+
+pub fn delete_backup_record(backup_id: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM backups WHERE backup_id = ?1", params![backup_id])
+        .map_err(|e| format!("DB delete backup error: {}", e))?;
+    Ok(())
+}
+
+// ======== Snapshot operations ========
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SnapshotRecord {
+    pub id: i64,
+    pub snapshot_id: String,
+    pub disk_name: String,
+    pub vm_name: String,
+    pub note: String,
+    pub created_at: String,
+}
+
+pub fn insert_snapshot(snapshot_id: &str, disk_name: &str, vm_name: &str, note: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO snapshots (snapshot_id, disk_name, vm_name, note) VALUES (?1, ?2, ?3, ?4)",
+        params![snapshot_id, disk_name, vm_name, note],
+    ).map_err(|e| format!("DB insert snapshot error: {}", e))?;
+    Ok(())
+}
+
+pub fn list_snapshots_by_vm(vm_name: &str) -> Result<Vec<SnapshotRecord>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, snapshot_id, disk_name, vm_name, note, created_at FROM snapshots WHERE vm_name = ?1 ORDER BY created_at DESC"
+    ).map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt.query_map(params![vm_name], |row| {
+        Ok(SnapshotRecord {
+            id: row.get(0)?,
+            snapshot_id: row.get(1)?,
+            disk_name: row.get(2)?,
+            vm_name: row.get(3)?,
+            note: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    }).map_err(|e| format!("DB query error: {}", e))?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(result)
+}
+
+pub fn delete_snapshot_record(snapshot_id: &str, disk_name: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM snapshots WHERE snapshot_id = ?1 AND disk_name = ?2", params![snapshot_id, disk_name])
+        .map_err(|e| format!("DB delete snapshot error: {}", e))?;
+    Ok(())
+}
+
+pub fn delete_snapshots_by_id(snapshot_id: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM snapshots WHERE snapshot_id = ?1", params![snapshot_id])
+        .map_err(|e| format!("DB delete snapshots error: {}", e))?;
     Ok(())
 }

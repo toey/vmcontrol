@@ -2399,6 +2399,144 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
 }
 
+// ======== Full Backup Management ========
+
+async fn create_full_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = web::block(move || operations::create_full_backup(&vm_name, &note)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn list_full_backups_handler() -> HttpResponse {
+    match crate::db::list_backups() {
+        Ok(backups) => HttpResponse::Ok().json(backups),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Failed to list backups: {}", e), output: None,
+        }),
+    }
+}
+
+async fn restore_full_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let backup_id = match body.get("backup_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'backup_id'".into(), output: None,
+        }),
+    };
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::restore_full_backup(&backup_id, &vm_name)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn delete_full_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let backup_id = match body.get("backup_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'backup_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::delete_full_backup(&backup_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+// ======== Snapshot Management ========
+
+async fn create_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = web::block(move || operations::create_snapshot(&vm_name, &note)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn list_snapshots_handler(path: web::Path<String>) -> HttpResponse {
+    let vm_name = path.into_inner();
+    if vm_name.is_empty() || vm_name.contains('/') || vm_name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Invalid VM name".into(), output: None,
+        });
+    }
+    match operations::list_vm_snapshots(&vm_name) {
+        Ok(snapshots) => HttpResponse::Ok().json(snapshots),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+    }
+}
+
+async fn revert_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let snapshot_id = match body.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'snapshot_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::revert_snapshot(&vm_name, &snapshot_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn delete_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let snapshot_id = match body.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'snapshot_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::delete_snapshot(&vm_name, &snapshot_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
 // ======== Group Management ========
 
 async fn list_groups_handler() -> HttpResponse {
@@ -3537,6 +3675,16 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Backup routes
             .route("/api/backup/list", web::get().to(list_backups_handler))
             .route("/api/backup/delete", web::post().to(delete_backup_handler))
+            // Full Backup routes
+            .route("/api/fullbackup/create", web::post().to(create_full_backup_handler))
+            .route("/api/fullbackup/list", web::get().to(list_full_backups_handler))
+            .route("/api/fullbackup/restore", web::post().to(restore_full_backup_handler))
+            .route("/api/fullbackup/delete", web::post().to(delete_full_backup_handler))
+            // Snapshot routes
+            .route("/api/snapshot/create", web::post().to(create_snapshot_handler))
+            .route("/api/snapshot/list/{vm_name}", web::get().to(list_snapshots_handler))
+            .route("/api/snapshot/revert", web::post().to(revert_snapshot_handler))
+            .route("/api/snapshot/delete", web::post().to(delete_snapshot_handler))
             // Group routes
             .route("/api/group/list", web::get().to(list_groups_handler))
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))

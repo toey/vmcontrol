@@ -619,7 +619,7 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         // Auto-load disk list when switching to createdisk tab
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
-        if (tab.dataset.tab === 'backup') { loadBackupList(); }
+        if (tab.dataset.tab === 'backup') { loadBackupList(); loadFullBackupList(); loadSnapshotList(); }
         // Auto-load DHCP table when switching to dhcp tab
         if (tab.dataset.tab === 'dhcp') { loadDhcpTable(); }
         // Auto-load internal network when switching to internal-net tab
@@ -663,7 +663,7 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/') || operation.startsWith('group/') || operation.startsWith('sshkey/')) ? '/api/' + operation : '/api/vm/' + operation;
+        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('fullbackup/') || operation.startsWith('snapshot/') || operation.startsWith('switch/') || operation.startsWith('group/') || operation.startsWith('sshkey/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
         var response = await apiFetch(apiPath, {
             method: 'POST',
@@ -758,6 +758,143 @@ async function deleteBackup(filename) {
     if (ok) {
         loadBackupList();
     }
+}
+
+// ======== Full Backup Management ========
+
+async function createFullBackup() {
+    var vmName = val('fullbackup-vm');
+    if (!vmName) { alert('Select a VM'); return; }
+    var note = val('fullbackup-note');
+    var ok = await apiCall('fullbackup/create', { vm_name: vmName, note: note });
+    if (ok) {
+        document.getElementById('fullbackup-note').value = '';
+        loadFullBackupList();
+    }
+}
+
+async function loadFullBackupList() {
+    try {
+        var response = await apiFetch('/api/fullbackup/list');
+        var backups = await safeJson(response);
+        var listDiv = document.getElementById('fullbackup-list');
+        if (!listDiv) return;
+        if (!backups || backups.length === 0) {
+            listDiv.innerHTML = '<em style="color:#8b949e;">No full backups</em>';
+            return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">' +
+            '<tr style="border-bottom:2px solid #30363d;">' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">VM</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Disks</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Note</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Date</th>' +
+            '<th style="text-align:right;padding:6px 8px;color:#58a6ff;">Size</th>' +
+            '<th style="text-align:right;padding:6px 8px;"></th>' +
+            '</tr>';
+        backups.forEach(function(b) {
+            var disks = '';
+            try { disks = JSON.parse(b.disk_names).join(', '); } catch(_) { disks = b.disk_names; }
+            var safeBid = b.backup_id.replace(/'/g, "\\'");
+            var safeVm = b.vm_name.replace(/'/g, "\\'");
+            html += '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.vm_name) + '</td>' +
+                '<td style="padding:6px 8px;font-size:0.8em;">' + escapeHtml(disks) + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.note || '') + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.created_at) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;">' + formatSize(b.total_size) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' +
+                '<button class="btn-clone" onclick="restoreFullBackup(\'' + safeBid + '\',\'' + safeVm + '\')" style="background:#d29922;color:#000;">Restore</button> ' +
+                '<button class="btn-remove" onclick="deleteFullBackup(\'' + safeBid + '\')">X</button>' +
+                '</td></tr>';
+        });
+        html += '</table>';
+        listDiv.innerHTML = html;
+    } catch (err) {
+        console.error('Failed to load full backup list:', err);
+    }
+}
+
+async function restoreFullBackup(backupId, vmName) {
+    if (!confirm('Restore backup "' + backupId + '" for VM "' + vmName + '"?\n\nThis will OVERWRITE current disk files!')) return;
+    var ok = await apiCall('fullbackup/restore', { backup_id: backupId, vm_name: vmName });
+    if (ok) loadFullBackupList();
+}
+
+async function deleteFullBackup(backupId) {
+    if (!confirm('Delete full backup "' + backupId + '"?\nThis cannot be undone.')) return;
+    var ok = await apiCall('fullbackup/delete', { backup_id: backupId });
+    if (ok) loadFullBackupList();
+}
+
+// ======== Snapshot Management ========
+
+async function createSnapshot() {
+    var vmName = val('snapshot-vm');
+    if (!vmName) { alert('Select a VM'); return; }
+    var note = val('snapshot-note');
+    var ok = await apiCall('snapshot/create', { vm_name: vmName, note: note });
+    if (ok) {
+        document.getElementById('snapshot-note').value = '';
+        loadSnapshotList();
+    }
+}
+
+async function loadSnapshotList() {
+    var vmName = val('snapshot-vm');
+    var listDiv = document.getElementById('snapshot-list');
+    if (!listDiv) return;
+    if (!vmName) {
+        listDiv.innerHTML = '<em style="color:#8b949e;">Select a VM to view snapshots</em>';
+        return;
+    }
+    try {
+        var response = await apiFetch('/api/snapshot/list/' + encodeURIComponent(vmName));
+        var snapshots = await safeJson(response);
+        if (!snapshots || snapshots.length === 0) {
+            listDiv.innerHTML = '<em style="color:#8b949e;">No snapshots for this VM</em>';
+            return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">' +
+            '<tr style="border-bottom:2px solid #30363d;">' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Snapshot ID</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Disks</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Note</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Date</th>' +
+            '<th style="text-align:right;padding:6px 8px;"></th>' +
+            '</tr>';
+        snapshots.forEach(function(s) {
+            var disks = Array.isArray(s.disks) ? s.disks.join(', ') : (s.disk_name || '');
+            var safeSnap = s.snapshot_id.replace(/'/g, "\\'");
+            html += '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:6px 8px;font-family:monospace;font-size:0.85em;">' + escapeHtml(s.snapshot_id) + '</td>' +
+                '<td style="padding:6px 8px;font-size:0.8em;">' + escapeHtml(disks) + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(s.note || '') + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(s.created_at) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' +
+                '<button class="btn-clone" onclick="revertSnapshot(\'' + safeSnap + '\')" style="background:#d29922;color:#000;">Revert</button> ' +
+                '<button class="btn-remove" onclick="deleteSnapshot(\'' + safeSnap + '\')">X</button>' +
+                '</td></tr>';
+        });
+        html += '</table>';
+        listDiv.innerHTML = html;
+    } catch (err) {
+        console.error('Failed to load snapshot list:', err);
+    }
+}
+
+async function revertSnapshot(snapshotId) {
+    var vmName = val('snapshot-vm');
+    if (!confirm('Revert VM "' + vmName + '" to snapshot "' + snapshotId + '"?\n\nCurrent disk state will be LOST!')) return;
+    var ok = await apiCall('snapshot/revert', { vm_name: vmName, snapshot_id: snapshotId });
+    if (ok) loadSnapshotList();
+}
+
+async function deleteSnapshot(snapshotId) {
+    var vmName = val('snapshot-vm');
+    if (!confirm('Delete snapshot "' + snapshotId + '"?')) return;
+    var ok = await apiCall('snapshot/delete', { vm_name: vmName, snapshot_id: snapshotId });
+    if (ok) loadSnapshotList();
 }
 
 // Collect VM config from the Create/Edit form
@@ -2322,6 +2459,7 @@ async function loadVmList() {
         var selects = [
             'listimage-smac', 'mountiso-smac',
             'livemigrate-smac', 'backup-smac',
+            'fullbackup-vm', 'snapshot-vm',
             'metadata-smac'
         ];
         selects.forEach(function(id) {
