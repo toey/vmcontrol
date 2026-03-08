@@ -499,41 +499,47 @@
             document.getElementById('sendfiles-ga-path').value = window._isWindows ? 'C:\\Users\\Public\\' : '/tmp/';
             document.getElementById('sendfiles-modal').style.display = 'flex';
 
-            // Check guest agent availability
+            // Check guest agent availability — update text span only, preserve radio element
             var gaRadio = document.getElementById('sendfiles-method-ga');
             var gaLabel = document.getElementById('sendfiles-ga-label');
+            var gaHintSpan = document.getElementById('sendfiles-ga-hint');
+            if (!gaHintSpan) {
+                // Create hint span once — appended after the radio input text
+                gaHintSpan = document.createElement('span');
+                gaHintSpan.id = 'sendfiles-ga-hint';
+                gaLabel.appendChild(gaHintSpan);
+            }
+
+            function getGaHint(available, failed) {
+                if (available) return ' Direct (Guest Agent) \u2014 <span style="color:#3fb950">available</span>';
+                var prefix = failed ? 'check failed' : 'not available';
+                if (window._isWindows && window._vmArch === 'aarch64') {
+                    return ' Direct (Guest Agent) \u2014 ' + prefix + ': guest agent not included in virtio-win for ARM64';
+                } else if (window._isWindows) {
+                    return ' Direct (Guest Agent) \u2014 ' + prefix + ': run <b>D:\\virtio-win-guest-tools.exe</b> or <b>D:\\guest-agent\\qemu-ga-x86_64.msi</b> in VM';
+                }
+                return ' Direct (Guest Agent) \u2014 ' + prefix + ': run <b>apt install qemu-guest-agent</b> in VM';
+            }
+
             try {
                 var res = await apiFetch('/api/vm/guest-agent/' + encodeURIComponent(window._vncSmac));
+                if (!res.ok) throw new Error('HTTP ' + res.status);
                 var data = await res.json();
                 if (data.available) {
                     gaRadio.disabled = false;
                     gaLabel.style.color = '#3fb950';
-                    gaLabel.innerHTML = '<input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" onchange="toggleGaOpts()"> Direct (Guest Agent) &mdash; available';
+                    gaHintSpan.innerHTML = getGaHint(true, false);
                 } else {
                     gaRadio.disabled = true;
+                    gaRadio.checked = false;
                     gaLabel.style.color = '#6e7681';
-                    var hint;
-                    if (window._isWindows && window._vmArch === 'aarch64') {
-                        hint = 'not available &mdash; guest agent not included in virtio-win for ARM64';
-                    } else if (window._isWindows) {
-                        hint = 'not available &mdash; run <b>D:\\virtio-win-guest-tools.exe</b> or <b>D:\\guest-agent\\qemu-ga-x86_64.msi</b> in VM';
-                    } else {
-                        hint = 'not available &mdash; run <b>apt install qemu-guest-agent</b> in VM';
-                    }
-                    gaLabel.innerHTML = '<input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" disabled onchange="toggleGaOpts()"> Direct (Guest Agent) &mdash; ' + hint;
+                    gaHintSpan.innerHTML = getGaHint(false, false);
                 }
             } catch (e) {
                 gaRadio.disabled = true;
+                gaRadio.checked = false;
                 gaLabel.style.color = '#6e7681';
-                var hintFail;
-                if (window._isWindows && window._vmArch === 'aarch64') {
-                    hintFail = 'check failed &mdash; guest agent not included in virtio-win for ARM64';
-                } else if (window._isWindows) {
-                    hintFail = 'check failed &mdash; run <b>D:\\virtio-win-guest-tools.exe</b> in VM';
-                } else {
-                    hintFail = 'check failed &mdash; run <b>apt install qemu-guest-agent</b> in VM';
-                }
-                gaLabel.innerHTML = '<input type="radio" name="sendfiles-method" value="ga" id="sendfiles-method-ga" disabled onchange="toggleGaOpts()"> Direct (Guest Agent) &mdash; ' + hintFail;
+                gaHintSpan.innerHTML = getGaHint(false, true);
             }
         };
 
@@ -560,8 +566,18 @@
             var key = getApiKey();
             if (key) xhr.setRequestHeader('X-API-Key', key);
             xhr.setRequestHeader('Content-Type', 'application/json');
-            xhr.onload = function() { window._sendfilesIso = null; callback(); };
-            xhr.onerror = function() { window._sendfilesIso = null; callback(); };
+            xhr.onload = function() {
+                window._sendfilesIso = null;
+                if (xhr.status >= 400) {
+                    console.warn('Cleanup returned HTTP ' + xhr.status + ': ' + xhr.responseText);
+                }
+                callback();
+            };
+            xhr.onerror = function() {
+                window._sendfilesIso = null;
+                console.warn('Cleanup network error');
+                callback();
+            };
             xhr.send(JSON.stringify({ drive: prev.drive, iso_name: prev.iso_name }));
         }
 
@@ -601,6 +617,13 @@
 
             xhr.onload = function() {
                 document.getElementById('sendfiles-send-btn').disabled = false;
+                if (xhr.status >= 400) {
+                    var errMsg = 'HTTP ' + xhr.status;
+                    try { errMsg = JSON.parse(xhr.responseText).message || errMsg; } catch(e) {}
+                    document.getElementById('sendfiles-status').innerHTML =
+                        '<span style="color:#f85149;">Error: ' + errMsg + '</span>';
+                    return;
+                }
                 try {
                     var data = JSON.parse(xhr.responseText);
                     if (data.success) {
@@ -659,6 +682,12 @@
                         };
 
                         xhr.onload = function() {
+                            if (xhr.status >= 400) {
+                                var msg = 'HTTP ' + xhr.status;
+                                try { msg = JSON.parse(xhr.responseText).message || msg; } catch(e) {}
+                                reject(new Error(msg));
+                                return;
+                            }
                             try {
                                 var data = JSON.parse(xhr.responseText);
                                 if (data.success) resolve();

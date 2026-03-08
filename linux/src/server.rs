@@ -441,8 +441,17 @@ async fn sendfiles_handler(
     let mut file_count = 0u32;
     let mut total_size = 0u64;
     const MAX_TOTAL: u64 = 4 * 1024 * 1024 * 1024; // 4GB
+    const MAX_FILES: u32 = 500;
 
     while let Some(item) = payload.next().await {
+        if file_count >= MAX_FILES {
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: format!("Too many files (max {})", MAX_FILES),
+                output: None,
+            });
+        }
         let mut field = match item {
             Ok(f) => f,
             Err(e) => {
@@ -576,10 +585,28 @@ async fn cleanup_sendfiles_handler(
     body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
     let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+
     let drive = body
         .get("drive")
         .and_then(|v| v.as_str())
         .unwrap_or("cd0");
+
+    // Validate drive is cd0-cd3
+    if !matches!(drive, "cd0" | "cd1" | "cd2" | "cd3") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid drive: {}", drive),
+            output: None,
+        });
+    }
+
     let iso_name = body
         .get("iso_name")
         .and_then(|v| v.as_str())
@@ -589,8 +616,14 @@ async fn cleanup_sendfiles_handler(
     let unmount_arg = format!("{} {}", smac, drive);
     let _ = crate::api_helpers::send_cmd_pctl("unmountiso", &unmount_arg);
 
-    // Delete temp ISO file
-    if !iso_name.is_empty() && iso_name.starts_with("sendfiles_") {
+    // Delete temp ISO file — validate: must start with sendfiles_, no path separators
+    if !iso_name.is_empty()
+        && iso_name.starts_with("sendfiles_")
+        && iso_name.ends_with(".iso")
+        && !iso_name.contains('/')
+        && !iso_name.contains('\\')
+        && !iso_name.contains("..")
+    {
         let iso_path = format!("{}/{}", crate::config::get_conf("iso_path"), iso_name);
         let _ = std::fs::remove_file(&iso_path);
     }
@@ -650,6 +683,28 @@ async fn guest_file_write_handler(
         .get("X-Filename")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("upload");
+
+    // Validate filename: no path separators or traversal
+    if filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains("..")
+        || filename.is_empty()
+    {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid filename: {}", filename),
+            output: None,
+        });
+    }
+
+    // Validate guest path: must be absolute, no traversal
+    if guest_path.contains("..") || (!guest_path.starts_with('/') && !guest_path.contains(':')) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Guest path must be absolute and not contain '..'".into(),
+            output: None,
+        });
+    }
 
     // Build full guest file path
     let full_path = if guest_path.ends_with('/') || guest_path.ends_with('\\') {

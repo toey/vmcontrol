@@ -407,14 +407,20 @@ pub fn create_and_mount_sendfiles_iso(
                 // Unmount old sendfiles ISO
                 let unmount_arg = format!("{} {}", smac, drive_id);
                 let _ = crate::api_helpers::send_cmd_pctl("unmountiso", &unmount_arg);
-                // Delete old ISO file
+                // Delete old ISO file — extract filename safely
                 if let Some(start) = trimmed.find("sendfiles_") {
                     let rest = &trimmed[start..];
-                    if let Some(end) = rest.find(|c: char| c == ' ' || c == ')' || c == '"') {
-                        let old_iso = &rest[..end];
+                    let end = rest
+                        .find(|c: char| c == ' ' || c == ')' || c == '"' || c == '\'' || c == ',')
+                        .unwrap_or(rest.len());
+                    let old_iso = &rest[..end];
+                    // Validate extracted name: must end with .iso, no path separators
+                    if old_iso.ends_with(".iso")
+                        && !old_iso.contains('/')
+                        && !old_iso.contains('\\')
+                        && !old_iso.contains("..")
+                    {
                         let _ = std::fs::remove_file(iso_dir_path.join(old_iso));
-                    } else {
-                        let _ = std::fs::remove_file(iso_dir_path.join(rest));
                     }
                 }
                 break;
@@ -453,7 +459,7 @@ pub fn create_and_mount_sendfiles_iso(
     // Mount ISO on the free drive — send_cmd_pctl("mountiso", "vmname isoname drive")
     let mount_arg = format!("{} {} {}", smac, iso_name, drive);
     let result = crate::api_helpers::send_cmd_pctl("mountiso", &mount_arg);
-    if result.contains("Error:") && !result.contains("OK") {
+    if result.contains("Error:") {
         return Err(format!("Failed to mount sendfiles ISO: {}", result));
     }
 
