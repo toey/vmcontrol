@@ -357,9 +357,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         ].map(String::from));
     }
 
-    // Windows localtime
+    // Windows localtime (use RTC base=localtime instead of deprecated -localtime)
     if cfg.features.is_windows == "1" {
-        qemu_args.push("-localtime".into());
+        qemu_args.extend(["-rtc", "base=localtime"].map(String::from));
     }
 
     // Display VNC with built-in WebSocket (no websockify needed)
