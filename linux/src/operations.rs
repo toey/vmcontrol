@@ -955,13 +955,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         }
 
         qemu_args.push("-device".into());
-        if is_windows {
-            // Windows 11 (23H2+) removed the old e1000 (82540EM) driver.
-            // Use e1000e (82574L) which is included in all modern Windows versions.
-            qemu_args.push(format!("e1000e,netdev=net{},mac={}", adapter.netid, adapter.mac));
-        } else {
-            qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
-        }
+        // Use virtio-net-pci for all VMs (including Windows):
+        // - Faster than e1000/e1000e
+        // - Works on both x86_64 and aarch64
+        // - Windows gets virtio drivers from virtio-win ISO (auto-mounted on cd3)
+        // - e1000e is unavailable on aarch64 virt machine
+        qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
     }
 
     // Internal network — VM-to-VM communication on 192.168.100.0/24
