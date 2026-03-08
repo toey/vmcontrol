@@ -392,9 +392,41 @@ pub fn create_and_mount_sendfiles_iso(
     // Cleanup temp directory
     let _ = std::fs::remove_dir_all(temp_dir);
 
-    // Find first free CD drive (cd0–cd3)
+    // Cleanup any previously mounted sendfiles ISO before mounting new one
     let block_info =
         crate::api_helpers::qemu_monitor_cmd(smac, "info block").unwrap_or_default();
+    let iso_dir_path = std::path::Path::new(&iso_dir);
+    for i in 0..4 {
+        let drive_id = format!("cd{}", i);
+        for line in block_info.lines() {
+            let trimmed = line.trim();
+            if (trimmed.starts_with(&format!("{} ", drive_id))
+                || trimmed.starts_with(&format!("{}:", drive_id)))
+                && trimmed.contains("sendfiles_")
+            {
+                // Unmount old sendfiles ISO
+                let unmount_arg = format!("{} {}", smac, drive_id);
+                let _ = crate::api_helpers::send_cmd_pctl("unmountiso", &unmount_arg);
+                // Delete old ISO file
+                if let Some(start) = trimmed.find("sendfiles_") {
+                    let rest = &trimmed[start..];
+                    if let Some(end) = rest.find(|c: char| c == ' ' || c == ')' || c == '"') {
+                        let old_iso = &rest[..end];
+                        let _ = std::fs::remove_file(iso_dir_path.join(old_iso));
+                    } else {
+                        let _ = std::fs::remove_file(iso_dir_path.join(rest));
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Re-read block info after cleanup
+    let block_info =
+        crate::api_helpers::qemu_monitor_cmd(smac, "info block").unwrap_or_default();
+
+    // Find first free CD drive (cd0–cd3)
     let mut free_drive = None;
     for i in 0..4 {
         let drive_id = format!("cd{}", i);
