@@ -381,6 +381,51 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.extend(["-rtc", "base=localtime"].map(String::from));
     }
 
+    // TPM 2.0 emulation via swtpm (required for Windows 11)
+    if cfg.features.is_windows == "1" {
+        let swtpm_path = get_conf_or("swtpm_path", "swtpm");
+        if std::process::Command::new(&swtpm_path)
+            .arg("--version")
+            .output()
+            .is_ok()
+        {
+            let tpm_dir = format!("{}/{}_tpm", pctl_path, ismac);
+            let _ = std::fs::create_dir_all(&tpm_dir);
+            let tpm_sock = format!("{}/{}_tpm.sock", pctl_path, ismac);
+
+            // Remove stale socket from previous run
+            let _ = std::fs::remove_file(&tpm_sock);
+
+            // Start swtpm daemon (forks and returns when ready)
+            let _ = std::process::Command::new(&swtpm_path)
+                .args([
+                    "socket",
+                    "--tpmstate",
+                    &format!("dir={}", tpm_dir),
+                    "--ctrl",
+                    &format!("type=unixio,path={}", tpm_sock),
+                    "--tpm2",
+                    "-d",
+                ])
+                .output();
+
+            // Add TPM device to QEMU
+            qemu_args.push("-chardev".into());
+            qemu_args.push(format!("socket,id=chrtpm,path={}", tpm_sock));
+            qemu_args.push("-tpmdev".into());
+            qemu_args.push("emulator,id=tpm0,chardev=chrtpm".into());
+            qemu_args.push("-device".into());
+            if is_aarch64 {
+                qemu_args.push("tpm-tis-device,tpmdev=tpm0".into());
+            } else {
+                qemu_args.push("tpm-crb,tpmdev=tpm0".into());
+            }
+            output_log.push_str("TPM 2.0 : swtpm emulator\n");
+        } else {
+            output_log.push_str("TPM 2.0 : swtpm not found (install with: brew install swtpm)\n");
+        }
+    }
+
     // Display VNC with built-in WebSocket (no websockify needed)
     // Prevent VNC port collision: if another running VM already uses this port, auto-reassign
     let mut vnc_port = cfg.vnc_port;
