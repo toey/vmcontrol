@@ -106,6 +106,9 @@
         </select>
         <span id="cd-drive-action"></span>
         <button onclick="doSendCtrlAltDel()" style="background:#6e40c9;color:#fff;">Ctrl+Alt+Del</button>
+        <button onclick="doSendShiftF10()" style="background:#8b5cf6;color:#fff;">Shift+F10</button>
+        <button onclick="doSendAltShift()" style="background:#f59e0b;color:#000;">Alt+Shift</button>
+        <button onclick="doBypassTPM()" style="background:#ef4444;color:#fff;">Win11 Bypass</button>
         <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
@@ -211,6 +214,37 @@
             if (!rfb) { alert('Not connected'); return; }
             rfb.sendCtrlAltDel();
             setStatus('Sent Ctrl+Alt+Del', 'status-connected');
+        };
+
+        window.doSendShiftF10 = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            // Shift down → F10 down → F10 up → Shift up
+            rfb.sendKey(0xffe1, 'ShiftLeft', true);
+            rfb.sendKey(0xffc7, 'F10', true);
+            rfb.sendKey(0xffc7, 'F10', false);
+            rfb.sendKey(0xffe1, 'ShiftLeft', false);
+            setStatus('Sent Shift+F10', 'status-connected');
+        };
+
+        window.doSendAltShift = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            // Alt+Shift to switch input language in Windows
+            rfb.sendKey(0xffe9, 'AltLeft', true);
+            rfb.sendKey(0xffe1, 'ShiftLeft', true);
+            rfb.sendKey(0xffe1, 'ShiftLeft', false);
+            rfb.sendKey(0xffe9, 'AltLeft', false);
+            setStatus('Sent Alt+Shift (switch language)', 'status-connected');
+        };
+
+        window.doBypassTPM = function() {
+            if (!rfb) { alert('Not connected'); return; }
+            if (!confirm('This will type reg commands to bypass TPM, Secure Boot & Network check.\nMake sure CMD prompt is open (use Shift+F10 first).\n\nProceed?')) return;
+            var cmds = [
+                'reg add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassTPMCheck /t REG_DWORD /d 1 /f',
+                'reg add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassSecureBootCheck /t REG_DWORD /d 1 /f',
+                'reg add HKLM\\SYSTEM\\Setup\\LabConfig /v BypassNRO /t REG_DWORD /d 1 /f',
+            ].join('\n') + '\n';
+            sendTextToVm(cmds);
         };
 
         // Key maps for paste (US keyboard layout)

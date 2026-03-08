@@ -178,7 +178,15 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     };
 
     // Generate meta-data (NoCloud format with full MDS fields)
-    let hostname = format!("{}-{}", config.hostname_prefix, vm_name);
+    // Avoid duplicated hostnames like "GW-GW" when prefix equals VM name
+    let hostname = if config.hostname_prefix.is_empty()
+        || config.hostname_prefix == vm_name
+        || config.hostname_prefix == "nocloud"
+    {
+        vm_name.to_string()
+    } else {
+        format!("{}-{}", config.hostname_prefix, vm_name)
+    };
     let mut meta_data = String::new();
     // Use unique instance-id per boot — cloud-init only re-applies hostname/config
     // when instance-id changes. Append timestamp so every VM start is a "new instance".
@@ -210,8 +218,10 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
     std::fs::write(format!("{}/user-data", seed_dir), &user_data)
         .map_err(|e| format!("Failed to write user-data: {}", e))?;
 
-    // Generate network-config for internal NIC (cloud-init NoCloud, version 2)
-    if !config.internal_ip.is_empty() {
+    // Generate network-config (cloud-init NoCloud, netplan version 2)
+    // Always generate so primary NIC uses MAC-based DHCP client-id
+    // (prevents all VMs from getting the same IP on vmnet-shared)
+    {
         let primary_mac = if let Ok(vm_rec) = db::get_vm(vm_name) {
             let vm_cfg: serde_json::Value =
                 serde_json::from_str(&vm_rec.config).unwrap_or_default();
@@ -227,21 +237,24 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
             String::new()
         };
 
-        let internal_mac = derive_internal_mac(&config.internal_ip);
         let mut net_cfg = String::from("version: 2\nethernets:\n");
-        // Primary NIC — DHCP from SLIRP (preserves existing behavior)
+        // Primary NIC — DHCP (use MAC as client-id so each VM gets a unique IP)
         if !primary_mac.is_empty() {
             net_cfg.push_str("  primary:\n");
             net_cfg.push_str("    match:\n");
             net_cfg.push_str(&format!("      macaddress: \"{}\"\n", primary_mac));
             net_cfg.push_str("    dhcp4: true\n");
+            net_cfg.push_str("    dhcp-identifier: mac\n");
         }
         // Internal NIC — static IP on shared 192.168.100.0/24 subnet
-        net_cfg.push_str("  internal:\n");
-        net_cfg.push_str("    match:\n");
-        net_cfg.push_str(&format!("      macaddress: \"{}\"\n", internal_mac));
-        net_cfg.push_str("    addresses:\n");
-        net_cfg.push_str(&format!("      - {}/24\n", config.internal_ip));
+        if !config.internal_ip.is_empty() {
+            let internal_mac = derive_internal_mac(&config.internal_ip);
+            net_cfg.push_str("  internal:\n");
+            net_cfg.push_str("    match:\n");
+            net_cfg.push_str(&format!("      macaddress: \"{}\"\n", internal_mac));
+            net_cfg.push_str("    addresses:\n");
+            net_cfg.push_str(&format!("      - {}/24\n", config.internal_ip));
+        }
 
         std::fs::write(format!("{}/network-config", seed_dir), &net_cfg)
             .map_err(|e| format!("Failed to write network-config: {}", e))?;
@@ -296,6 +309,7 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
 /// Start a QEMU VM from config stored in the database
 fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, String> {
     let is_aarch64 = cfg.features.arch == "aarch64";
+    let is_windows = cfg.features.is_windows == "1";
     let qemu_path = if is_aarch64 {
         get_conf("qemu_aarch64_path")
     } else {
@@ -377,12 +391,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     }
 
     // Windows localtime (use RTC base=localtime instead of deprecated -localtime)
-    if cfg.features.is_windows == "1" {
+    if is_windows {
         qemu_args.extend(["-rtc", "base=localtime"].map(String::from));
     }
 
     // TPM 2.0 emulation via swtpm (required for Windows 11)
-    if cfg.features.is_windows == "1" {
+    if is_windows {
         let swtpm_path = get_conf_or("swtpm_path", "swtpm");
         if std::process::Command::new(&swtpm_path)
             .arg("--version")
@@ -509,10 +523,18 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-device".into());
         // bootindex=1+ so disk boots after CD-ROM (bootindex=0)
         let bootidx = disk.diskid.parse::<u32>().unwrap_or(0) + 1;
-        qemu_args.push(format!(
-            "virtio-blk-pci,drive={},bootindex={}",
-            drive_id, bootidx
-        ));
+        if is_windows {
+            // Windows has native NVMe driver — no need for virtio driver
+            qemu_args.push(format!(
+                "nvme,drive={},serial=disk{},bootindex={}",
+                drive_id, disk.diskid, bootidx
+            ));
+        } else {
+            qemu_args.push(format!(
+                "virtio-blk-pci,drive={},bootindex={}",
+                drive_id, bootidx
+            ));
+        }
     }
 
     // Network adapters (user-mode networking)
@@ -611,7 +633,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     output_log.push_str(&format!("vlan   : {} (mcast 230.{}.{}.1:{})\n",
                         vlan_id, mcast_hi, mcast_lo, sw.mcast_port));
                     qemu_args.push(format!(
-                        "socket,id=net{},mcast=230.{}.{}.1:{}",
+                        "socket,id=net{},mcast=230.{}.{}.1:{},localaddr=127.0.0.1",
                         adapter.netid, mcast_hi, mcast_lo, sw.mcast_port
                     ));
                 }
@@ -701,23 +723,40 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         }
 
         qemu_args.push("-device".into());
-        qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
+        if is_windows {
+            // Windows has native e1000 driver — no need for virtio driver
+            // (user can install virtio-win drivers later for better performance)
+            qemu_args.push(format!("e1000,netdev=net{},mac={}", adapter.netid, adapter.mac));
+        } else {
+            qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
+        }
     }
 
-    // Internal network — shared L2 multicast for VM-to-VM communication
+    // Internal network — VM-to-VM communication on 192.168.100.0/24
     if !mds_config.internal_ip.is_empty() {
         let internal_mac = derive_internal_mac(&mds_config.internal_ip);
-        let internal_mcast_port = get_conf_or("internal_mcast_port", "11111");
 
         output_log.push_str(&format!("internal_ip : {}\n", mds_config.internal_ip));
         output_log.push_str(&format!("internal_mac: {}\n", internal_mac));
-        output_log.push_str(&format!("internal_net: 230.0.100.1:{}\n", internal_mcast_port));
 
         qemu_args.push("-netdev".into());
-        qemu_args.push(format!(
-            "socket,id=netint,mcast=230.0.100.1:{}",
-            internal_mcast_port
-        ));
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: use vmnet-host for reliable VM-to-VM communication
+            // (multicast sockets don't work reliably on macOS)
+            qemu_args.push("vmnet-host,id=netint,start-address=192.168.100.1,end-address=192.168.100.254,subnet-mask=255.255.255.0".into());
+            output_log.push_str("internal_net: vmnet-host 192.168.100.0/24\n");
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Linux/Windows: use multicast socket (works reliably)
+            let internal_mcast_port = get_conf_or("internal_mcast_port", "11111");
+            output_log.push_str(&format!("internal_net: 230.0.100.1:{}\n", internal_mcast_port));
+            qemu_args.push(format!(
+                "socket,id=netint,mcast=230.0.100.1:{}",
+                internal_mcast_port
+            ));
+        }
         qemu_args.push("-device".into());
         qemu_args.push(format!(
             "virtio-net-pci,netdev=netint,mac={}",
@@ -799,10 +838,43 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     // bootindex=0 on cd0 so UEFI/BIOS tries CD first, then falls through to disk
     // aarch64: use usb-storage (more compatible with Windows ARM64 bootloader)
     // x86_64:  use scsi-cd (traditional approach)
+    //
+    // For Windows VMs: auto-mount virtio-win ISO on cd3 if available
+    // (provides virtio drivers for network, balloon, etc. during installation)
+    let virtio_iso = if is_windows {
+        let iso_dir = get_conf("iso_path");
+        // Look for virtio-win*.iso in the ISO directory
+        let mut found: Option<String> = None;
+        if let Ok(entries) = std::fs::read_dir(&iso_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if name.starts_with("virtio-win") && name.ends_with(".iso") {
+                    found = Some(entry.path().to_string_lossy().to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(ref p) = found {
+            output_log.push_str(&format!("virtio-win ISO: {} (auto-mount on cd3)\n", p));
+        }
+        found
+    } else {
+        None
+    };
+
     for i in 0..4u8 {
         let drive_id = format!("cd{}", i);
         qemu_args.push("-drive".into());
-        qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
+        // Pre-load virtio-win ISO on cd3 for Windows VMs
+        if i == 3 {
+            if let Some(ref viso) = virtio_iso {
+                qemu_args.push(format!("if=none,id={},media=cdrom,file={},readonly=on", drive_id, viso));
+            } else {
+                qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
+            }
+        } else {
+            qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
+        }
         qemu_args.push("-device".into());
         if is_aarch64 {
             if i == 0 {
@@ -829,8 +901,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("unix:{}/{},server,nowait", pctl_path, ismac));
 
     // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
-    // Bridge mode requires sudo for vmnet (macOS) / tap (Linux)
-    let needs_sudo = cfg.network_adapters.iter().any(|a| a.mode == "bridge");
+    // Bridge/vmnet modes require sudo on macOS
+    let needs_bridge = cfg.network_adapters.iter().any(|a| a.mode == "bridge");
+    let needs_vmnet_internal = cfg!(target_os = "macos") && !mds_config.internal_ip.is_empty();
+    let needs_sudo = needs_bridge || needs_vmnet_internal;
     let use_sudo = needs_sudo && get_conf_or("bridge_sudo", "true") == "true";
 
     let (pid, log_path) = if use_sudo {
