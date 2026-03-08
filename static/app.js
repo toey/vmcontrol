@@ -1207,6 +1207,14 @@ async function loadDiskList() {
                     '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + flattenBtn + ' ' + templateToggleBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
                     '</div>';
             }).join('');
+            // Calculate and display total disk usage
+            var totalBytes = 0;
+            var diskCount = disks.length;
+            disks.forEach(function(d) { totalBytes += (d.size || 0); });
+            listDiv.innerHTML += '<div style="padding:8px 0 4px 0;border-top:2px solid #30363d;margin-top:4px;display:flex;justify-content:space-between;align-items:center;">' +
+                '<span style="color:#8b949e;font-size:13px;">Total: <strong style="color:#c9d1d9;">' + diskCount + '</strong> disks</span>' +
+                '<span style="color:#8b949e;font-size:13px;">Total size: <strong style="color:#f0883e;">' + formatSize(totalBytes) + '</strong></span>' +
+                '</div>';
         }
         // Refresh any disk selects on the page
         refreshAllDiskSelects();
