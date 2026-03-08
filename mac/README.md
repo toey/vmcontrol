@@ -452,7 +452,8 @@ Works on **all VMs** without any guest software. Files are packaged into an ISO 
 Writes files **directly to the VM filesystem** via QEMU Guest Agent. Requires `qemu-guest-agent` installed in the guest:
 
 - **Linux VMs**: Auto-installed via cloud-init. Or manually: `apt install qemu-guest-agent`
-- **Windows VMs**: Install from the auto-mounted virtio-win ISO (D: drive): run `virtio-win-guest-tools.exe` or `guest-agent\qemu-ga-x86_64.msi`
+- **Windows VMs (x86_64)**: Install from the auto-mounted virtio-win ISO (D: drive): run `virtio-win-guest-tools.exe` or `guest-agent\qemu-ga-x86_64.msi`
+- **Windows VMs (ARM64)**: Guest agent is not included in virtio-win ISO for ARM64. Use the ISO method instead
 
 All VMs are provisioned with virtio-serial devices for guest agent communication. The VNC modal auto-detects agent availability and shows the appropriate method.
 
