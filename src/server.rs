@@ -510,10 +510,15 @@ async fn vnc_resolve_handler(
         }
     };
 
-    let vnc_port = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
-        cfg.get("vnc_port").and_then(|v| v.as_u64()).unwrap_or(0)
+    let (vnc_port, is_windows) = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+        let port = cfg.get("vnc_port").and_then(|v| v.as_u64()).unwrap_or(0);
+        let win = cfg.pointer("/features/is_windows")
+            .and_then(|v| v.as_str())
+            .map(|s| s == "1")
+            .unwrap_or(false);
+        (port, win)
     } else {
-        0
+        (0, false)
     };
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -521,6 +526,7 @@ async fn vnc_resolve_handler(
         "smac": vnc_token.smac,
         "vnc_port": vnc_port,
         "status": vm.status,
+        "is_windows": is_windows,
     }))
 }
 

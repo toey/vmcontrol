@@ -106,9 +106,9 @@
         </select>
         <span id="cd-drive-action"></span>
         <button onclick="doSendCtrlAltDel()" style="background:#6e40c9;color:#fff;">Ctrl+Alt+Del</button>
-        <button onclick="doSendShiftF10()" style="background:#8b5cf6;color:#fff;">Shift+F10</button>
-        <button onclick="doSendAltShift()" style="background:#f59e0b;color:#000;">Alt+Shift</button>
-        <button onclick="doBypassTPM()" style="background:#ef4444;color:#fff;">Win11 Bypass</button>
+        <button id="btn-shift-f10" onclick="doSendShiftF10()" style="background:#8b5cf6;color:#fff;display:none;">Shift+F10</button>
+        <button id="btn-alt-shift" onclick="doSendAltShift()" style="background:#f59e0b;color:#000;display:none;">Alt+Shift</button>
+        <button id="btn-win11-bypass" onclick="doBypassTPM()" style="background:#ef4444;color:#fff;display:none;">Win11 Bypass</button>
         <button class="btn-action" onclick="doPaste()">Paste</button>
         <span id="status" class="status-disconnected">Disconnected</span>
     </div>
@@ -566,6 +566,15 @@
             setTimeout(function() { if (rfb) rfb.focus(); }, 150);
         });
 
+        // Show/hide Windows-specific toolbar buttons
+        function showWindowsButtons(show) {
+            var ids = ['btn-shift-f10', 'btn-alt-shift', 'btn-win11-bypass'];
+            ids.forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el) el.style.display = show ? '' : 'none';
+            });
+        }
+
         // Helper: set up VNC page after resolving VM info
         function setupVm(smac, vncPort, vmStatus) {
             window._vncSmac = smac;
@@ -612,7 +621,8 @@
                         return;
                     }
                     var data = await res.json();
-                    // data = { smac, vnc_port, status }
+                    // data = { smac, vnc_port, status, is_windows }
+                    if (data.is_windows) showWindowsButtons(true);
                     setupVm(data.smac, data.vnc_port, data.status);
                 } catch(e) {
                     setStatus('Token error: ' + e.message, 'status-disconnected');
@@ -630,12 +640,15 @@
                     }
                     var vm = await res.json();
                     var port = 0;
+                    var isWin = false;
                     if (vm.config) {
                         try {
                             var cfg = JSON.parse(vm.config);
                             port = cfg.vnc_port || 0;
+                            isWin = cfg.features && cfg.features.is_windows === '1';
                         } catch(e) {}
                     }
+                    if (isWin) showWindowsButtons(true);
                     setupVm(smac, port, vm.status);
                 } catch(e) {
                     setStatus('Error: ' + e.message, 'status-disconnected');
