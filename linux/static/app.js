@@ -619,7 +619,7 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         // Auto-load disk list when switching to createdisk tab
         if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
-        if (tab.dataset.tab === 'backup') { loadBackupList(); }
+        if (tab.dataset.tab === 'backup') { loadBackupList(); loadFullBackupList(); loadSnapshotList(); }
         // Auto-load DHCP table when switching to dhcp tab
         if (tab.dataset.tab === 'dhcp') { loadDhcpTable(); }
         // Auto-load internal network when switching to internal-net tab
@@ -663,7 +663,7 @@ async function apiCall(operation, payload) {
     document.querySelectorAll('.execute-btn').forEach(function(b) { b.disabled = true; });
 
     try {
-        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('switch/') || operation.startsWith('group/') || operation.startsWith('sshkey/')) ? '/api/' + operation : '/api/vm/' + operation;
+        var apiPath = (operation.startsWith('vnc/') || operation.startsWith('disk/') || operation.startsWith('iso/') || operation.startsWith('backup/') || operation.startsWith('fullbackup/') || operation.startsWith('snapshot/') || operation.startsWith('switch/') || operation.startsWith('group/') || operation.startsWith('sshkey/')) ? '/api/' + operation : '/api/vm/' + operation;
         console.log('apiCall:', operation, '->', apiPath);
         var response = await apiFetch(apiPath, {
             method: 'POST',
@@ -711,9 +711,15 @@ async function executeSimple(operation) {
 // ======== Backup Management ========
 
 async function executeBackup() {
-    var ok = await apiCall('backup', {
-        smac: val('backup-smac'),
-    });
+    var smac = val('backup-smac');
+    if (!smac) { alert('Select a VM'); return; }
+    // Check VM is running
+    var vmData = (window._vmListData || []).find(function(v) { return v.smac === smac; });
+    if (vmData && vmData.status !== 'running') {
+        alert('VM must be running to create a memory dump.');
+        return;
+    }
+    var ok = await apiCall('backup', { smac: smac });
     if (ok) {
         loadBackupList();
     }
@@ -758,6 +764,143 @@ async function deleteBackup(filename) {
     if (ok) {
         loadBackupList();
     }
+}
+
+// ======== Full Backup Management ========
+
+async function createFullBackup() {
+    var vmName = val('fullbackup-vm');
+    if (!vmName) { alert('Select a VM'); return; }
+    var note = val('fullbackup-note');
+    var ok = await apiCall('fullbackup/create', { vm_name: vmName, note: note });
+    if (ok) {
+        document.getElementById('fullbackup-note').value = '';
+        loadFullBackupList();
+    }
+}
+
+async function loadFullBackupList() {
+    try {
+        var response = await apiFetch('/api/fullbackup/list');
+        var backups = await safeJson(response);
+        var listDiv = document.getElementById('fullbackup-list');
+        if (!listDiv) return;
+        if (!backups || backups.length === 0) {
+            listDiv.innerHTML = '<em style="color:#8b949e;">No full backups</em>';
+            return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">' +
+            '<tr style="border-bottom:2px solid #30363d;">' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">VM</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Disks</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Note</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Date</th>' +
+            '<th style="text-align:right;padding:6px 8px;color:#58a6ff;">Size</th>' +
+            '<th style="text-align:right;padding:6px 8px;"></th>' +
+            '</tr>';
+        backups.forEach(function(b) {
+            var disks = '';
+            try { disks = JSON.parse(b.disk_names).join(', '); } catch(_) { disks = b.disk_names; }
+            var safeBid = b.backup_id.replace(/'/g, "\\'");
+            var safeVm = b.vm_name.replace(/'/g, "\\'");
+            html += '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.vm_name) + '</td>' +
+                '<td style="padding:6px 8px;font-size:0.8em;">' + escapeHtml(disks) + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.note || '') + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(b.created_at) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;">' + formatSize(b.total_size) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' +
+                '<button class="btn-clone" onclick="restoreFullBackup(\'' + safeBid + '\',\'' + safeVm + '\')" style="background:#d29922;color:#000;">Restore</button> ' +
+                '<button class="btn-remove" onclick="deleteFullBackup(\'' + safeBid + '\')">X</button>' +
+                '</td></tr>';
+        });
+        html += '</table>';
+        listDiv.innerHTML = html;
+    } catch (err) {
+        console.error('Failed to load full backup list:', err);
+    }
+}
+
+async function restoreFullBackup(backupId, vmName) {
+    if (!confirm('Restore backup "' + backupId + '" for VM "' + vmName + '"?\n\nThis will OVERWRITE current disk files!')) return;
+    var ok = await apiCall('fullbackup/restore', { backup_id: backupId, vm_name: vmName });
+    if (ok) loadFullBackupList();
+}
+
+async function deleteFullBackup(backupId) {
+    if (!confirm('Delete full backup "' + backupId + '"?\nThis cannot be undone.')) return;
+    var ok = await apiCall('fullbackup/delete', { backup_id: backupId });
+    if (ok) loadFullBackupList();
+}
+
+// ======== Snapshot Management ========
+
+async function createSnapshot() {
+    var vmName = val('snapshot-vm');
+    if (!vmName) { alert('Select a VM'); return; }
+    var note = val('snapshot-note');
+    var ok = await apiCall('snapshot/create', { vm_name: vmName, note: note });
+    if (ok) {
+        document.getElementById('snapshot-note').value = '';
+        loadSnapshotList();
+    }
+}
+
+async function loadSnapshotList() {
+    var vmName = val('snapshot-vm');
+    var listDiv = document.getElementById('snapshot-list');
+    if (!listDiv) return;
+    if (!vmName) {
+        listDiv.innerHTML = '<em style="color:#8b949e;">Select a VM to view snapshots</em>';
+        return;
+    }
+    try {
+        var response = await apiFetch('/api/snapshot/list/' + encodeURIComponent(vmName));
+        var snapshots = await safeJson(response);
+        if (!snapshots || snapshots.length === 0) {
+            listDiv.innerHTML = '<em style="color:#8b949e;">No snapshots for this VM</em>';
+            return;
+        }
+        var html = '<table style="width:100%;border-collapse:collapse;font-size:0.85rem;">' +
+            '<tr style="border-bottom:2px solid #30363d;">' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Snapshot ID</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Disks</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Note</th>' +
+            '<th style="text-align:left;padding:6px 8px;color:#58a6ff;">Date</th>' +
+            '<th style="text-align:right;padding:6px 8px;"></th>' +
+            '</tr>';
+        snapshots.forEach(function(s) {
+            var disks = Array.isArray(s.disks) ? s.disks.join(', ') : (s.disk_name || '');
+            var safeSnap = s.snapshot_id.replace(/'/g, "\\'");
+            html += '<tr style="border-bottom:1px solid #21262d;">' +
+                '<td style="padding:6px 8px;font-family:monospace;font-size:0.85em;">' + escapeHtml(s.snapshot_id) + '</td>' +
+                '<td style="padding:6px 8px;font-size:0.8em;">' + escapeHtml(disks) + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(s.note || '') + '</td>' +
+                '<td style="padding:6px 8px;">' + escapeHtml(s.created_at) + '</td>' +
+                '<td style="padding:6px 8px;text-align:right;white-space:nowrap;">' +
+                '<button class="btn-clone" onclick="revertSnapshot(\'' + safeSnap + '\')" style="background:#d29922;color:#000;">Revert</button> ' +
+                '<button class="btn-remove" onclick="deleteSnapshot(\'' + safeSnap + '\')">X</button>' +
+                '</td></tr>';
+        });
+        html += '</table>';
+        listDiv.innerHTML = html;
+    } catch (err) {
+        console.error('Failed to load snapshot list:', err);
+    }
+}
+
+async function revertSnapshot(snapshotId) {
+    var vmName = val('snapshot-vm');
+    if (!confirm('Revert VM "' + vmName + '" to snapshot "' + snapshotId + '"?\n\nCurrent disk state will be LOST!')) return;
+    var ok = await apiCall('snapshot/revert', { vm_name: vmName, snapshot_id: snapshotId });
+    if (ok) loadSnapshotList();
+}
+
+async function deleteSnapshot(snapshotId) {
+    var vmName = val('snapshot-vm');
+    if (!confirm('Delete snapshot "' + snapshotId + '"?')) return;
+    var ok = await apiCall('snapshot/delete', { vm_name: vmName, snapshot_id: snapshotId });
+    if (ok) loadSnapshotList();
 }
 
 // Collect VM config from the Create/Edit form
@@ -1157,41 +1300,85 @@ function onPciSelectChange(sel) {
 // ======== Disk Management ========
 
 // Load disk list from API and cache it
+function renderDiskRow(d) {
+    var safeName = d.name.replace(/'/g, "\\'");
+    var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
+    var backingBadge = d.backing_file ? ' <small style="color:#d29922;">[linked: ' + escapeHtml(d.backing_file) + ']</small>' : '';
+    var cloneCountBadge = (d.clone_count && d.clone_count > 0) ? ' <small style="color:#f0883e;">[' + d.clone_count + ' clone' + (d.clone_count > 1 ? 's' : '') + ']</small>' : '';
+    var isTemplate = d.is_template === '1';
+    var hasClones = d.clone_count && d.clone_count > 0;
+    var isLinked = !!d.backing_file;
+
+    var exportBtn = '<span class="export-dropdown">' +
+        '<button class="btn-export" onclick="this.parentElement.classList.toggle(\'open\')" title="Export / Download">Export ▾</button>' +
+        '<span class="export-dropdown-content">' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">qcow2 (original)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">VMDK (VMware)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">VDI (VirtualBox)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">VHDX (Hyper-V)</a>' +
+        '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">Raw image</a>' +
+        '</span></span>';
+    var resizeBtn = isTemplate ? '' : '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
+    var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
+    var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">Clone Template</button>';
+    var flattenBtn = isLinked ? '<button class="btn-clone" onclick="flattenDisk(\'' + safeName + '\')" title="Merge backing chain into standalone disk" style="background:#7c3aed;color:#fff;">Flatten</button>' : '';
+    var templateToggleBtn = '<button class="btn-clone" onclick="toggleTemplate(\'' + safeName + '\', ' + (isTemplate ? 'false' : 'true') + ')" title="' + (isTemplate ? 'Unlock template' : 'Lock as template') + '" style="background:' + (isTemplate ? '#da3633' : '#a371f7') + ';color:#fff;">' + (isTemplate ? 'Unlock' : 'Lock') + '</button>';
+    var editFilesBtn = '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>';
+    var deleteBtn = (d.owner || isTemplate || hasClones) ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
+    var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
+        '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + backingBadge + cloneCountBadge + '</span>' +
+        '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + flattenBtn + ' ' + templateToggleBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
+        '</div>';
+}
+
+function renderDiskSummary(diskArr, label) {
+    var totalBytes = 0;
+    diskArr.forEach(function(d) { totalBytes += (d.size || 0); });
+    return '<div style="padding:8px 0 4px 0;border-top:2px solid #30363d;margin-top:4px;display:flex;justify-content:space-between;align-items:center;">' +
+        '<span style="color:#8b949e;font-size:13px;">' + label + ': <strong style="color:#c9d1d9;">' + diskArr.length + '</strong> disks</span>' +
+        '<span style="color:#8b949e;font-size:13px;">Size: <strong style="color:#f0883e;">' + formatSize(totalBytes) + '</strong></span>' +
+        '</div>';
+}
+
 async function loadDiskList() {
     try {
         var response = await apiFetch('/api/disk/list');
         var disks = await safeJson(response);
         window._diskList = disks;
-        // Render file list in Create Disk tab
+
         var listDiv = document.getElementById('disk-file-list');
-        if (!listDiv) return;
-        if (disks.length === 0) {
-            listDiv.innerHTML = '<em>No disk files</em>';
-        } else {
-            listDiv.innerHTML = disks.map(function(d) {
-                var safeName = d.name.replace(/'/g, "\\'");
-                var ownerText = d.owner ? ' <small style="color:#58a6ff;">[' + escapeHtml(d.owner) + ']</small>' : ' <small style="color:#3fb950;">[free]</small>';
-                var exportBtn = '<span class="export-dropdown">' +
-                    '<button class="btn-export" onclick="this.parentElement.classList.toggle(\'open\')" title="Export / Download">Export ▾</button>' +
-                    '<span class="export-dropdown-content">' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'qcow2\')">⬇ qcow2 (original)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vmdk\')">⬇ VMDK (VMware)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vdi\')">⬇ VDI (VirtualBox)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'vhdx\')">⬇ VHDX (Hyper-V)</a>' +
-                    '<a href="javascript:void(0)" onclick="exportDisk(\'' + safeName + '\', \'raw\')">⬇ Raw image</a>' +
-                    '</span></span>';
-                var resizeBtn = '<button class="btn-clone" onclick="resizeDisk(\'' + safeName + '\', \'' + (d.disk_size || '').replace(/'/g, "\\'") + '\')">Resize</button>';
-                var cloneBtn = '<button class="btn-clone" onclick="cloneDisk(\'' + safeName + '\')">Clone</button>';
-                var cloneTplBtn = '<button class="btn-clone" onclick="cloneDiskAsTemplate(\'' + safeName + '\')" title="Clone as template image">→ Template</button>';
-                var editFilesBtn = '<button class="btn-clone" onclick="openDiskEditor(\'' + safeName + '\')" title="Browse and edit files inside disk" style="background:#1f6feb;color:#fff;">Edit Files</button>';
-                var deleteBtn = d.owner ? '' : '<button class="btn-remove" onclick="deleteDisk(\'' + safeName + '\')">X</button>';
-                var sizeInfo = d.disk_size ? d.disk_size : formatSize(d.size);
-                return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
-                    '<span>' + escapeHtml(d.name) + '.qcow2 <small>(' + escapeHtml(sizeInfo) + ')</small>' + ownerText + '</span>' +
-                    '<span>' + exportBtn + ' ' + resizeBtn + ' ' + cloneBtn + ' ' + cloneTplBtn + ' ' + editFilesBtn + ' ' + deleteBtn + '</span>' +
-                    '</div>';
-            }).join('');
+        var tplDiv = document.getElementById('disk-template-list');
+
+        // Separate templates (name starts with "template-" OR is_template=1 OR has clones) from regular disks
+        var templates = [];
+        var regular = [];
+        disks.forEach(function(d) {
+            if (d.name.indexOf('template-') === 0 || d.is_template === '1' || (d.clone_count && d.clone_count > 0)) {
+                templates.push(d);
+            } else {
+                regular.push(d);
+            }
+        });
+
+        // Render template list
+        if (tplDiv) {
+            if (templates.length === 0) {
+                tplDiv.innerHTML = '<em style="color:#8b949e;">No template disks</em>';
+            } else {
+                tplDiv.innerHTML = templates.map(renderDiskRow).join('') + renderDiskSummary(templates, 'Templates');
+            }
         }
+
+        // Render regular disk list
+        if (listDiv) {
+            if (regular.length === 0) {
+                listDiv.innerHTML = '<em style="color:#8b949e;">No disk files</em>';
+            } else {
+                listDiv.innerHTML = regular.map(renderDiskRow).join('') + renderDiskSummary(regular, 'Disks');
+            }
+        }
+
         // Refresh any disk selects on the page
         refreshAllDiskSelects();
     } catch (err) {
@@ -1211,6 +1398,8 @@ function populateDiskSelect(selectEl, selectedValue) {
             var opt = document.createElement('option');
             opt.value = d.name;
             var label = d.name + ' (' + (d.disk_size || formatSize(d.size)) + ')';
+            if (d.backing_file) label += ' [linked:' + d.backing_file + ']';
+            if (d.is_template === '1') label += ' [TPL]';
             if (d.owner && d.owner !== editingVm) {
                 label += ' [' + d.owner + ']';
             }
@@ -1287,14 +1476,16 @@ async function cloneDisk(source) {
     if (!newName) return;
     newName = newName.trim();
     if (!newName) return;
+    // Ask for clone type
+    var linked = confirm('Use linked clone (fast, saves space)?\n\nOK = Linked clone (uses backing file)\nCancel = Full copy (independent, slower)');
     var statusEl = document.getElementById('status-indicator');
     statusEl.className = 'loading';
-    statusEl.textContent = 'Cloning ' + source + ' -> ' + newName + '...';
+    statusEl.textContent = (linked ? 'Linked-cloning ' : 'Full-copying ') + source + ' -> ' + newName + '...';
     try {
         var response = await apiFetch('/api/disk/clone', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source: source, name: newName }),
+            body: JSON.stringify({ source: source, name: newName, linked: linked }),
         });
         var data = await safeJson(response);
         if (data.success) {
@@ -1328,6 +1519,62 @@ async function cloneDiskAsTemplate(source) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ source: source, name: newName }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            loadDiskList();
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// Flatten a linked clone disk into standalone
+async function flattenDisk(name) {
+    if (!confirm('Flatten "' + name + '"?\n\nThis will merge the backing chain into a standalone disk.\nThe disk will become independent (larger file, no longer linked).')) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Flattening ' + name + '...';
+    try {
+        var response = await apiFetch('/api/disk/flatten', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name }),
+        });
+        var data = await safeJson(response);
+        if (data.success) {
+            statusEl.className = 'success';
+            statusEl.textContent = data.message;
+            loadDiskList();
+        } else {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Error: ' + data.message;
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error: ' + err.message;
+    }
+}
+
+// Toggle template lock on a disk
+async function toggleTemplate(name, lock) {
+    var action = lock ? 'lock as template' : 'unlock template';
+    if (!confirm((lock ? 'Lock' : 'Unlock') + ' "' + name + '" as template?\n\n' +
+        (lock ? 'Template disks cannot be deleted or resized while locked.' : 'This will allow deletion and modification.'))) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = (lock ? 'Locking' : 'Unlocking') + ' ' + name + '...';
+    try {
+        var response = await apiFetch('/api/disk/set-template', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name, is_template: lock ? '1' : '0' }),
         });
         var data = await safeJson(response);
         if (data.success) {
@@ -2218,6 +2465,7 @@ async function loadVmList() {
         var selects = [
             'listimage-smac', 'mountiso-smac',
             'livemigrate-smac', 'backup-smac',
+            'fullbackup-vm', 'snapshot-vm',
             'metadata-smac'
         ];
         selects.forEach(function(id) {

@@ -95,6 +95,11 @@
         <a href="/" class="btn-back">&larr; Back</a>
         <h1>VM Console</h1>
         <span id="vnc-vm-name" class="info-text" style="font-size:14px;"></span>
+        <span id="vnc-creds" style="display:none;background:#1c2128;border:1px solid #30363d;padding:3px 10px;border-radius:4px;font-family:monospace;font-size:13px;">
+            <span style="color:#8b949e;">user:</span> <span style="color:#3fb950;">vmctl</span>
+            <span style="color:#8b949e;">pass:</span> <span id="vnc-creds-pass" style="color:#f0883e;cursor:pointer;" title="Click to copy" onclick="navigator.clipboard.writeText(this.textContent).then(function(){document.getElementById('vnc-creds-copied').style.display='inline';setTimeout(function(){document.getElementById('vnc-creds-copied').style.display='none';},1500);})"></span>
+            <span id="vnc-creds-copied" style="display:none;color:#3fb950;font-size:11px;margin-left:4px;">copied!</span>
+        </span>
         <span id="vnc-host" style="display:none"></span>
         <span id="vnc-port" style="display:none">12001</span>
         <button class="btn-connect" id="btn-connect" onclick="doConnect()">Connect</button>
@@ -883,6 +888,17 @@
             if (vimLabel) vimLabel.style.display = show ? 'none' : '';
         }
 
+        // Show vmctl credentials on the toolbar
+        function showVmctlCreds(password) {
+            if (!password) return;
+            var credsEl = document.getElementById('vnc-creds');
+            var passEl = document.getElementById('vnc-creds-pass');
+            if (credsEl && passEl) {
+                passEl.textContent = password;
+                credsEl.style.display = '';
+            }
+        }
+
         // Helper: set up VNC page after resolving VM info
         function setupVm(smac, vncPort, vmStatus) {
             window._vncSmac = smac;
@@ -927,10 +943,11 @@
                         return;
                     }
                     var data = await res.json();
-                    // data = { smac, vnc_port, status, is_windows, arch }
+                    // data = { smac, vnc_port, status, is_windows, arch, vmctl_password }
                     window._isWindows = !!data.is_windows;
                     window._vmArch = data.arch || 'x86_64';
                     if (data.is_windows) showWindowsButtons(true);
+                    if (data.vmctl_password) showVmctlCreds(data.vmctl_password);
                     setupVm(data.smac, data.vnc_port, data.status);
                 } catch(e) {
                     setStatus('Token error: ' + e.message, 'status-disconnected');
@@ -950,17 +967,20 @@
                     var port = 0;
                     var isWin = false;
                     var vmArch = 'x86_64';
+                    var vmctlPw = '';
                     if (vm.config) {
                         try {
                             var cfg = JSON.parse(vm.config);
                             port = cfg.vnc_port || 0;
                             isWin = cfg.features && cfg.features.is_windows === '1';
                             vmArch = cfg.arch || 'x86_64';
+                            vmctlPw = cfg.vmctl_password || '';
                         } catch(e) {}
                     }
                     window._isWindows = isWin;
                     window._vmArch = vmArch;
                     if (isWin) showWindowsButtons(true);
+                    if (vmctlPw) showVmctlCreds(vmctlPw);
                     setupVm(smac, port, vm.status);
                 } catch(e) {
                     setStatus('Error: ' + e.message, 'status-disconnected');

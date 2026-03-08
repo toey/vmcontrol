@@ -2110,16 +2110,6 @@ pub fn create_snapshot(vm_name: &str, note: &str) -> Result<String, String> {
     let disk_path = get_conf("disk_path");
     let qemu_img = get_conf("qemu_img_path");
 
-    // Check for linked clones — qemu-img snapshot doesn't work with backing files
-    for dname in &disk_names {
-        if let Ok(Some(backing)) = get_disk_backing_info(dname) {
-            return Err(format!(
-                "Disk '{}' is a linked clone (backing: {}). Flatten it first before creating a snapshot.",
-                dname, backing
-            ));
-        }
-    }
-
     let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let rnd = generate_random_password(4);
     let snapshot_id = format!("snap_{}_{}", ts, rnd);
