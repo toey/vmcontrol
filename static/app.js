@@ -711,9 +711,15 @@ async function executeSimple(operation) {
 // ======== Backup Management ========
 
 async function executeBackup() {
-    var ok = await apiCall('backup', {
-        smac: val('backup-smac'),
-    });
+    var smac = val('backup-smac');
+    if (!smac) { alert('Select a VM'); return; }
+    // Check VM is running
+    var vmData = (window._vmListData || []).find(function(v) { return v.smac === smac; });
+    if (vmData && vmData.status !== 'running') {
+        alert('VM must be running to create a memory dump.');
+        return;
+    }
+    var ok = await apiCall('backup', { smac: smac });
     if (ok) {
         loadBackupList();
     }

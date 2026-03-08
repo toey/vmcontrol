@@ -1938,6 +1938,12 @@ pub fn backup(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
+    // VM must be running for memory dump
+    if let Ok(vm) = db::get_vm(&cmd.smac) {
+        if vm.status != "running" {
+            return Err("VM must be running to create a memory dump".into());
+        }
+    }
     let output = send_cmd_pctl("backup", &cmd.smac);
     Ok(output)
 }
