@@ -1035,9 +1035,8 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     qemu_args.push(format!("{},sockets={},cores={},threads={}",
         total_cpus, sockets, cores, threads));
 
-    // SCSI controller (shared by seed ISO + runtime CD-ROM drives)
-    qemu_args.push("-device".into());
-    qemu_args.push("virtio-scsi-pci,id=scsi0".into());
+    // NOTE: virtio-scsi-pci removed — CD-ROM now uses usb-storage which needs no
+    // extra drivers. This ensures Windows Setup can access virtio-win ISO on cd3.
 
     // Cloud-init seed ISO — attach as virtio-blk so ALL guests can see it
     // (virtio-scsi requires guest kernel module; virtio-blk always works since
@@ -1113,24 +1112,23 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             qemu_args.push(format!("if=none,id={},media=cdrom", drive_id));
         }
         qemu_args.push("-device".into());
-        if is_aarch64 {
-            if i == 0 {
-                qemu_args.push(format!("usb-storage,drive={},removable=true,bootindex=0", drive_id));
-            } else {
-                qemu_args.push(format!("usb-storage,drive={},removable=true", drive_id));
-            }
+        // Use usb-storage for all platforms — universally recognized by all OS
+        // without extra drivers (scsi-cd on virtio-scsi requires vioscsi driver
+        // which Windows Setup doesn't have, making virtio-win ISO inaccessible)
+        if i == 0 {
+            qemu_args.push(format!("usb-storage,drive={},removable=true,bootindex=0", drive_id));
         } else {
-            if i == 0 {
-                qemu_args.push(format!("scsi-cd,drive={},bootindex=0", drive_id));
-            } else {
-                qemu_args.push(format!("scsi-cd,drive={}", drive_id));
-            }
+            qemu_args.push(format!("usb-storage,drive={},removable=true", drive_id));
         }
     }
 
     // USB tablet (for mouse) — aarch64 already has xhci+kbd+tablet from above
     if !is_aarch64 {
-        qemu_args.extend(["-usb", "-device", "usb-tablet,bus=usb-bus.0,port=1"].map(String::from));
+        // Use xHCI controller (supports many USB devices: 4 CD-ROMs + tablet)
+        qemu_args.push("-device".into());
+        qemu_args.push("qemu-xhci,id=xhci".into());
+        qemu_args.push("-device".into());
+        qemu_args.push("usb-tablet,bus=xhci.0".into());
     }
 
     // Monitor socket
