@@ -52,14 +52,21 @@ document.addEventListener('keydown', function(e) {
         submitLogin();
     }
 });
-// Generate a new API key from the login overlay (no auth needed for generate endpoint)
+// Generate a new API key from the login overlay.
+// If a key already exists on the server, the current key must be provided for auth.
+// First-time setup (no key yet) works without auth.
 async function generateAndLogin() {
     var errEl = document.getElementById('login-error');
     errEl.textContent = 'Generating new API key...';
     errEl.style.display = 'block';
     errEl.style.color = '#8b949e';
     try {
-        var res = await fetch('/api/apikey/generate', { method: 'POST' });
+        // Send current key from input field (if any) for authentication
+        var currentKey = document.getElementById('login-apikey-input').value.trim();
+        var headers = { 'Content-Type': 'application/json' };
+        if (currentKey) headers['X-API-Key'] = currentKey;
+        var res = await fetch('/api/apikey/generate', { method: 'POST', headers: headers });
+        if (res.status === 401) throw new Error('A key already exists. Enter your current key first, then click Generate.');
         if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
         var text = await res.text();
         var data;

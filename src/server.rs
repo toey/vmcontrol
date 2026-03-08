@@ -87,7 +87,11 @@ where
             if path.starts_with("/api/vnc/resolve/") {
                 return svc.call(req).await;
             }
-            // /api/apikey/generate requires auth (do NOT skip)
+            // Allow /api/apikey/generate without auth ONLY when no key exists yet (first-time setup).
+            // Once a key is configured, generating a new one requires authentication.
+            // Note: api_key is non-empty here (empty case returns early above).
+            // So this block is intentionally unreachable — generate always requires auth
+            // when a key is set. This comment documents the security rationale.
 
             // Check X-API-Key header
             let provided = req.headers()
