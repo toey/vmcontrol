@@ -1,6 +1,5 @@
 use actix_files as fs;
 use actix_web::{dev, middleware, web, App, HttpResponse, HttpServer};
-use actix_web::web::Bytes;
 use std::collections::HashMap;
 use std::future::{ready, Future, Ready};
 use std::pin::Pin;
@@ -603,8 +602,10 @@ async fn list_isos_handler() -> HttpResponse {
 
 async fn upload_iso_handler(
     req: actix_web::HttpRequest,
-    body: Bytes,
+    mut payload: web::Payload,
 ) -> HttpResponse {
+    use futures_util::StreamExt;
+
     // Get filename from X-Filename header
     let filename = match req.headers().get("X-Filename") {
         Some(v) => v.to_str().unwrap_or("upload.iso").to_string(),
@@ -634,18 +635,51 @@ async fn upload_iso_handler(
     let _ = std::fs::create_dir_all(&iso_path);
     let dest = format!("{}/{}", iso_path, safe_name);
 
-    match std::fs::write(&dest, &body) {
-        Ok(_) => HttpResponse::Ok().json(ApiResponse {
-            success: true,
-            message: format!("Uploaded {} ({} bytes)", safe_name, body.len()),
-            output: Some(dest),
-        }),
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
-            success: false,
-            message: format!("Failed to save ISO: {}", e),
-            output: None,
-        }),
+    // Stream payload to file (no RAM buffering)
+    let mut file = match std::fs::File::create(&dest) {
+        Ok(f) => f,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: format!("Failed to create file: {}", e),
+                output: None,
+            });
+        }
+    };
+
+    let mut total_size: u64 = 0;
+    while let Some(chunk) = payload.next().await {
+        match chunk {
+            Ok(data) => {
+                total_size += data.len() as u64;
+                if let Err(e) = std::io::Write::write_all(&mut file, &data) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&dest);
+                    return HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: format!("Failed to write data: {}", e),
+                        output: None,
+                    });
+                }
+            }
+            Err(e) => {
+                drop(file);
+                let _ = std::fs::remove_file(&dest);
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Upload stream error: {}", e),
+                    output: None,
+                });
+            }
+        }
     }
+    drop(file);
+
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        message: format!("Uploaded {} ({} bytes)", safe_name, total_size),
+        output: Some(dest),
+    })
 }
 
 // List PCI devices currently bound to vfio-pci driver (Linux only)
@@ -989,8 +1023,10 @@ fn detect_image_format(filename: &str) -> Option<&'static str> {
 
 async fn upload_image_handler(
     req: actix_web::HttpRequest,
-    body: Bytes,
+    mut payload: web::Payload,
 ) -> HttpResponse {
+    use futures_util::StreamExt;
+
     let filename = match req.headers().get("X-Filename") {
         Some(v) => v.to_str().unwrap_or("upload.qcow2").to_string(),
         None => {
@@ -1029,16 +1065,45 @@ async fn upload_image_handler(
     let _ = std::fs::create_dir_all(&disk_path);
     let upload_path = format!("{}/{}", disk_path, safe_name);
 
-    // Save uploaded file
-    if let Err(e) = std::fs::write(&upload_path, &body) {
-        return HttpResponse::InternalServerError().json(ApiResponse {
-            success: false,
-            message: format!("Failed to save file: {}", e),
-            output: None,
-        });
-    }
+    // Stream payload to file (no RAM buffering for large files)
+    let mut file = match std::fs::File::create(&upload_path) {
+        Ok(f) => f,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: format!("Failed to create file: {}", e),
+                output: None,
+            });
+        }
+    };
 
-    let file_size = body.len();
+    let mut file_size: u64 = 0;
+    while let Some(chunk) = payload.next().await {
+        match chunk {
+            Ok(data) => {
+                file_size += data.len() as u64;
+                if let Err(e) = std::io::Write::write_all(&mut file, &data) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&upload_path);
+                    return HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: format!("Failed to write data: {}", e),
+                        output: None,
+                    });
+                }
+            }
+            Err(e) => {
+                drop(file);
+                let _ = std::fs::remove_file(&upload_path);
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Upload stream error: {}", e),
+                    output: None,
+                });
+            }
+        }
+    }
+    drop(file);
 
     // If already qcow2, register in DB and done
     if src_format == "qcow2" {
@@ -1445,19 +1510,50 @@ async fn export_vm_handler(
 /// Import a VM from a ZIP archive (config + disk files)
 async fn import_vm_handler(
     _req: actix_web::HttpRequest,
-    body: actix_web::web::Bytes,
+    mut payload: web::Payload,
 ) -> HttpResponse {
+    use futures_util::StreamExt;
+
     let disk_path = get_conf("disk_path");
     let _ = std::fs::create_dir_all(&disk_path);
     let tmp_zip = format!("{}/vm_import_{}.zip", disk_path, std::process::id());
 
-    // Save uploaded ZIP to temp file
-    if let Err(e) = std::fs::write(&tmp_zip, &body) {
-        return HttpResponse::InternalServerError().json(ApiResponse {
-            success: false,
-            message: format!("Failed to save upload: {}", e),
-            output: None,
-        });
+    // Stream uploaded ZIP to temp file (no RAM buffering)
+    {
+        let mut file = match std::fs::File::create(&tmp_zip) {
+            Ok(f) => f,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to create temp file: {}", e),
+                    output: None,
+                });
+            }
+        };
+        while let Some(chunk) = payload.next().await {
+            match chunk {
+                Ok(data) => {
+                    if let Err(e) = std::io::Write::write_all(&mut file, &data) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&tmp_zip);
+                        return HttpResponse::InternalServerError().json(ApiResponse {
+                            success: false,
+                            message: format!("Failed to write data: {}", e),
+                            output: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&tmp_zip);
+                    return HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: format!("Upload stream error: {}", e),
+                        output: None,
+                    });
+                }
+            }
+        }
     }
 
     let zip_path = tmp_zip.clone();
@@ -2818,8 +2914,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .app_data(web::Data::new(api_key_for_server.clone()))
             .app_data(web::Data::new(vnc_tokens_for_server.clone()))
             .app_data(web::Data::new(mounted_disks_for_server.clone()))
-            // Allow up to 4GB uploads for ISO files
-            .app_data(web::PayloadConfig::new(4_294_967_296))
+            // Allow up to 16GB uploads for large disk images and ISOs
+            .app_data(web::PayloadConfig::new(17_179_869_184))
             // API key management routes
             .route("/api/apikey", web::get().to(get_apikey_handler))
             .route("/api/apikey/generate", web::post().to(generate_apikey_handler))
