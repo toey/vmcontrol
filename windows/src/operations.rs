@@ -755,18 +755,15 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-device".into());
         // bootindex=1+ so disk boots after CD-ROM (bootindex=0)
         let bootidx = disk.diskid.parse::<u32>().unwrap_or(0) + 1;
-        if is_windows {
-            // Windows has native NVMe driver — no need for virtio driver
-            qemu_args.push(format!(
-                "nvme,drive={},serial=disk{},bootindex={}",
-                drive_id, disk.diskid, bootidx
-            ));
-        } else {
-            qemu_args.push(format!(
-                "virtio-blk-pci,drive={},bootindex={}",
-                drive_id, bootidx
-            ));
-        }
+        // Use virtio-blk-pci for all VMs (including Windows):
+        // - Best I/O performance
+        // - Works on both x86_64 and aarch64 (nvme has issues on aarch64 virt)
+        // - Windows gets viostor driver from virtio-win ISO (auto-mounted on cd3)
+        //   → During install: Load Driver → Browse → cd3:\viostor\w10\amd64
+        qemu_args.push(format!(
+            "virtio-blk-pci,drive={},bootindex={}",
+            drive_id, bootidx
+        ));
     }
 
     // Network adapters (user-mode networking)
