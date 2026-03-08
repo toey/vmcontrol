@@ -956,9 +956,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
 
         qemu_args.push("-device".into());
         if is_windows {
-            // Windows has native e1000 driver — no need for virtio driver
-            // (user can install virtio-win drivers later for better performance)
-            qemu_args.push(format!("e1000,netdev=net{},mac={}", adapter.netid, adapter.mac));
+            // Windows 11 (23H2+) removed the old e1000 (82540EM) driver.
+            // Use e1000e (82574L) which is included in all modern Windows versions.
+            qemu_args.push(format!("e1000e,netdev=net{},mac={}", adapter.netid, adapter.mac));
         } else {
             qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
         }
