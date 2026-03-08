@@ -155,8 +155,9 @@ pub fn check_disk_not_in_use(disk_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
-fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
+/// Generate a cloud-init NoCloud seed ISO from per-VM MDS config.
+/// Returns (iso_path, vmctl_password).
+fn generate_seed_iso(vm_name: &str) -> Result<(String, String), String> {
     let pctl_path = get_conf("pctl_path");
     let seed_dir = format!("{}/seed_{}", pctl_path, vm_name);
     let iso_path = format!("{}/seed_{}.iso", pctl_path, vm_name);
@@ -209,8 +210,12 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
         meta_data.push_str(&format!("  - {}\n", config.ssh_pubkey));
     }
 
+    // Generate random password for vmctl user
+    let vmctl_password = generate_random_password(12);
+    eprintln!("[cloud-init] vmctl user password generated (length={})", vmctl_password.len());
+
     // Generate user-data (cloud-config for NoCloud)
-    let user_data = mds::generate_userdata_nocloud(&config, &hostname);
+    let user_data = mds::generate_userdata_nocloud(&config, &hostname, &vmctl_password);
 
     // Write files
     std::fs::write(format!("{}/meta-data", seed_dir), &meta_data)
@@ -303,7 +308,7 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
         }
     }
 
-    Ok(iso_path)
+    Ok((iso_path, vmctl_password))
 }
 
 /// Create an ISO from files in a directory and auto-mount on a free CD drive
@@ -1054,7 +1059,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let cloudinit_enabled = cfg.features.cloudinit != "0";
     if cloudinit_enabled {
         match generate_seed_iso(&ismac) {
-            Ok(seed_iso_path) => {
+            Ok((seed_iso_path, vmctl_pw)) => {
                 output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
@@ -1062,6 +1067,13 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 ));
                 qemu_args.push("-device".into());
                 qemu_args.push("virtio-blk-pci,drive=seed0".into());
+                // Save vmctl password to VM config for display on noVNC
+                if let Ok(vm) = db::get_vm(smac) {
+                    if let Ok(mut vm_cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                        vm_cfg["vmctl_password"] = serde_json::json!(vmctl_pw);
+                        let _ = db::update_vm(smac, &serde_json::to_string(&vm_cfg).unwrap_or_default());
+                    }
+                }
             }
             Err(e) => {
                 output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
@@ -1605,6 +1617,35 @@ pub fn generate_random_mac() -> String {
         *o = (rng >> 16) as u8;
     }
     format!("52:54:00:{:02x}:{:02x}:{:02x}", octets[0], octets[1], octets[2])
+}
+
+/// Generate a random alphanumeric password of given length.
+/// Uses /dev/urandom for cryptographic randomness.
+pub fn generate_random_password(len: usize) -> String {
+    const CHARSET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut password = Vec::with_capacity(len);
+    let mut bytes = vec![0u8; len];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut bytes);
+    } else {
+        // Fallback: LCG
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let mut rng = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+            .wrapping_mul(1664525)
+            .wrapping_add(std::process::id());
+        for b in bytes.iter_mut() {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            *b = (rng >> 16) as u8;
+        }
+    }
+    for b in &bytes {
+        password.push(CHARSET[(*b as usize) % CHARSET.len()]);
+    }
+    String::from_utf8(password).unwrap_or_else(|_| "Vm3trl5ecure".into())
 }
 
 /// Validate that MAC addresses in a config are unique across all VMs.

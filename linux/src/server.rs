@@ -888,7 +888,7 @@ async fn vnc_resolve_handler(
         }
     };
 
-    let (vnc_port, is_windows, arch) = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+    let (vnc_port, is_windows, arch, vmctl_password) = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
         let port = cfg.get("vnc_port").and_then(|v| v.as_u64()).unwrap_or(0);
         let win = cfg.pointer("/features/is_windows")
             .and_then(|v| v.as_str())
@@ -898,9 +898,13 @@ async fn vnc_resolve_handler(
             .and_then(|v| v.as_str())
             .unwrap_or("x86_64")
             .to_string();
-        (port, win, a)
+        let pw = cfg.get("vmctl_password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        (port, win, a, pw)
     } else {
-        (0, false, "x86_64".to_string())
+        (0, false, "x86_64".to_string(), String::new())
     };
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -910,6 +914,7 @@ async fn vnc_resolve_handler(
         "status": vm.status,
         "is_windows": is_windows,
         "arch": arch,
+        "vmctl_password": vmctl_password,
     }))
 }
 
