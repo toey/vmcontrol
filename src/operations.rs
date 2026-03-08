@@ -325,16 +325,33 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.extend([
             "-nodefaults", "-boot", "d",
         ].map(String::from));
-        // UEFI firmware required for aarch64
+        // UEFI firmware required for aarch64 — use pflash for persistent NVRAM
+        // (Windows needs writable UEFI variables for boot entries)
         let bios = get_conf("edk2_aarch64_bios");
         if !std::path::Path::new(&bios).exists() {
             return Err(format!("aarch64 requires UEFI firmware but '{}' not found. Install EDK2 or set edk2_aarch64_bios in config.", bios));
         }
-        qemu_args.push("-bios".into());
-        qemu_args.push(bios);
-        // CPU for aarch64 — use "max" for broad compatibility (works with both HVF/KVM and TCG)
+        // Per-VM NVRAM file (copy from template if not exists)
+        let nvram_file = format!("{}/{}_efivars.fd", pctl_path, ismac);
+        if !std::path::Path::new(&nvram_file).exists() {
+            // Try to copy from edk2-arm-vars.fd template
+            let vars_template = get_conf("edk2_aarch64_bios")
+                .replace("aarch64-code.fd", "arm-vars.fd");
+            if std::path::Path::new(&vars_template).exists() {
+                let _ = std::fs::copy(&vars_template, &nvram_file);
+            } else {
+                // Create empty 64MB vars file
+                let _ = std::fs::write(&nvram_file, vec![0u8; 64 * 1024 * 1024]);
+            }
+        }
+        // pflash0 = firmware code (read-only), pflash1 = NVRAM (read-write)
+        qemu_args.push("-drive".into());
+        qemu_args.push(format!("if=pflash,format=raw,readonly=on,file={}", bios));
+        qemu_args.push("-drive".into());
+        qemu_args.push(format!("if=pflash,format=raw,file={}", nvram_file));
+        // CPU for aarch64 — use "host" with HVF on Apple Silicon for best performance
         qemu_args.push("-cpu".into());
-        qemu_args.push("max".into());
+        qemu_args.push("host".into());
         // VGA via virtio-gpu
         qemu_args.push("-device".into());
         qemu_args.push("virtio-gpu-pci".into());
@@ -673,7 +690,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
 
     // Machine type — configurable accelerator (hvf:tcg for macOS, kvm:tcg for Linux)
     qemu_args.push("-machine".into());
-    qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
+    if is_aarch64 {
+        // virt machine: highmem=on for PCI MMIO above 4GB (required by Windows ARM64)
+        qemu_args.push(format!("type={},accel={},highmem=on", qemu_machine, qemu_accel));
+    } else {
+        qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
+    }
 
     // SMP — if vcpus is set, auto-compute topology; otherwise use explicit values
     let vcpus: u32 = cfg.cpu.vcpus.parse().unwrap_or(0);
