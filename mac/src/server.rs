@@ -90,6 +90,10 @@ where
             if path.starts_with("/api/vnc/resolve/") {
                 return svc.call(req).await;
             }
+            // Allow phone-home callback from VMs without API key
+            if path.ends_with("/phone-home") && path.starts_with("/api/vm/") {
+                return svc.call(req).await;
+            }
             // Allow /api/apikey/generate without auth when .api_key file has been
             // deleted (e.g., by install.sh before rebuild). Even if the server still
             // has an old key in memory, the missing file signals a fresh install.
@@ -354,6 +358,46 @@ async fn save_vm_mds_handler(path: web::Path<String>, body: web::Json<serde_json
                 Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
                     success: false,
                     message: format!("Failed to save: {}", e),
+                    output: None,
+                }),
+            }
+        }
+        Err(e) => HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
+// Phone-home callback: VMs call this to report cloud-init completion (no auth required)
+async fn phone_home_handler(path: web::Path<String>) -> HttpResponse {
+    let smac = path.into_inner();
+    if let Err(e) = crate::ssh::sanitize_name(&smac) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: format!("Invalid VM name: {}", e),
+            output: None,
+        });
+    }
+    match crate::db::get_vm(&smac) {
+        Ok(vm) => {
+            let mut config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+            let ts = chrono::Utc::now().to_rfc3339();
+            config["cloud_init_completed"] = serde_json::json!(ts);
+            let config_str = serde_json::to_string(&config).unwrap_or_default();
+            match crate::db::update_vm(&smac, &config_str) {
+                Ok(_) => {
+                    log::info!("Phone-home received from VM '{}' at {}", smac, ts);
+                    HttpResponse::Ok().json(ApiResponse {
+                        success: true,
+                        message: format!("Phone-home recorded for VM '{}' at {}", smac, ts),
+                        output: None,
+                    })
+                }
+                Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to record phone-home: {}", e),
                     output: None,
                 }),
             }
@@ -3698,6 +3742,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/vm/get/{smac}", web::get().to(get_vm_handler))
             .route("/api/vm/{smac}/mds", web::get().to(get_vm_mds_handler))
             .route("/api/vm/{smac}/mds", web::post().to(save_vm_mds_handler))
+            .route("/api/vm/{smac}/phone-home", web::post().to(phone_home_handler))
             .route("/api/vm/listimage", web::post().to(listimage_vm))
             .route("/api/vm/delete", web::post().to(delete_vm_handler))
             .route("/api/vm/mountiso", web::post().to(mountiso_vm))

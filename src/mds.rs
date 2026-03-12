@@ -22,6 +22,19 @@ pub struct MdsConfig {
     pub userdata_extra: String,
     pub default_mac: String,
     pub kea_socket_path: String,
+    // Cloud-init options
+    pub timezone: String,
+    pub locale: String,
+    pub extra_packages: String,       // comma-separated: "curl,htop,vim"
+    pub dns_nameservers: String,      // comma-separated: "8.8.8.8,1.1.1.1"
+    pub disable_root_ssh: bool,
+    pub growpart: bool,
+    pub ntp_servers: String,          // comma-separated: "pool.ntp.org"
+    pub swap_size_mb: u32,            // 0 = disabled
+    pub phone_home_url: String,
+    pub power_state: String,          // "" | "reboot" | "poweroff"
+    pub extra_runcmd: String,         // newline-separated commands
+    pub write_files: String,          // JSON array: [{"path":"/etc/foo","content":"bar"}]
 }
 
 impl Default for MdsConfig {
@@ -38,6 +51,18 @@ impl Default for MdsConfig {
             userdata_extra: "".into(),
             default_mac: "52:54:00:00:00:01".into(),
             kea_socket_path: "".into(),
+            timezone: "".into(),
+            locale: "".into(),
+            extra_packages: "".into(),
+            dns_nameservers: "".into(),
+            disable_root_ssh: false,
+            growpart: true,
+            ntp_servers: "".into(),
+            swap_size_mb: 0,
+            phone_home_url: "".into(),
+            power_state: "".into(),
+            extra_runcmd: "".into(),
+            write_files: "".into(),
         }
     }
 }
@@ -87,10 +112,30 @@ fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     ud.push_str("    sudo: ALL=(ALL) NOPASSWD:ALL\n");
     ud.push_str("resize_rootfs: True\n");
     ud.push_str("package_update: true\n");
+
+    // ── packages ──
     ud.push_str("packages:\n");
     ud.push_str("  - qemu-guest-agent\n");
+    if !config.extra_packages.is_empty() {
+        for pkg in config.extra_packages.split(',') {
+            let pkg = pkg.trim();
+            if !pkg.is_empty() {
+                ud.push_str(&format!("  - {}\n", pkg));
+            }
+        }
+    }
+
+    // ── runcmd ──
     ud.push_str("runcmd:\n");
     ud.push_str("  - systemctl enable --now qemu-guest-agent\n");
+    if !config.extra_runcmd.is_empty() {
+        for cmd in config.extra_runcmd.lines() {
+            let cmd = cmd.trim();
+            if !cmd.is_empty() {
+                ud.push_str(&format!("  - {}\n", cmd));
+            }
+        }
+    }
     // Sanitize root_password: strip newlines and YAML-dangerous chars
     // If root_password is empty, generate a random one for security
     let root_pw = if config.root_password.is_empty() {
@@ -122,6 +167,107 @@ fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
         if !safe_key.is_empty() {
             ud.push_str("ssh_authorized_keys:\n");
             ud.push_str(&format!("  - {}\n", safe_key));
+        }
+    }
+
+    // ── disable_root_ssh ──
+    if config.disable_root_ssh {
+        ud.push_str("disable_root: true\n");
+    }
+
+    // ── timezone ──
+    if !config.timezone.is_empty() {
+        ud.push_str(&format!("timezone: {}\n", config.timezone.trim()));
+    }
+
+    // ── locale ──
+    if !config.locale.is_empty() {
+        ud.push_str(&format!("locale: {}\n", config.locale.trim()));
+    }
+
+    // ── growpart ──
+    if config.growpart {
+        ud.push_str("growpart:\n");
+        ud.push_str("  mode: auto\n");
+        ud.push_str("  devices: ['/']\n");
+    }
+
+    // ── dns_nameservers ──
+    if !config.dns_nameservers.is_empty() {
+        ud.push_str("manage_resolv_conf: true\n");
+        ud.push_str("resolv_conf:\n");
+        ud.push_str("  nameservers:\n");
+        for ns in config.dns_nameservers.split(',') {
+            let ns = ns.trim();
+            if !ns.is_empty() {
+                ud.push_str(&format!("    - {}\n", ns));
+            }
+        }
+    }
+
+    // ── ntp_servers ──
+    if !config.ntp_servers.is_empty() {
+        ud.push_str("ntp:\n");
+        ud.push_str("  enabled: true\n");
+        ud.push_str("  servers:\n");
+        for srv in config.ntp_servers.split(',') {
+            let srv = srv.trim();
+            if !srv.is_empty() {
+                ud.push_str(&format!("    - {}\n", srv));
+            }
+        }
+    }
+
+    // ── swap ──
+    if config.swap_size_mb > 0 {
+        let size_bytes = config.swap_size_mb as u64 * 1024 * 1024;
+        ud.push_str("swap:\n");
+        ud.push_str("  filename: /swap.img\n");
+        ud.push_str(&format!("  size: {}\n", size_bytes));
+        ud.push_str(&format!("  maxsize: {}\n", size_bytes));
+    }
+
+    // ── write_files ──
+    if !config.write_files.is_empty() {
+        if let Ok(files) = serde_json::from_str::<Vec<serde_json::Value>>(&config.write_files) {
+            if !files.is_empty() {
+                ud.push_str("write_files:\n");
+                for f in &files {
+                    if let Some(path) = f.get("path").and_then(|v| v.as_str()) {
+                        ud.push_str(&format!("  - path: {}\n", path));
+                        if let Some(content) = f.get("content").and_then(|v| v.as_str()) {
+                            ud.push_str("    content: |\n");
+                            for line in content.lines() {
+                                ud.push_str(&format!("      {}\n", line));
+                            }
+                        }
+                        if let Some(perms) = f.get("permissions").and_then(|v| v.as_str()) {
+                            ud.push_str(&format!("    permissions: '{}'\n", perms));
+                        }
+                        if let Some(owner) = f.get("owner").and_then(|v| v.as_str()) {
+                            ud.push_str(&format!("    owner: {}\n", owner));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── phone_home ──
+    if !config.phone_home_url.is_empty() {
+        ud.push_str("phone_home:\n");
+        ud.push_str(&format!("  url: {}\n", config.phone_home_url.trim()));
+        ud.push_str("  tries: 3\n");
+    }
+
+    // ── power_state ──
+    if !config.power_state.is_empty() {
+        let mode = config.power_state.trim();
+        if mode == "reboot" || mode == "poweroff" {
+            ud.push_str("power_state:\n");
+            ud.push_str(&format!("  mode: {}\n", mode));
+            ud.push_str("  message: \"cloud-init completed\"\n");
+            ud.push_str("  timeout: 30\n");
         }
     }
 

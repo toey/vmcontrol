@@ -2383,6 +2383,19 @@ async function loadMdsConfig() {
             // Don't show saved password — leave field empty (enter new to change)
             document.getElementById('mds-root-password').value = '';
             document.getElementById('mds-userdata-extra').value = config.userdata_extra || '';
+            // Cloud-init options
+            document.getElementById('mds-timezone').value = config.timezone || '';
+            document.getElementById('mds-locale').value = config.locale || '';
+            document.getElementById('mds-extra-packages').value = config.extra_packages || '';
+            document.getElementById('mds-dns-nameservers').value = config.dns_nameservers || '';
+            document.getElementById('mds-ntp-servers').value = config.ntp_servers || '';
+            document.getElementById('mds-swap-size-mb').value = config.swap_size_mb || 0;
+            document.getElementById('mds-phone-home-url').value = config.phone_home_url || '';
+            document.getElementById('mds-power-state').value = config.power_state || '';
+            document.getElementById('mds-disable-root-ssh').checked = !!config.disable_root_ssh;
+            document.getElementById('mds-growpart').checked = config.growpart !== false;
+            document.getElementById('mds-extra-runcmd').value = config.extra_runcmd || '';
+            document.getElementById('mds-write-files').value = config.write_files || '';
             statusEl.className = 'success';
             statusEl.textContent = 'MDS config loaded for ' + smac;
             outputEl.textContent = data.output;
@@ -2420,6 +2433,14 @@ async function saveMdsConfig() {
     var outputEl = document.getElementById('output');
     statusEl.className = 'loading';
     statusEl.textContent = 'Saving MDS config for ' + smac + '...';
+    // Validate write_files JSON (if provided)
+    var wfVal = document.getElementById('mds-write-files').value.trim();
+    if (wfVal) {
+        try { JSON.parse(wfVal); } catch (e) {
+            alert('Write Files must be valid JSON array.\nError: ' + e.message);
+            return;
+        }
+    }
     var payload = {
         instance_id: val('mds-instance-id'),
         ami_id: '',
@@ -2432,6 +2453,18 @@ async function saveMdsConfig() {
         userdata_extra: document.getElementById('mds-userdata-extra').value,
         default_mac: val('mds-default-mac'),
         kea_socket_path: '',
+        timezone: val('mds-timezone'),
+        locale: val('mds-locale'),
+        extra_packages: val('mds-extra-packages'),
+        dns_nameservers: val('mds-dns-nameservers'),
+        ntp_servers: val('mds-ntp-servers'),
+        swap_size_mb: parseInt(document.getElementById('mds-swap-size-mb').value) || 0,
+        phone_home_url: val('mds-phone-home-url'),
+        power_state: val('mds-power-state'),
+        disable_root_ssh: document.getElementById('mds-disable-root-ssh').checked,
+        growpart: document.getElementById('mds-growpart').checked,
+        extra_runcmd: document.getElementById('mds-extra-runcmd').value,
+        write_files: wfVal,
     };
     try {
         var response = await apiFetch('/api/vm/' + encodeURIComponent(smac) + '/mds', {

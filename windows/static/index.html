@@ -287,6 +287,33 @@
                     <textarea id="mds-userdata-extra" rows="5" placeholder="# Additional cloud-init YAML"></textarea>
                 </label>
             </fieldset>
+            <fieldset>
+                <legend>Cloud-Init Options</legend>
+                <label>Timezone <input type="text" id="mds-timezone" placeholder="e.g. Asia/Bangkok"></label>
+                <label>Locale <input type="text" id="mds-locale" placeholder="e.g. en_US.UTF-8"></label>
+                <label>Extra Packages (comma-separated) <input type="text" id="mds-extra-packages" placeholder="curl,htop,vim"></label>
+                <label>DNS Nameservers (comma-separated) <input type="text" id="mds-dns-nameservers" placeholder="8.8.8.8,1.1.1.1"></label>
+                <label>NTP Servers (comma-separated) <input type="text" id="mds-ntp-servers" placeholder="pool.ntp.org"></label>
+                <label>Swap Size (MB, 0 = disabled) <input type="number" id="mds-swap-size-mb" value="0" min="0" placeholder="0"></label>
+                <label>Phone Home URL <input type="text" id="mds-phone-home-url" placeholder="http://10.0.0.1:8080/api/vm/VMNAME/phone-home"></label>
+                <label>Power State After cloud-init
+                    <select id="mds-power-state">
+                        <option value="">-- none --</option>
+                        <option value="reboot">Reboot</option>
+                        <option value="poweroff">Power Off</option>
+                    </select>
+                </label>
+                <div style="display:flex;gap:24px;margin:6px 0;">
+                    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="mds-disable-root-ssh"> Disable Root SSH</label>
+                    <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="mds-growpart" checked> Auto-Grow Partition</label>
+                </div>
+                <label>Extra Run Commands (one per line)
+                    <textarea id="mds-extra-runcmd" rows="4" placeholder="apt-get install -y nginx&#10;systemctl enable nginx"></textarea>
+                </label>
+                <label>Write Files (JSON array)
+                    <textarea id="mds-write-files" rows="4" placeholder='[{"path":"/etc/foo","content":"bar","permissions":"0644"}]'></textarea>
+                </label>
+            </fieldset>
             <div class="btn-group">
                 <button class="execute-btn" onclick="saveMdsConfig()">Save Config</button>
             </div>
