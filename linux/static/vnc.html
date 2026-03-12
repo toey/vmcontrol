@@ -238,6 +238,49 @@
                     document.getElementById('btn-connect').style.display = 'none';
                     document.getElementById('btn-disconnect').style.display = '';
                     rfb.focus();
+
+                    // ── Ctrl+V / Cmd+V clipboard paste interceptor ──
+                    // Intercept paste shortcut on the noVNC canvas (capture phase)
+                    // so the keystrokes don't get forwarded to the guest VM.
+                    // Instead, read host clipboard and type it into the VM.
+                    var canvas = document.getElementById('vnc-container').querySelector('canvas');
+                    if (canvas && !canvas._pasteInterceptAttached) {
+                        canvas._pasteInterceptAttached = true;
+
+                        // Method 1: catch 'paste' event (fired by Ctrl+V / Cmd+V)
+                        canvas.addEventListener('paste', function(e) {
+                            if (!rfb || _pasteInProgress) return;
+                            var text = (e.clipboardData || window.clipboardData).getData('text');
+                            if (text) {
+                                e.preventDefault();
+                                e.stopImmediatePropagation();
+                                sendTextToVm(text);
+                            }
+                        }, true);
+
+                        // Method 2: intercept keydown Ctrl+V / Cmd+V in capture phase
+                        // to prevent noVNC from sending the V key to the guest
+                        canvas.addEventListener('keydown', function(e) {
+                            if (!rfb || _pasteInProgress) return;
+                            var isPaste = (e.key === 'v' || e.key === 'V') && (e.ctrlKey || e.metaKey) && !e.altKey;
+                            if (isPaste) {
+                                e.preventDefault();
+                                e.stopImmediatePropagation();
+                                // Use Clipboard API (async) — works on HTTPS and localhost
+                                if (navigator.clipboard && navigator.clipboard.readText) {
+                                    navigator.clipboard.readText().then(function(text) {
+                                        if (text) sendTextToVm(text);
+                                    }).catch(function() {
+                                        // Clipboard API denied — fall back to paste modal
+                                        window.doPaste();
+                                    });
+                                } else {
+                                    // No Clipboard API — open paste modal
+                                    window.doPaste();
+                                }
+                            }
+                        }, true);  // capture phase = runs before noVNC's handler
+                    }
                 });
 
                 rfb.addEventListener('disconnect', function(e) {
