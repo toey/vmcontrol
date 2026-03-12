@@ -1,7 +1,13 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::sync::Mutex;
 
 use crate::config::get_conf;
+
+/// Global database connection pool (single connection protected by Mutex).
+/// This avoids opening a new connection per operation, improves performance,
+/// and prevents race conditions in read-modify-write sequences.
+static DB_CONN: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DiskRecord {
@@ -24,18 +30,36 @@ pub struct VmRecord {
     pub group_name: String,
 }
 
-/// Open (or create) the database, ensure the table exists + migrate
-fn open_db() -> Result<Connection, String> {
+/// Initialize the database connection and run migrations.
+/// Called once via OnceLock; subsequent calls reuse the same connection.
+fn init_db() -> Connection {
     let db_path = get_conf("db_path");
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn =
-        Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
+    let conn = Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("FATAL: Cannot open database '{}': {}", db_path, e));
 
     // Enable WAL mode for better concurrency
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+    if let Err(e) = conn.execute_batch("PRAGMA journal_mode=WAL;") {
+        log::warn!("Failed to enable WAL mode: {}", e);
+    }
+    // Busy timeout: wait up to 5 seconds if DB is locked
+    let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
 
+    run_migrations(&conn).unwrap_or_else(|e| panic!("FATAL: DB migration failed: {}", e));
+    conn
+}
+
+/// Get a locked reference to the global database connection.
+/// Uses OnceLock to initialize on first call, then reuses the connection.
+fn open_db() -> Result<std::sync::MutexGuard<'static, Connection>, String> {
+    let mutex = DB_CONN.get_or_init(|| Mutex::new(init_db()));
+    mutex.lock().map_err(|e| format!("DB lock error (mutex poisoned): {}", e))
+}
+
+/// Run all database migrations
+fn run_migrations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS vms (
             smac TEXT PRIMARY KEY,
@@ -181,7 +205,7 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB snapshots table init error: {}", e))?;
 
-    Ok(conn)
+    Ok(())
 }
 
 /// Insert a new VM record, or update config if it already exists (preserves group_name, created_at)

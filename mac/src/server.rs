@@ -72,7 +72,10 @@ where
         let api_key_lock = self.api_key.clone();
 
         Box::pin(async move {
-            let api_key = api_key_lock.lock().unwrap().clone();
+            let api_key = match api_key_lock.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
 
             // No API key configured = no auth required
             if api_key.is_empty() {
@@ -108,7 +111,9 @@ where
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
 
-            if provided == api_key {
+            // Constant-time comparison to prevent timing attacks
+            let key_match = constant_time_eq(provided.as_bytes(), api_key.as_bytes());
+            if key_match {
                 svc.call(req).await
             } else {
                 Err(actix_web::error::ErrorUnauthorized(
@@ -117,6 +122,20 @@ where
             }
         })
     }
+}
+
+/// Constant-time byte comparison to prevent timing attacks on API key validation.
+/// Returns false immediately if lengths differ (length is not secret), but compares
+/// all bytes when lengths match to avoid leaking content via timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ──────────────────────────────────────────
@@ -382,8 +401,12 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
 /// Query QEMU block device info — returns per-drive mount status (cd0–cd3)
 async fn blockinfo_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
-    match crate::api_helpers::qemu_monitor_cmd(&smac, "info block") {
-        Ok(raw) => {
+    // Wrap blocking QEMU monitor I/O in web::block to avoid blocking the async runtime
+    let result = web::block(move || {
+        crate::api_helpers::qemu_monitor_cmd(&smac, "info block")
+    }).await;
+    match result {
+        Ok(Ok(raw)) => {
             // Parse "info block" output to extract cd0–cd3 status
             // Format: "cd0 (#block123): /path/to/file.iso (raw, read-only)" or "cd0: [not inserted]"
             let mut drives = serde_json::Map::new();
@@ -409,9 +432,14 @@ async fn blockinfo_handler(path: web::Path<String>) -> HttpResponse {
             }
             HttpResponse::Ok().json(drives)
         }
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
             message: format!("Failed to query block info: {}", e),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Internal error: {}", e),
             output: None,
         }),
     }
@@ -805,29 +833,18 @@ async fn vnc_token_handler(
         });
     }
 
-    // Generate random token
+    // Generate random token using the shared urandom helper
     let token = {
-        use std::io::Read;
-        let mut bytes = [0u8; 24];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            let _ = f.read_exact(&mut bytes);
-        } else {
-            // Fallback: mix timestamp + pid + pointer address for entropy
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let pid = std::process::id() as u128;
-            let mix = ts ^ (pid << 64) ^ ((&bytes as *const _ as u128) << 32);
-            bytes[..16].copy_from_slice(&mix.to_le_bytes());
-            bytes[16..].copy_from_slice(&ts.to_le_bytes()[..8]);
-        }
+        let bytes = operations::read_urandom_bytes(24);
         bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
     };
 
     // Purge expired tokens (older than 5 minutes) and store new one
     {
-        let mut map = store.lock().unwrap();
+        let mut map = match store.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let now = std::time::Instant::now();
         map.retain(|_, v| now.duration_since(v.created).as_secs() < 300);
         map.insert(token.clone(), VncToken {
@@ -851,7 +868,10 @@ async fn vnc_resolve_handler(
 
     // Remove token (one-time use)
     let vnc_token = {
-        let mut map = store.lock().unwrap();
+        let mut map = match store.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         map.remove(&token)
     };
 
@@ -918,10 +938,24 @@ async fn vnc_resolve_handler(
     }))
 }
 
-/// List VMs — auto-backfill VNC ports in a single pass
+/// List VMs — auto-backfill VNC ports + health-check stale "running" status
 async fn list_vms_handler() -> HttpResponse {
     match crate::db::list_vms() {
         Ok(mut vms) => {
+            // Health check: detect stale "running" status by checking monitor socket
+            let pctl_path = crate::config::get_conf("pctl_path");
+            for vm in vms.iter_mut() {
+                if vm.status == "running" {
+                    let sock_path = format!("{}/{}", pctl_path, vm.smac);
+                    if !std::path::Path::new(&sock_path).exists() {
+                        // QEMU monitor socket gone = VM crashed or was killed externally
+                        log::warn!("VM '{}' marked running but monitor socket missing — marking stopped", vm.smac);
+                        vm.status = "stopped".to_string();
+                        let _ = crate::db::set_vm_status(&vm.smac, "stopped");
+                    }
+                }
+            }
+
             // Auto-backfill VNC ports for VMs that don't have one
             let mut used_ports: Vec<u16> = Vec::new();
             let mut need_port: Vec<usize> = Vec::new();
@@ -3323,7 +3357,10 @@ async fn host_ram_handler() -> HttpResponse {
 // ──────────────────────────────────────────
 
 async fn get_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
-    let key = key_state.lock().unwrap().clone();
+    let key = match key_state.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
     HttpResponse::Ok().json(serde_json::json!({
         "api_key": key,
         "enabled": !key.is_empty(),
@@ -3331,24 +3368,16 @@ async fn get_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse 
 }
 
 async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
-    // Generate 64-char hex key
-    use std::io::Read;
-    let mut bytes = [0u8; 32];
-    let new_key = if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-    } else {
-        // Fallback: use timestamp + random-ish data
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("{:064x}", ts)
-    };
+    // Generate 64-char hex key using shared random source
+    let bytes = operations::read_urandom_bytes(32);
+    let new_key = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
     // Update shared state
     {
-        let mut key = key_state.lock().unwrap();
+        let mut key = match key_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         *key = new_key.clone();
     }
 
@@ -3446,7 +3475,10 @@ async fn unmount_disk_handler(
 async fn list_mounted_disks_handler(
     store: web::Data<crate::disk_edit::MountedDiskStore>,
 ) -> HttpResponse {
-    let locked = store.lock().unwrap();
+    let locked = match store.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let list: Vec<_> = locked.values().cloned().collect();
     HttpResponse::Ok().json(list)
 }
@@ -3525,6 +3557,35 @@ async fn write_disk_file_handler(
     }
 }
 
+/// Cleanup stale seed ISOs and directories from deleted VMs
+fn cleanup_stale_seed_isos() {
+    let pctl_path = get_conf("pctl_path");
+    let vm_names: std::collections::HashSet<String> =
+        crate::db::list_vms().unwrap_or_default().iter().map(|v| v.smac.clone()).collect();
+
+    if let Ok(entries) = std::fs::read_dir(&pctl_path) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Cleanup seed ISO files for VMs that no longer exist
+            if name.starts_with("seed_") && name.ends_with(".iso") {
+                let vm_name = name.trim_start_matches("seed_").trim_end_matches(".iso");
+                if !vm_names.contains(vm_name) {
+                    log::info!("Cleaning up stale seed ISO: {}", name);
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            // Cleanup stale seed directories
+            if name.starts_with("seed_") && entry.path().is_dir() {
+                let vm_name = name.trim_start_matches("seed_");
+                if !vm_names.contains(vm_name) {
+                    log::info!("Cleaning up stale seed directory: {}", name);
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -3550,6 +3611,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
 
     // Repair VMs missing mds IPs (from old update_config bug)
     operations::repair_missing_mds_ips();
+
+    // Cleanup stale seed ISOs from deleted VMs
+    cleanup_stale_seed_isos();
 
     // Shared API key state for runtime updates
     let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));

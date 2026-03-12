@@ -34,7 +34,7 @@ impl Default for MdsConfig {
             internal_ip: "".into(),
             vlan: "0".into(),
             ssh_pubkey: "".into(),
-            root_password: "changeme".into(),
+            root_password: String::new(),  // Empty = no password set; generate_userdata will use random
             userdata_extra: "".into(),
             default_mac: "52:54:00:00:00:01".into(),
             kea_socket_path: "".into(),
@@ -71,7 +71,7 @@ pub fn save_mds_config(config: &MdsConfig) -> Result<(), String> {
 // ──────────────────────────────────────────
 
 /// Common cloud-init userdata base (shared between Ec2 and NoCloud modes)
-fn generate_userdata_base(config: &MdsConfig) -> String {
+fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("ssh_pwauth: true\n");
     ud.push_str("users:\n");
@@ -80,6 +80,11 @@ fn generate_userdata_base(config: &MdsConfig) -> String {
     ud.push_str("    groups: root\n");
     ud.push_str("    lock_passwd: false\n");
     ud.push_str("    shell: /bin/bash\n");
+    ud.push_str("  - name: vmctl\n");
+    ud.push_str("    groups: sudo\n");
+    ud.push_str("    shell: /bin/bash\n");
+    ud.push_str("    lock_passwd: false\n");
+    ud.push_str("    sudo: ALL=(ALL) NOPASSWD:ALL\n");
     ud.push_str("resize_rootfs: True\n");
     ud.push_str("package_update: true\n");
     ud.push_str("packages:\n");
@@ -87,13 +92,24 @@ fn generate_userdata_base(config: &MdsConfig) -> String {
     ud.push_str("runcmd:\n");
     ud.push_str("  - systemctl enable --now qemu-guest-agent\n");
     // Sanitize root_password: strip newlines and YAML-dangerous chars
-    let safe_password = config.root_password
+    // If root_password is empty, generate a random one for security
+    let root_pw = if config.root_password.is_empty() {
+        crate::operations::generate_random_password(16)
+    } else {
+        config.root_password.clone()
+    };
+    let safe_password = root_pw
+        .replace('\n', "")
+        .replace('\r', "")
+        .replace(':', "");
+    let safe_vmctl_pw = vmctl_password
         .replace('\n', "")
         .replace('\r', "")
         .replace(':', "");
     ud.push_str("chpasswd:\n");
     ud.push_str("  list: |\n");
     ud.push_str(&format!("    root:{}\n", safe_password));
+    ud.push_str(&format!("    vmctl:{}\n", safe_vmctl_pw));
     ud.push_str("  expire: False\n");
 
     if !config.ssh_pubkey.is_empty() {
@@ -122,8 +138,8 @@ fn append_userdata_extra(ud: &mut String, config: &MdsConfig) {
     }
 }
 
-pub fn generate_userdata(config: &MdsConfig) -> String {
-    let mut ud = generate_userdata_base(config);
+pub fn generate_userdata(config: &MdsConfig, vmctl_password: &str) -> String {
+    let mut ud = generate_userdata_base(config, vmctl_password);
 
     ud.push_str("datasource:\n");
     ud.push_str("  Ec2:\n");
@@ -140,8 +156,8 @@ pub fn generate_userdata(config: &MdsConfig) -> String {
 /// Generate user-data for NoCloud seed ISO (no Ec2 datasource block)
 /// NOTE: datasource_list is NOT set here — cloud-init determines datasource
 /// BEFORE reading user-data. Use SMBIOS hint or /etc/cloud/cloud.cfg.d/ instead.
-pub fn generate_userdata_nocloud(config: &MdsConfig, hostname: &str) -> String {
-    let base = generate_userdata_base(config);
+pub fn generate_userdata_nocloud(config: &MdsConfig, hostname: &str, vmctl_password: &str) -> String {
+    let base = generate_userdata_base(config, vmctl_password);
     let mut ud = base;
 
     // Set hostname explicitly in user-data (some distros ignore meta-data local-hostname)
@@ -205,7 +221,7 @@ async fn userdata_handler() -> HttpResponse {
     let config = load_mds_config();
     HttpResponse::Ok()
         .content_type("text/plain; charset=UTF-8")
-        .body(generate_userdata(&config))
+        .body(generate_userdata(&config, ""))
 }
 
 async fn metadata_index() -> HttpResponse {

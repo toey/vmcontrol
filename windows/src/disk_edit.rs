@@ -120,7 +120,7 @@ pub fn mount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDi
 
     // Check not already mounted
     {
-        let locked = store.lock().unwrap();
+        let locked = store.lock().map_err(|e| format!("Lock error: {}", e))?;
         if locked.contains_key(disk_name) {
             return Err(format!("Disk '{}' is already mounted", disk_name));
         }
@@ -181,14 +181,14 @@ pub fn mount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDi
         read_only: false,
     };
 
-    store.lock().unwrap().insert(disk_name.to_string(), info.clone());
+    store.lock().map_err(|e| format!("Lock error: {}", e))?.insert(disk_name.to_string(), info.clone());
     Ok(info)
 }
 
 #[cfg(target_os = "linux")]
 pub fn unmount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<(), String> {
     let info = {
-        let locked = store.lock().unwrap();
+        let locked = store.lock().map_err(|e| format!("Lock error: {}", e))?;
         locked
             .get(disk_name)
             .cloned()
@@ -208,7 +208,7 @@ pub fn unmount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<(), Str
     let _ = std::fs::remove_dir(&info.mount_point);
 
     // Remove from store
-    store.lock().unwrap().remove(disk_name);
+    store.lock().map_err(|e| format!("Lock error: {}", e))?.remove(disk_name);
     Ok(())
 }
 
@@ -270,7 +270,7 @@ fn resolve_safe_path(mount_point: &str, rel_path: &str) -> Result<String, String
 }
 
 fn get_mount_info(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDisk, String> {
-    let locked = store.lock().unwrap();
+    let locked = store.lock().map_err(|e| format!("Lock error: {}", e))?;
     locked
         .get(disk_name)
         .cloned()
@@ -501,7 +501,7 @@ pub fn mount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDi
 
     // Check not already mounted
     {
-        let locked = store.lock().unwrap();
+        let locked = store.lock().map_err(|e| format!("Lock error: {}", e))?;
         if locked.contains_key(disk_name) {
             return Err(format!("Disk '{}' is already mounted", disk_name));
         }
@@ -604,7 +604,7 @@ pub fn mount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<MountedDi
 #[cfg(target_os = "macos")]
 pub fn unmount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<(), String> {
     let info = {
-        let locked = store.lock().unwrap();
+        let locked = store.lock().map_err(|e| format!("Lock error: {}", e))?;
         locked
             .get(disk_name)
             .cloned()
@@ -660,7 +660,7 @@ pub fn unmount_disk(disk_name: &str, store: &MountedDiskStore) -> Result<(), Str
     }
     let _ = std::fs::remove_dir(&info.mount_point);
 
-    store.lock().unwrap().remove(disk_name);
+    store.lock().map_err(|e| format!("Lock error: {}", e))?.remove(disk_name);
     Ok(())
 }
 

@@ -486,8 +486,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let qemu_machine = if is_aarch64 { "virt".to_string() } else { get_conf("qemu_machine") };
 
     // ensure directories exist
-    let _ = std::fs::create_dir_all(&pctl_path);
-    let _ = std::fs::create_dir_all(&disk_path);
+    if let Err(e) = std::fs::create_dir_all(&pctl_path) {
+        log::warn!("Failed to create pctl_path '{}': {}", pctl_path, e);
+    }
+    if let Err(e) = std::fs::create_dir_all(&disk_path) {
+        log::warn!("Failed to create disk_path '{}': {}", disk_path, e);
+    }
 
     let mut output_log = String::new();
 
@@ -1601,20 +1605,25 @@ fn used_macs(exclude_smac: Option<&str>) -> Vec<(String, String)> {
 }
 
 /// Generate a random MAC address with 52:54:00 prefix (QEMU convention).
-/// Uses system time + process ID for randomness to avoid requiring the rand crate.
+/// Uses /dev/urandom for cryptographic randomness.
 pub fn generate_random_mac() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let pid = std::process::id();
-    // Simple LCG-based pseudo-random using nanos and pid
-    let mut rng = nanos.wrapping_mul(1664525).wrapping_add(pid);
     let mut octets = [0u8; 3];
-    for o in &mut octets {
-        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-        *o = (rng >> 16) as u8;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut octets);
+    } else {
+        // Fallback: use multiple entropy sources mixed together
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let pid = std::process::id();
+        let addr = &octets as *const _ as u64;
+        let mix = nanos as u64 ^ (pid as u64).wrapping_shl(16) ^ addr;
+        octets[0] = (mix >> 0) as u8;
+        octets[1] = (mix >> 8) as u8;
+        octets[2] = (mix >> 16) as u8;
     }
     format!("52:54:00:{:02x}:{:02x}:{:02x}", octets[0], octets[1], octets[2])
 }
@@ -1624,28 +1633,40 @@ pub fn generate_random_mac() -> String {
 pub fn generate_random_password(len: usize) -> String {
     const CHARSET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let mut password = Vec::with_capacity(len);
-    let mut bytes = vec![0u8; len];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        use std::io::Read;
-        let _ = f.read_exact(&mut bytes);
-    } else {
-        // Fallback: LCG
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let mut rng = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos()
-            .wrapping_mul(1664525)
-            .wrapping_add(std::process::id());
-        for b in bytes.iter_mut() {
-            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-            *b = (rng >> 16) as u8;
-        }
-    }
+    let bytes = read_urandom_bytes(len);
     for b in &bytes {
         password.push(CHARSET[(*b as usize) % CHARSET.len()]);
     }
     String::from_utf8(password).unwrap_or_else(|_| "Vm3trl5ecure".into())
+}
+
+/// Read `len` bytes from /dev/urandom with a robust fallback.
+/// This is the single source of randomness for the application.
+pub fn read_urandom_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; len];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        if f.read_exact(&mut bytes).is_ok() {
+            return bytes;
+        }
+    }
+    // Fallback: mix multiple entropy sources (time, pid, stack address, thread id)
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id() as u128;
+    let addr = &bytes as *const _ as u128;
+    let mut state = ts ^ (pid << 32) ^ (addr << 64);
+    for b in bytes.iter_mut() {
+        // xorshift128-like mixing
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *b = (state & 0xFF) as u8;
+    }
+    bytes
 }
 
 /// Validate that MAC addresses in a config are unique across all VMs.

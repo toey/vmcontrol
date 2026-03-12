@@ -34,7 +34,7 @@ impl Default for MdsConfig {
             internal_ip: "".into(),
             vlan: "0".into(),
             ssh_pubkey: "".into(),
-            root_password: "changeme".into(),
+            root_password: String::new(),  // Empty = no password set; generate_userdata will use random
             userdata_extra: "".into(),
             default_mac: "52:54:00:00:00:01".into(),
             kea_socket_path: "".into(),
@@ -92,7 +92,13 @@ fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     ud.push_str("runcmd:\n");
     ud.push_str("  - systemctl enable --now qemu-guest-agent\n");
     // Sanitize root_password: strip newlines and YAML-dangerous chars
-    let safe_password = config.root_password
+    // If root_password is empty, generate a random one for security
+    let root_pw = if config.root_password.is_empty() {
+        crate::operations::generate_random_password(16)
+    } else {
+        config.root_password.clone()
+    };
+    let safe_password = root_pw
         .replace('\n', "")
         .replace('\r', "")
         .replace(':', "");

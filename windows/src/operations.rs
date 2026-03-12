@@ -155,8 +155,9 @@ pub fn check_disk_not_in_use(disk_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Generate a cloud-init NoCloud seed ISO from per-VM MDS config
-fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
+/// Generate a cloud-init NoCloud seed ISO from per-VM MDS config.
+/// Returns (iso_path, vmctl_password).
+fn generate_seed_iso(vm_name: &str) -> Result<(String, String), String> {
     let pctl_path = get_conf("pctl_path");
     let seed_dir = format!("{}/seed_{}", pctl_path, vm_name);
     let iso_path = format!("{}/seed_{}.iso", pctl_path, vm_name);
@@ -209,8 +210,12 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
         meta_data.push_str(&format!("  - {}\n", config.ssh_pubkey));
     }
 
+    // Generate random password for vmctl user
+    let vmctl_password = generate_random_password(12);
+    eprintln!("[cloud-init] vmctl user password generated (length={})", vmctl_password.len());
+
     // Generate user-data (cloud-config for NoCloud)
-    let user_data = mds::generate_userdata_nocloud(&config, &hostname);
+    let user_data = mds::generate_userdata_nocloud(&config, &hostname, &vmctl_password);
 
     // Write files
     std::fs::write(format!("{}/meta-data", seed_dir), &meta_data)
@@ -303,7 +308,7 @@ fn generate_seed_iso(vm_name: &str) -> Result<String, String> {
         }
     }
 
-    Ok(iso_path)
+    Ok((iso_path, vmctl_password))
 }
 
 /// Create an ISO from files in a directory and auto-mount on a free CD drive
@@ -481,8 +486,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let qemu_machine = if is_aarch64 { "virt".to_string() } else { get_conf("qemu_machine") };
 
     // ensure directories exist
-    let _ = std::fs::create_dir_all(&pctl_path);
-    let _ = std::fs::create_dir_all(&disk_path);
+    if let Err(e) = std::fs::create_dir_all(&pctl_path) {
+        log::warn!("Failed to create pctl_path '{}': {}", pctl_path, e);
+    }
+    if let Err(e) = std::fs::create_dir_all(&disk_path) {
+        log::warn!("Failed to create disk_path '{}': {}", disk_path, e);
+    }
 
     let mut output_log = String::new();
 
@@ -737,8 +746,18 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             "iops-total-max-length : {}\n",
             disk.iops_total_max_length
         ));
-        // auto-create disk if not exists
+        // Validate backing chain integrity before starting
         let disk_file = format!("{}/{}.qcow2", disk_path, disk.diskname);
+        if let Ok(Some(backing)) = get_disk_backing_info(&disk.diskname) {
+            let backing_path = format!("{}/{}.qcow2", disk_path, backing);
+            if !std::path::Path::new(&backing_path).exists() {
+                return Err(format!(
+                    "Disk '{}' depends on backing file '{}' which is missing! Flatten the disk or restore the backing file.",
+                    disk.diskname, backing
+                ));
+            }
+        }
+        // auto-create disk if not exists
         if !std::path::Path::new(&disk_file).exists() {
             let qemu_img = get_conf("qemu_img_path");
             output_log.push_str(&format!("auto-creating disk: {}\n", disk_file));
@@ -1044,7 +1063,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let cloudinit_enabled = cfg.features.cloudinit != "0";
     if cloudinit_enabled {
         match generate_seed_iso(&ismac) {
-            Ok(seed_iso_path) => {
+            Ok((seed_iso_path, vmctl_pw)) => {
                 output_log.push_str(&format!("seed ISO : {}\n", seed_iso_path));
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
@@ -1052,6 +1071,13 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 ));
                 qemu_args.push("-device".into());
                 qemu_args.push("virtio-blk-pci,drive=seed0".into());
+                // Save vmctl password to VM config for display on noVNC
+                if let Ok(vm) = db::get_vm(smac) {
+                    if let Ok(mut vm_cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                        vm_cfg["vmctl_password"] = serde_json::json!(vmctl_pw);
+                        let _ = db::update_vm(smac, &serde_json::to_string(&vm_cfg).unwrap_or_default());
+                    }
+                }
             }
             Err(e) => {
                 output_log.push_str(&format!("WARNING: seed ISO generation failed: {}\n", e));
@@ -1579,22 +1605,68 @@ fn used_macs(exclude_smac: Option<&str>) -> Vec<(String, String)> {
 }
 
 /// Generate a random MAC address with 52:54:00 prefix (QEMU convention).
-/// Uses system time + process ID for randomness to avoid requiring the rand crate.
+/// Uses /dev/urandom for cryptographic randomness.
 pub fn generate_random_mac() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let pid = std::process::id();
-    // Simple LCG-based pseudo-random using nanos and pid
-    let mut rng = nanos.wrapping_mul(1664525).wrapping_add(pid);
     let mut octets = [0u8; 3];
-    for o in &mut octets {
-        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-        *o = (rng >> 16) as u8;
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        let _ = f.read_exact(&mut octets);
+    } else {
+        // Fallback: use multiple entropy sources mixed together
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let pid = std::process::id();
+        let addr = &octets as *const _ as u64;
+        let mix = nanos as u64 ^ (pid as u64).wrapping_shl(16) ^ addr;
+        octets[0] = (mix >> 0) as u8;
+        octets[1] = (mix >> 8) as u8;
+        octets[2] = (mix >> 16) as u8;
     }
     format!("52:54:00:{:02x}:{:02x}:{:02x}", octets[0], octets[1], octets[2])
+}
+
+/// Generate a random alphanumeric password of given length.
+/// Uses /dev/urandom for cryptographic randomness.
+pub fn generate_random_password(len: usize) -> String {
+    const CHARSET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut password = Vec::with_capacity(len);
+    let bytes = read_urandom_bytes(len);
+    for b in &bytes {
+        password.push(CHARSET[(*b as usize) % CHARSET.len()]);
+    }
+    String::from_utf8(password).unwrap_or_else(|_| "Vm3trl5ecure".into())
+}
+
+/// Read `len` bytes from /dev/urandom with a robust fallback.
+/// This is the single source of randomness for the application.
+pub fn read_urandom_bytes(len: usize) -> Vec<u8> {
+    let mut bytes = vec![0u8; len];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
+        if f.read_exact(&mut bytes).is_ok() {
+            return bytes;
+        }
+    }
+    // Fallback: mix multiple entropy sources (time, pid, stack address, thread id)
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let pid = std::process::id() as u128;
+    let addr = &bytes as *const _ as u128;
+    let mut state = ts ^ (pid << 32) ^ (addr << 64);
+    for b in bytes.iter_mut() {
+        // xorshift128-like mixing
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *b = (state & 0xFF) as u8;
+    }
+    bytes
 }
 
 /// Validate that MAC addresses in a config are unique across all VMs.
@@ -1887,8 +1959,307 @@ pub fn backup(json_str: &str) -> Result<String, String> {
     let cmd: SimpleCmd =
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
+    // VM must be running for memory dump
+    if let Ok(vm) = db::get_vm(&cmd.smac) {
+        if vm.status != "running" {
+            return Err("VM must be running to create a memory dump".into());
+        }
+    }
     let output = send_cmd_pctl("backup", &cmd.smac);
     Ok(output)
+}
+
+// ======== Full Backup operations ========
+
+/// Get disk names from a VM config JSON
+fn get_vm_disk_names(vm_name: &str) -> Result<Vec<String>, String> {
+    let vm = db::get_vm(vm_name)?;
+    let config: serde_json::Value = serde_json::from_str(&vm.config).unwrap_or_default();
+    let disks: Vec<String> = config
+        .get("disks")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.get("diskname").and_then(|v| v.as_str()))
+                .filter(|n| !n.is_empty())
+                .map(|n| n.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if disks.is_empty() {
+        return Err(format!("VM '{}' has no disks configured", vm_name));
+    }
+    Ok(disks)
+}
+
+/// Create a full backup of a VM's disks
+pub fn create_full_backup(vm_name: &str, note: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    // VM must be stopped
+    let vm = db::get_vm(vm_name)?;
+    if vm.status == "running" {
+        return Err("VM must be stopped before creating a full backup".into());
+    }
+    let disk_names = get_vm_disk_names(vm_name)?;
+    let disk_path = get_conf("disk_path");
+    let live_path = get_conf("live_path");
+    let qemu_img = get_conf("qemu_img_path");
+
+    // Generate backup_id
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let rnd = generate_random_password(6);
+    let backup_id = format!("bk_{}_{}", ts, rnd);
+    let backup_dir = format!("{}/full_backups/{}", live_path, backup_id);
+    std::fs::create_dir_all(&backup_dir)
+        .map_err(|e| format!("Failed to create backup dir: {}", e))?;
+
+    let mut total_size: i64 = 0;
+    let mut backed_up: Vec<String> = Vec::new();
+
+    for dname in &disk_names {
+        let src = format!("{}/{}.qcow2", disk_path, dname);
+        let dst = format!("{}/{}.qcow2", backup_dir, dname);
+        if !std::path::Path::new(&src).exists() {
+            continue;
+        }
+        // Check if linked clone — flatten with qemu-img convert
+        let has_backing = get_disk_backing_info(dname).unwrap_or(None).is_some();
+        let result = if has_backing {
+            crate::ssh::run_cmd(&qemu_img, &["convert", "-O", "qcow2", &src, &dst])
+        } else {
+            std::fs::copy(&src, &dst)
+                .map(|_| String::new())
+                .map_err(|e| format!("Copy failed: {}", e))
+        };
+        if let Err(e) = result {
+            // Rollback: remove partial backup
+            let _ = std::fs::remove_dir_all(&backup_dir);
+            return Err(format!("Backup failed for disk '{}': {}", dname, e));
+        }
+        if let Ok(meta) = std::fs::metadata(&dst) {
+            total_size += meta.len() as i64;
+        }
+        backed_up.push(dname.clone());
+    }
+
+    if backed_up.is_empty() {
+        let _ = std::fs::remove_dir_all(&backup_dir);
+        return Err("No disk files found to backup".into());
+    }
+
+    // Write metadata.json
+    let meta = serde_json::json!({
+        "vm_name": vm_name,
+        "disks": backed_up,
+        "backup_id": backup_id,
+        "created_at": chrono::Local::now().to_rfc3339(),
+        "note": note,
+    });
+    let _ = std::fs::write(
+        format!("{}/metadata.json", backup_dir),
+        serde_json::to_string_pretty(&meta).unwrap_or_default(),
+    );
+
+    // Insert DB record
+    let disk_json = serde_json::to_string(&backed_up).unwrap_or_default();
+    db::insert_backup(&backup_id, vm_name, &disk_json, "full", note, total_size)?;
+
+    Ok(format!("Full backup '{}' created ({} disks, {})",
+        backup_id, backed_up.len(), format_bytes(total_size as u64)))
+}
+
+/// Restore a full backup — copies disk files back to disk_path
+pub fn restore_full_backup(backup_id: &str, vm_name: &str) -> Result<String, String> {
+    sanitize_name(backup_id)?;
+    sanitize_name(vm_name)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status == "running" {
+        return Err("VM must be stopped before restoring".into());
+    }
+    let backup = db::get_backup(backup_id)?;
+    let disk_names: Vec<String> = serde_json::from_str(&backup.disk_names).unwrap_or_default();
+    let disk_path = get_conf("disk_path");
+    let live_path = get_conf("live_path");
+    let backup_dir = format!("{}/full_backups/{}", live_path, backup_id);
+
+    let mut restored = 0;
+    for dname in &disk_names {
+        let src = format!("{}/{}.qcow2", backup_dir, dname);
+        let dst = format!("{}/{}.qcow2", disk_path, dname);
+        if !std::path::Path::new(&src).exists() {
+            continue;
+        }
+        std::fs::copy(&src, &dst)
+            .map_err(|e| format!("Restore failed for '{}': {}", dname, e))?;
+        // Clear backing_file in DB since backup is standalone
+        let _ = db::set_disk_backing(dname, "");
+        restored += 1;
+    }
+    Ok(format!("Restored {} disk(s) from backup '{}'", restored, backup_id))
+}
+
+/// Delete a full backup (files + DB record)
+pub fn delete_full_backup(backup_id: &str) -> Result<String, String> {
+    sanitize_name(backup_id)?;
+    let live_path = get_conf("live_path");
+    let backup_dir = format!("{}/full_backups/{}", live_path, backup_id);
+    if std::path::Path::new(&backup_dir).exists() {
+        std::fs::remove_dir_all(&backup_dir)
+            .map_err(|e| format!("Failed to remove backup dir: {}", e))?;
+    }
+    db::delete_backup_record(backup_id)?;
+    Ok(format!("Deleted backup '{}'", backup_id))
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 { return format!("{} B", bytes); }
+    if bytes < 1048576 { return format!("{:.1} KB", bytes as f64 / 1024.0); }
+    if bytes < 1073741824 { return format!("{:.1} MB", bytes as f64 / 1048576.0); }
+    format!("{:.2} GB", bytes as f64 / 1073741824.0)
+}
+
+// ======== Snapshot operations ========
+
+/// Create a qcow2 internal snapshot for all disks of a VM
+pub fn create_snapshot(vm_name: &str, note: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status == "running" {
+        return Err("VM must be stopped before creating a snapshot".into());
+    }
+    let disk_names = get_vm_disk_names(vm_name)?;
+    let disk_path = get_conf("disk_path");
+    let qemu_img = get_conf("qemu_img_path");
+
+    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let rnd = generate_random_password(4);
+    let snapshot_id = format!("snap_{}_{}", ts, rnd);
+
+    let mut created: Vec<String> = Vec::new();
+    for dname in &disk_names {
+        let disk_file = format!("{}/{}.qcow2", disk_path, dname);
+        if !std::path::Path::new(&disk_file).exists() {
+            continue;
+        }
+        let result = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-c", &snapshot_id, &disk_file]);
+        if let Err(e) = result {
+            // Rollback: delete snapshots created so far
+            for prev in &created {
+                let prev_file = format!("{}/{}.qcow2", disk_path, prev);
+                let _ = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-d", &snapshot_id, &prev_file]);
+            }
+            return Err(format!("Snapshot failed for disk '{}': {}", dname, e));
+        }
+        db::insert_snapshot(&snapshot_id, dname, vm_name, note)?;
+        created.push(dname.clone());
+    }
+
+    if created.is_empty() {
+        return Err("No disk files found to snapshot".into());
+    }
+    Ok(format!("Snapshot '{}' created ({} disks)", snapshot_id, created.len()))
+}
+
+/// List all snapshots for a VM, grouped by snapshot_id
+pub fn list_vm_snapshots(vm_name: &str) -> Result<Vec<serde_json::Value>, String> {
+    sanitize_name(vm_name)?;
+    let records = db::list_snapshots_by_vm(vm_name)?;
+    // Group by snapshot_id
+    let mut map: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+    for r in &records {
+        let entry = map.entry(r.snapshot_id.clone()).or_insert_with(|| {
+            serde_json::json!({
+                "snapshot_id": r.snapshot_id,
+                "vm_name": r.vm_name,
+                "note": r.note,
+                "created_at": r.created_at,
+                "disks": Vec::<String>::new(),
+            })
+        });
+        if let Some(arr) = entry.get_mut("disks").and_then(|v| v.as_array_mut()) {
+            arr.push(serde_json::json!(r.disk_name));
+        }
+    }
+    // Return in reverse order (newest first)
+    Ok(map.into_values().rev().collect())
+}
+
+/// Revert a VM's disks to a snapshot
+pub fn revert_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    sanitize_name(snapshot_id)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status == "running" {
+        return Err("VM must be stopped before reverting to a snapshot".into());
+    }
+    let records = db::list_snapshots_by_vm(vm_name)?;
+    let snap_disks: Vec<&db::SnapshotRecord> = records.iter()
+        .filter(|r| r.snapshot_id == snapshot_id)
+        .collect();
+    if snap_disks.is_empty() {
+        return Err(format!("Snapshot '{}' not found for VM '{}'", snapshot_id, vm_name));
+    }
+    let disk_path = get_conf("disk_path");
+    let qemu_img = get_conf("qemu_img_path");
+
+    let mut reverted = 0;
+    for r in &snap_disks {
+        let disk_file = format!("{}/{}.qcow2", disk_path, r.disk_name);
+        if !std::path::Path::new(&disk_file).exists() {
+            continue;
+        }
+        crate::ssh::run_cmd(&qemu_img, &["snapshot", "-a", snapshot_id, &disk_file])
+            .map_err(|e| format!("Revert failed for disk '{}': {}", r.disk_name, e))?;
+        reverted += 1;
+    }
+    Ok(format!("Reverted {} disk(s) to snapshot '{}'", reverted, snapshot_id))
+}
+
+/// Delete a snapshot from disk(s) and DB
+pub fn delete_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    sanitize_name(snapshot_id)?;
+    let records = db::list_snapshots_by_vm(vm_name)?;
+    let snap_disks: Vec<&db::SnapshotRecord> = records.iter()
+        .filter(|r| r.snapshot_id == snapshot_id)
+        .collect();
+    if snap_disks.is_empty() {
+        return Err(format!("Snapshot '{}' not found for VM '{}'", snapshot_id, vm_name));
+    }
+    let disk_path = get_conf("disk_path");
+    let qemu_img = get_conf("qemu_img_path");
+
+    for r in &snap_disks {
+        let disk_file = format!("{}/{}.qcow2", disk_path, r.disk_name);
+        if std::path::Path::new(&disk_file).exists() {
+            let _ = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-d", snapshot_id, &disk_file]);
+        }
+        let _ = db::delete_snapshot_record(snapshot_id, &r.disk_name);
+    }
+    Ok(format!("Deleted snapshot '{}'", snapshot_id))
+}
+
+/// Query the actual backing file from a qcow2 disk header using qemu-img info
+pub fn get_disk_backing_info(disk_name: &str) -> Result<Option<String>, String> {
+    let disk_path = get_conf("disk_path");
+    let qemu_img = get_conf("qemu_img_path");
+    let disk_file = format!("{}/{}.qcow2", disk_path, disk_name);
+    if !std::path::Path::new(&disk_file).exists() {
+        return Ok(None);
+    }
+    let output = crate::ssh::run_cmd(&qemu_img, &["info", "--output=json", &disk_file])?;
+    let info: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Failed to parse qemu-img info: {}", e))?;
+    Ok(info.get("backing-filename")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            // Extract just the disk name (without path and .qcow2 extension)
+            std::path::Path::new(s)
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .unwrap_or(s)
+                .to_string()
+        }))
 }
 
 /// Create a standalone disk — creates .qcow2 file + saves to SQLite

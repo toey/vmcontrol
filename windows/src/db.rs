@@ -1,7 +1,13 @@
 use rusqlite::{params, Connection};
 use serde::Serialize;
+use std::sync::Mutex;
 
 use crate::config::get_conf;
+
+/// Global database connection pool (single connection protected by Mutex).
+/// This avoids opening a new connection per operation, improves performance,
+/// and prevents race conditions in read-modify-write sequences.
+static DB_CONN: std::sync::OnceLock<Mutex<Connection>> = std::sync::OnceLock::new();
 
 #[derive(Debug, Serialize, Clone)]
 pub struct DiskRecord {
@@ -9,6 +15,8 @@ pub struct DiskRecord {
     pub size: String,
     pub owner: String,
     pub created_at: String,
+    pub backing_file: String,
+    pub is_template: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -22,18 +30,36 @@ pub struct VmRecord {
     pub group_name: String,
 }
 
-/// Open (or create) the database, ensure the table exists + migrate
-fn open_db() -> Result<Connection, String> {
+/// Initialize the database connection and run migrations.
+/// Called once via OnceLock; subsequent calls reuse the same connection.
+fn init_db() -> Connection {
     let db_path = get_conf("db_path");
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn =
-        Connection::open(&db_path).map_err(|e| format!("DB open error: {}", e))?;
+    let conn = Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("FATAL: Cannot open database '{}': {}", db_path, e));
 
     // Enable WAL mode for better concurrency
-    let _ = conn.execute_batch("PRAGMA journal_mode=WAL;");
+    if let Err(e) = conn.execute_batch("PRAGMA journal_mode=WAL;") {
+        log::warn!("Failed to enable WAL mode: {}", e);
+    }
+    // Busy timeout: wait up to 5 seconds if DB is locked
+    let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
 
+    run_migrations(&conn).unwrap_or_else(|e| panic!("FATAL: DB migration failed: {}", e));
+    conn
+}
+
+/// Get a locked reference to the global database connection.
+/// Uses OnceLock to initialize on first call, then reuses the connection.
+fn open_db() -> Result<std::sync::MutexGuard<'static, Connection>, String> {
+    let mutex = DB_CONN.get_or_init(|| Mutex::new(init_db()));
+    mutex.lock().map_err(|e| format!("DB lock error (mutex poisoned): {}", e))
+}
+
+/// Run all database migrations
+fn run_migrations(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS vms (
             smac TEXT PRIMARY KEY,
@@ -91,6 +117,24 @@ fn open_db() -> Result<Connection, String> {
             .map_err(|e| format!("DB migrate group error: {}", e))?;
     }
 
+    // Migration: add backing_file column to disks if not exists
+    let has_backing: bool = conn
+        .prepare("SELECT backing_file FROM disks LIMIT 0")
+        .is_ok();
+    if !has_backing {
+        conn.execute_batch("ALTER TABLE disks ADD COLUMN backing_file TEXT NOT NULL DEFAULT '';")
+            .map_err(|e| format!("DB migrate backing_file error: {}", e))?;
+    }
+
+    // Migration: add is_template column to disks if not exists
+    let has_template: bool = conn
+        .prepare("SELECT is_template FROM disks LIMIT 0")
+        .is_ok();
+    if !has_template {
+        conn.execute_batch("ALTER TABLE disks ADD COLUMN is_template TEXT NOT NULL DEFAULT '0';")
+            .map_err(|e| format!("DB migrate is_template error: {}", e))?;
+    }
+
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS dhcp_leases (
             mac TEXT PRIMARY KEY,
@@ -134,7 +178,34 @@ fn open_db() -> Result<Connection, String> {
     )
     .map_err(|e| format!("DB os_templates table init error: {}", e))?;
 
-    Ok(conn)
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS backups (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            backup_id TEXT NOT NULL UNIQUE,
+            vm_name TEXT NOT NULL DEFAULT '',
+            disk_names TEXT NOT NULL DEFAULT '',
+            backup_type TEXT NOT NULL DEFAULT 'full',
+            note TEXT NOT NULL DEFAULT '',
+            total_size INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .map_err(|e| format!("DB backups table init error: {}", e))?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            snapshot_id TEXT NOT NULL,
+            disk_name TEXT NOT NULL,
+            vm_name TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(snapshot_id, disk_name)
+        );",
+    )
+    .map_err(|e| format!("DB snapshots table init error: {}", e))?;
+
+    Ok(())
 }
 
 /// Insert a new VM record, or update config if it already exists (preserves group_name, created_at)
@@ -318,7 +389,7 @@ pub fn insert_disk(name: &str, size: &str) -> Result<(), String> {
 pub fn list_disks() -> Result<Vec<DiskRecord>, String> {
     let conn = open_db()?;
     let mut stmt = conn
-        .prepare("SELECT name, size, COALESCE(owner,''), created_at FROM disks ORDER BY created_at DESC")
+        .prepare("SELECT name, size, COALESCE(owner,''), created_at, COALESCE(backing_file,''), COALESCE(is_template,'0') FROM disks ORDER BY created_at DESC")
         .map_err(|e| format!("DB query error: {}", e))?;
     let rows = stmt
         .query_map([], |row| {
@@ -327,6 +398,8 @@ pub fn list_disks() -> Result<Vec<DiskRecord>, String> {
                 size: row.get(1)?,
                 owner: row.get(2)?,
                 created_at: row.get(3)?,
+                backing_file: row.get(4)?,
+                is_template: row.get(5)?,
             })
         })
         .map_err(|e| format!("DB query error: {}", e))?;
@@ -375,6 +448,53 @@ pub fn clear_disk_owner_by_vm(smac: &str) -> Result<(), String> {
         params![smac],
     )
     .map_err(|e| format!("DB clear disk owner error: {}", e))?;
+    Ok(())
+}
+
+/// Insert a new disk with backing file reference (linked clone)
+pub fn insert_disk_with_backing(name: &str, size: &str, backing_file: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO disks (name, size, backing_file) VALUES (?1, ?2, ?3)",
+        params![name, size, backing_file],
+    )
+    .map_err(|e| format!("DB insert disk with backing error: {}", e))?;
+    Ok(())
+}
+
+/// Count how many disks use this disk as backing_file
+pub fn count_linked_clones(backing_name: &str) -> Result<i64, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT COUNT(*) FROM disks WHERE backing_file = ?1",
+        params![backing_name],
+        |row| row.get(0),
+    )
+    .map_err(|e| format!("DB count linked clones error: {}", e))
+}
+
+/// Set backing_file for a disk
+pub fn set_disk_backing(name: &str, backing_file: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "UPDATE disks SET backing_file = ?2 WHERE name = ?1",
+        params![name, backing_file],
+    )
+    .map_err(|e| format!("DB set disk backing error: {}", e))?;
+    Ok(())
+}
+
+/// Set is_template flag for a disk
+pub fn set_disk_template(name: &str, is_template: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    let updated = conn.execute(
+        "UPDATE disks SET is_template = ?2 WHERE name = ?1",
+        params![name, is_template],
+    )
+    .map_err(|e| format!("DB set disk template error: {}", e))?;
+    if updated == 0 {
+        return Err(format!("Disk '{}' not found", name));
+    }
     Ok(())
 }
 
@@ -695,5 +815,134 @@ pub fn delete_os_template(id: i64) -> Result<(), String> {
     if changed == 0 {
         return Err(format!("OS template id {} not found", id));
     }
+    Ok(())
+}
+
+// ======== Backup operations ========
+
+#[derive(Debug, Serialize, Clone)]
+pub struct BackupRecord {
+    pub id: i64,
+    pub backup_id: String,
+    pub vm_name: String,
+    pub disk_names: String,
+    pub backup_type: String,
+    pub note: String,
+    pub total_size: i64,
+    pub created_at: String,
+}
+
+pub fn insert_backup(backup_id: &str, vm_name: &str, disk_names: &str, backup_type: &str, note: &str, total_size: i64) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO backups (backup_id, vm_name, disk_names, backup_type, note, total_size) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![backup_id, vm_name, disk_names, backup_type, note, total_size],
+    ).map_err(|e| format!("DB insert backup error: {}", e))?;
+    Ok(())
+}
+
+pub fn list_backups() -> Result<Vec<BackupRecord>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, backup_id, vm_name, disk_names, backup_type, note, total_size, created_at FROM backups ORDER BY created_at DESC"
+    ).map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(BackupRecord {
+            id: row.get(0)?,
+            backup_id: row.get(1)?,
+            vm_name: row.get(2)?,
+            disk_names: row.get(3)?,
+            backup_type: row.get(4)?,
+            note: row.get(5)?,
+            total_size: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }).map_err(|e| format!("DB query error: {}", e))?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(result)
+}
+
+pub fn get_backup(backup_id: &str) -> Result<BackupRecord, String> {
+    let conn = open_db()?;
+    conn.query_row(
+        "SELECT id, backup_id, vm_name, disk_names, backup_type, note, total_size, created_at FROM backups WHERE backup_id = ?1",
+        params![backup_id],
+        |row| Ok(BackupRecord {
+            id: row.get(0)?,
+            backup_id: row.get(1)?,
+            vm_name: row.get(2)?,
+            disk_names: row.get(3)?,
+            backup_type: row.get(4)?,
+            note: row.get(5)?,
+            total_size: row.get(6)?,
+            created_at: row.get(7)?,
+        }),
+    ).map_err(|e| format!("Backup '{}' not found: {}", backup_id, e))
+}
+
+pub fn delete_backup_record(backup_id: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM backups WHERE backup_id = ?1", params![backup_id])
+        .map_err(|e| format!("DB delete backup error: {}", e))?;
+    Ok(())
+}
+
+// ======== Snapshot operations ========
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SnapshotRecord {
+    pub id: i64,
+    pub snapshot_id: String,
+    pub disk_name: String,
+    pub vm_name: String,
+    pub note: String,
+    pub created_at: String,
+}
+
+pub fn insert_snapshot(snapshot_id: &str, disk_name: &str, vm_name: &str, note: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT OR IGNORE INTO snapshots (snapshot_id, disk_name, vm_name, note) VALUES (?1, ?2, ?3, ?4)",
+        params![snapshot_id, disk_name, vm_name, note],
+    ).map_err(|e| format!("DB insert snapshot error: {}", e))?;
+    Ok(())
+}
+
+pub fn list_snapshots_by_vm(vm_name: &str) -> Result<Vec<SnapshotRecord>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn.prepare(
+        "SELECT id, snapshot_id, disk_name, vm_name, note, created_at FROM snapshots WHERE vm_name = ?1 ORDER BY created_at DESC"
+    ).map_err(|e| format!("DB query error: {}", e))?;
+    let rows = stmt.query_map(params![vm_name], |row| {
+        Ok(SnapshotRecord {
+            id: row.get(0)?,
+            snapshot_id: row.get(1)?,
+            disk_name: row.get(2)?,
+            vm_name: row.get(3)?,
+            note: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    }).map_err(|e| format!("DB query error: {}", e))?;
+    let mut result = Vec::new();
+    for r in rows {
+        result.push(r.map_err(|e| format!("DB row error: {}", e))?);
+    }
+    Ok(result)
+}
+
+pub fn delete_snapshot_record(snapshot_id: &str, disk_name: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM snapshots WHERE snapshot_id = ?1 AND disk_name = ?2", params![snapshot_id, disk_name])
+        .map_err(|e| format!("DB delete snapshot error: {}", e))?;
+    Ok(())
+}
+
+pub fn delete_snapshots_by_id(snapshot_id: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute("DELETE FROM snapshots WHERE snapshot_id = ?1", params![snapshot_id])
+        .map_err(|e| format!("DB delete snapshots error: {}", e))?;
     Ok(())
 }

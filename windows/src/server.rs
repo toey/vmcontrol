@@ -72,7 +72,10 @@ where
         let api_key_lock = self.api_key.clone();
 
         Box::pin(async move {
-            let api_key = api_key_lock.lock().unwrap().clone();
+            let api_key = match api_key_lock.lock() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
 
             // No API key configured = no auth required
             if api_key.is_empty() {
@@ -108,7 +111,9 @@ where
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
 
-            if provided == api_key {
+            // Constant-time comparison to prevent timing attacks
+            let key_match = constant_time_eq(provided.as_bytes(), api_key.as_bytes());
+            if key_match {
                 svc.call(req).await
             } else {
                 Err(actix_web::error::ErrorUnauthorized(
@@ -117,6 +122,20 @@ where
             }
         })
     }
+}
+
+/// Constant-time byte comparison to prevent timing attacks on API key validation.
+/// Returns false immediately if lengths differ (length is not secret), but compares
+/// all bytes when lengths match to avoid leaking content via timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 // ──────────────────────────────────────────
@@ -382,8 +401,12 @@ async fn vnc_stop_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
 /// Query QEMU block device info — returns per-drive mount status (cd0–cd3)
 async fn blockinfo_handler(path: web::Path<String>) -> HttpResponse {
     let smac = path.into_inner();
-    match crate::api_helpers::qemu_monitor_cmd(&smac, "info block") {
-        Ok(raw) => {
+    // Wrap blocking QEMU monitor I/O in web::block to avoid blocking the async runtime
+    let result = web::block(move || {
+        crate::api_helpers::qemu_monitor_cmd(&smac, "info block")
+    }).await;
+    match result {
+        Ok(Ok(raw)) => {
             // Parse "info block" output to extract cd0–cd3 status
             // Format: "cd0 (#block123): /path/to/file.iso (raw, read-only)" or "cd0: [not inserted]"
             let mut drives = serde_json::Map::new();
@@ -409,9 +432,14 @@ async fn blockinfo_handler(path: web::Path<String>) -> HttpResponse {
             }
             HttpResponse::Ok().json(drives)
         }
-        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
             success: false,
             message: format!("Failed to query block info: {}", e),
+            output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false,
+            message: format!("Internal error: {}", e),
             output: None,
         }),
     }
@@ -805,29 +833,18 @@ async fn vnc_token_handler(
         });
     }
 
-    // Generate random token
+    // Generate random token using the shared urandom helper
     let token = {
-        use std::io::Read;
-        let mut bytes = [0u8; 24];
-        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-            let _ = f.read_exact(&mut bytes);
-        } else {
-            // Fallback: mix timestamp + pid + pointer address for entropy
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            let pid = std::process::id() as u128;
-            let mix = ts ^ (pid << 64) ^ ((&bytes as *const _ as u128) << 32);
-            bytes[..16].copy_from_slice(&mix.to_le_bytes());
-            bytes[16..].copy_from_slice(&ts.to_le_bytes()[..8]);
-        }
+        let bytes = operations::read_urandom_bytes(24);
         bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
     };
 
     // Purge expired tokens (older than 5 minutes) and store new one
     {
-        let mut map = store.lock().unwrap();
+        let mut map = match store.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let now = std::time::Instant::now();
         map.retain(|_, v| now.duration_since(v.created).as_secs() < 300);
         map.insert(token.clone(), VncToken {
@@ -851,7 +868,10 @@ async fn vnc_resolve_handler(
 
     // Remove token (one-time use)
     let vnc_token = {
-        let mut map = store.lock().unwrap();
+        let mut map = match store.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         map.remove(&token)
     };
 
@@ -888,7 +908,7 @@ async fn vnc_resolve_handler(
         }
     };
 
-    let (vnc_port, is_windows, arch) = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+    let (vnc_port, is_windows, arch, vmctl_password) = if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
         let port = cfg.get("vnc_port").and_then(|v| v.as_u64()).unwrap_or(0);
         let win = cfg.pointer("/features/is_windows")
             .and_then(|v| v.as_str())
@@ -898,9 +918,13 @@ async fn vnc_resolve_handler(
             .and_then(|v| v.as_str())
             .unwrap_or("x86_64")
             .to_string();
-        (port, win, a)
+        let pw = cfg.get("vmctl_password")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        (port, win, a, pw)
     } else {
-        (0, false, "x86_64".to_string())
+        (0, false, "x86_64".to_string(), String::new())
     };
 
     HttpResponse::Ok().json(serde_json::json!({
@@ -910,13 +934,28 @@ async fn vnc_resolve_handler(
         "status": vm.status,
         "is_windows": is_windows,
         "arch": arch,
+        "vmctl_password": vmctl_password,
     }))
 }
 
-/// List VMs — auto-backfill VNC ports in a single pass
+/// List VMs — auto-backfill VNC ports + health-check stale "running" status
 async fn list_vms_handler() -> HttpResponse {
     match crate::db::list_vms() {
         Ok(mut vms) => {
+            // Health check: detect stale "running" status by checking monitor socket
+            let pctl_path = crate::config::get_conf("pctl_path");
+            for vm in vms.iter_mut() {
+                if vm.status == "running" {
+                    let sock_path = format!("{}/{}", pctl_path, vm.smac);
+                    if !std::path::Path::new(&sock_path).exists() {
+                        // QEMU monitor socket gone = VM crashed or was killed externally
+                        log::warn!("VM '{}' marked running but monitor socket missing — marking stopped", vm.smac);
+                        vm.status = "stopped".to_string();
+                        let _ = crate::db::set_vm_status(&vm.smac, "stopped");
+                    }
+                }
+            }
+
             // Auto-backfill VNC ports for VMs that don't have one
             let mut used_ports: Vec<u16> = Vec::new();
             let mut need_port: Vec<usize> = Vec::new();
@@ -1131,6 +1170,10 @@ async fn list_disks_handler() -> HttpResponse {
                     let base = fname.trim_end_matches(".qcow2");
                     if !base.is_empty() && !db_names.contains(base) {
                         let _ = crate::db::insert_disk(base, "");
+                        // Detect backing file from qcow2 header and save to DB
+                        if let Ok(Some(backing)) = operations::get_disk_backing_info(base) {
+                            let _ = crate::db::set_disk_backing(base, &backing);
+                        }
                     }
                 }
             }
@@ -1143,12 +1186,16 @@ async fn list_disks_handler() -> HttpResponse {
                 // Get actual file size from filesystem
                 let file_path = format!("{}/{}.qcow2", disk_path, d.name);
                 let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+                let clone_count = crate::db::count_linked_clones(&d.name).unwrap_or(0);
                 serde_json::json!({
                     "name": d.name,
                     "filename": format!("{}.qcow2", d.name),
                     "disk_size": d.size,
                     "size": file_size,
                     "owner": d.owner,
+                    "backing_file": d.backing_file,
+                    "is_template": d.is_template,
+                    "clone_count": clone_count,
                 })
             }).collect();
             HttpResponse::Ok().json(result)
@@ -1197,6 +1244,30 @@ async fn delete_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse
                 return HttpResponse::BadRequest().json(ApiResponse {
                     success: false,
                     message: format!("Disk '{}' is assigned to VM '{}'. Remove it from the VM first.", name, d.owner),
+                    output: None,
+                });
+            }
+        }
+    }
+
+    // Check if disk has linked clones depending on it
+    if let Ok(clone_count) = crate::db::count_linked_clones(name) {
+        if clone_count > 0 {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: format!("Cannot delete '{}': {} linked clone(s) depend on it. Flatten or delete them first.", name, clone_count),
+                output: None,
+            });
+        }
+    }
+
+    // Check if disk is a locked template
+    if let Ok(disks) = crate::db::list_disks() {
+        for d in &disks {
+            if d.name == name && d.is_template == "1" {
+                return HttpResponse::BadRequest().json(ApiResponse {
+                    success: false,
+                    message: format!("Disk '{}' is locked as a template. Unset template first.", name),
                     output: None,
                 });
             }
@@ -1282,23 +1353,37 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
         });
     }
 
-    // Copy file (blocking)
+    // Linked clone (default) or full copy
+    let linked = body.get("linked").and_then(|v| v.as_bool()).unwrap_or(true);
+
     let src = src_file.clone();
     let dst = dst_file.clone();
     let nn = new_name.clone();
+    let sn = source.clone();
     let result = web::block(move || {
-        std::fs::copy(&src, &dst)
-            .map_err(|e| format!("Copy failed: {}", e))?;
-        // Get file size for DB
-        let size = std::fs::metadata(&dst)
-            .map(|m| {
-                let mb = m.len() / 1024 / 1024;
-                if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) }
-            })
-            .unwrap_or_else(|_| "0".into());
-        crate::db::insert_disk(&nn, &size)
-            .map_err(|e| format!("DB insert error: {}", e))?;
-        Ok::<String, String>(format!("Cloned '{}' -> '{}'", src, dst))
+        if linked {
+            // Linked clone: qemu-img create -b source -F qcow2 dest
+            let qemu_img = get_conf("qemu_img_path");
+            crate::ssh::run_cmd(&qemu_img, &[
+                "create", "-f", "qcow2", "-b", &src, "-F", "qcow2", &dst
+            ]).map_err(|e| format!("Linked clone failed: {}", e))?;
+            crate::db::insert_disk_with_backing(&nn, "", &sn)
+                .map_err(|e| format!("DB insert error: {}", e))?;
+            Ok::<String, String>(format!("Linked clone '{}' -> '{}' (backing: {})", sn, nn, sn))
+        } else {
+            // Full copy (legacy behavior)
+            std::fs::copy(&src, &dst)
+                .map_err(|e| format!("Copy failed: {}", e))?;
+            let size = std::fs::metadata(&dst)
+                .map(|m| {
+                    let mb = m.len() / 1024 / 1024;
+                    if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) }
+                })
+                .unwrap_or_else(|_| "0".into());
+            crate::db::insert_disk(&nn, &size)
+                .map_err(|e| format!("DB insert error: {}", e))?;
+            Ok::<String, String>(format!("Full copy '{}' -> '{}'", sn, nn))
+        }
     })
     .await;
 
@@ -1317,6 +1402,89 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
             success: false,
             message: e.to_string(),
             output: None,
+        }),
+    }
+}
+
+async fn flatten_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false, message: "Missing 'name' field".into(), output: None,
+            });
+        }
+    };
+    if name.contains('/') || name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Invalid disk name".into(), output: None,
+        });
+    }
+
+    // Must not be in use by a running VM
+    if let Err(e) = operations::check_disk_not_in_use(&name) {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: e, output: None,
+        });
+    }
+
+    let disk_path = get_conf("disk_path");
+    let src = format!("{}/{}.qcow2", disk_path, name);
+    let tmp = format!("{}/{}_flatten_tmp.qcow2", disk_path, name);
+    let nn = name.clone();
+
+    let result = web::block(move || {
+        // Convert (flatten) to temp file
+        let qemu_img = get_conf("qemu_img_path");
+        crate::ssh::run_cmd(&qemu_img, &["convert", "-O", "qcow2", &src, &tmp])
+            .map_err(|e| format!("Flatten failed: {}", e))?;
+        // Replace original
+        std::fs::rename(&tmp, &src)
+            .map_err(|e| format!("Rename failed: {}", e))?;
+        // Update DB: clear backing_file
+        let _ = crate::db::set_disk_backing(&nn, "");
+        // Update size in DB
+        if let Ok(meta) = std::fs::metadata(&src) {
+            let mb = meta.len() / 1024 / 1024;
+            let size = if mb >= 1024 { format!("{}G", mb / 1024) } else { format!("{}M", mb) };
+            let _ = crate::db::update_disk_size(&nn, &size);
+        }
+        Ok::<String, String>(format!("Flattened '{}'", nn))
+    })
+    .await;
+
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse {
+            success: true, message: format!("Disk '{}' flattened to standalone", name), output: Some(msg),
+        }),
+        Ok(Err(e)) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e.to_string(), output: None,
+        }),
+    }
+}
+
+async fn set_template_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false, message: "Missing 'name' field".into(), output: None,
+            });
+        }
+    };
+    let is_template = body.get("is_template").and_then(|v| v.as_str()).unwrap_or("0");
+
+    match crate::db::set_disk_template(name, is_template) {
+        Ok(()) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: format!("Disk '{}' template = {}", name, if is_template == "1" { "locked" } else { "unlocked" }),
+            output: None,
+        }),
+        Err(e) => HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: e, output: None,
         }),
     }
 }
@@ -1829,17 +1997,53 @@ async fn export_vm_handler(
         zip.write_all(meta_json.as_bytes())
             .map_err(|e| format!("ZIP write error: {}", e))?;
 
-        // Write each disk file into disks/ folder (streaming, not loading all into memory)
+        // Write each disk file into disks/ folder
+        // For linked clones, auto-flatten to standalone before adding to ZIP
+        let qemu_img = get_conf("qemu_img_path");
+        let mut tmp_flattened: Vec<String> = Vec::new();
+
         for disk_name in &config_disk_names {
             let qcow2_path = format!("{}/{}.qcow2", dp, disk_name);
-            if std::path::Path::new(&qcow2_path).exists() {
-                zip.start_file(format!("disks/{}.qcow2", disk_name), options)
-                    .map_err(|e| format!("ZIP error: {}", e))?;
-                let mut disk_file = std::fs::File::open(&qcow2_path)
-                    .map_err(|e| format!("Failed to read disk {}: {}", disk_name, e))?;
-                std::io::copy(&mut disk_file, &mut zip)
-                    .map_err(|e| format!("ZIP write error for {}: {}", disk_name, e))?;
+            if !std::path::Path::new(&qcow2_path).exists() {
+                continue;
             }
+
+            // Check if this disk has a backing file (linked clone)
+            let has_backing = crate::operations::get_disk_backing_info(disk_name)
+                .unwrap_or(None)
+                .is_some();
+
+            let source_path = if has_backing {
+                // Flatten to a temp file for export
+                let tmp_path = format!("{}/{}_export_flat_{}.qcow2", dp, disk_name, std::process::id());
+                let result = crate::ssh::run_cmd(
+                    &qemu_img,
+                    &["convert", "-O", "qcow2", &qcow2_path, &tmp_path],
+                );
+                if let Err(e) = result {
+                    // Clean up any temp files created so far
+                    for p in &tmp_flattened {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    return Err(format!("Failed to flatten linked clone {}: {}", disk_name, e));
+                }
+                tmp_flattened.push(tmp_path.clone());
+                tmp_path
+            } else {
+                qcow2_path.clone()
+            };
+
+            zip.start_file(format!("disks/{}.qcow2", disk_name), options)
+                .map_err(|e| format!("ZIP error: {}", e))?;
+            let mut disk_file = std::fs::File::open(&source_path)
+                .map_err(|e| format!("Failed to read disk {}: {}", disk_name, e))?;
+            std::io::copy(&mut disk_file, &mut zip)
+                .map_err(|e| format!("ZIP write error for {}: {}", disk_name, e))?;
+        }
+
+        // Clean up temp flattened files
+        for p in &tmp_flattened {
+            let _ = std::fs::remove_file(p);
         }
 
         zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
@@ -2226,6 +2430,144 @@ async fn delete_backup_handler(body: web::Json<serde_json::Value>) -> HttpRespon
             message: format!("Failed to delete backup: {}", e),
             output: None,
         }),
+    }
+}
+
+// ======== Full Backup Management ========
+
+async fn create_full_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = web::block(move || operations::create_full_backup(&vm_name, &note)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn list_full_backups_handler() -> HttpResponse {
+    match crate::db::list_backups() {
+        Ok(backups) => HttpResponse::Ok().json(backups),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: format!("Failed to list backups: {}", e), output: None,
+        }),
+    }
+}
+
+async fn restore_full_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let backup_id = match body.get("backup_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'backup_id'".into(), output: None,
+        }),
+    };
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::restore_full_backup(&backup_id, &vm_name)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn delete_full_backup_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let backup_id = match body.get("backup_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'backup_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::delete_full_backup(&backup_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+// ======== Snapshot Management ========
+
+async fn create_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let result = web::block(move || operations::create_snapshot(&vm_name, &note)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn list_snapshots_handler(path: web::Path<String>) -> HttpResponse {
+    let vm_name = path.into_inner();
+    if vm_name.is_empty() || vm_name.contains('/') || vm_name.contains("..") {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Invalid VM name".into(), output: None,
+        });
+    }
+    match operations::list_vm_snapshots(&vm_name) {
+        Ok(snapshots) => HttpResponse::Ok().json(snapshots),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse {
+            success: false, message: e, output: None,
+        }),
+    }
+}
+
+async fn revert_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let snapshot_id = match body.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'snapshot_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::revert_snapshot(&vm_name, &snapshot_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn delete_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let snapshot_id = match body.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'snapshot_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::delete_snapshot(&vm_name, &snapshot_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
     }
 }
 
@@ -3015,7 +3357,10 @@ async fn host_ram_handler() -> HttpResponse {
 // ──────────────────────────────────────────
 
 async fn get_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
-    let key = key_state.lock().unwrap().clone();
+    let key = match key_state.lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
     HttpResponse::Ok().json(serde_json::json!({
         "api_key": key,
         "enabled": !key.is_empty(),
@@ -3023,24 +3368,16 @@ async fn get_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse 
 }
 
 async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
-    // Generate 64-char hex key
-    use std::io::Read;
-    let mut bytes = [0u8; 32];
-    let new_key = if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut bytes);
-        bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-    } else {
-        // Fallback: use timestamp + random-ish data
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        format!("{:064x}", ts)
-    };
+    // Generate 64-char hex key using shared random source
+    let bytes = operations::read_urandom_bytes(32);
+    let new_key = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
 
     // Update shared state
     {
-        let mut key = key_state.lock().unwrap();
+        let mut key = match key_state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         *key = new_key.clone();
     }
 
@@ -3138,7 +3475,10 @@ async fn unmount_disk_handler(
 async fn list_mounted_disks_handler(
     store: web::Data<crate::disk_edit::MountedDiskStore>,
 ) -> HttpResponse {
-    let locked = store.lock().unwrap();
+    let locked = match store.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     let list: Vec<_> = locked.values().cloned().collect();
     HttpResponse::Ok().json(list)
 }
@@ -3217,6 +3557,35 @@ async fn write_disk_file_handler(
     }
 }
 
+/// Cleanup stale seed ISOs and directories from deleted VMs
+fn cleanup_stale_seed_isos() {
+    let pctl_path = get_conf("pctl_path");
+    let vm_names: std::collections::HashSet<String> =
+        crate::db::list_vms().unwrap_or_default().iter().map(|v| v.smac.clone()).collect();
+
+    if let Ok(entries) = std::fs::read_dir(&pctl_path) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Cleanup seed ISO files for VMs that no longer exist
+            if name.starts_with("seed_") && name.ends_with(".iso") {
+                let vm_name = name.trim_start_matches("seed_").trim_end_matches(".iso");
+                if !vm_names.contains(vm_name) {
+                    log::info!("Cleaning up stale seed ISO: {}", name);
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            // Cleanup stale seed directories
+            if name.starts_with("seed_") && entry.path().is_dir() {
+                let vm_name = name.trim_start_matches("seed_");
+                if !vm_names.contains(vm_name) {
+                    log::info!("Cleaning up stale seed directory: {}", name);
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+}
+
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
@@ -3242,6 +3611,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
 
     // Repair VMs missing mds IPs (from old update_config bug)
     operations::repair_missing_mds_ips();
+
+    // Cleanup stale seed ISOs from deleted VMs
+    cleanup_stale_seed_isos();
 
     // Shared API key state for runtime updates
     let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));
@@ -3341,6 +3713,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/disk/delete", web::post().to(delete_disk_handler))
             .route("/api/disk/clone", web::post().to(clone_disk_handler))
             .route("/api/disk/resize", web::post().to(resize_disk_handler))
+            .route("/api/disk/flatten", web::post().to(flatten_disk_handler))
+            .route("/api/disk/set-template", web::post().to(set_template_handler))
             // Disk file editor routes
             .route("/api/disk/edit-supported", web::get().to(disk_edit_supported_handler))
             .route("/api/disk/mount", web::post().to(mount_disk_handler))
@@ -3365,6 +3739,16 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // Backup routes
             .route("/api/backup/list", web::get().to(list_backups_handler))
             .route("/api/backup/delete", web::post().to(delete_backup_handler))
+            // Full Backup routes
+            .route("/api/fullbackup/create", web::post().to(create_full_backup_handler))
+            .route("/api/fullbackup/list", web::get().to(list_full_backups_handler))
+            .route("/api/fullbackup/restore", web::post().to(restore_full_backup_handler))
+            .route("/api/fullbackup/delete", web::post().to(delete_full_backup_handler))
+            // Snapshot routes
+            .route("/api/snapshot/create", web::post().to(create_snapshot_handler))
+            .route("/api/snapshot/list/{vm_name}", web::get().to(list_snapshots_handler))
+            .route("/api/snapshot/revert", web::post().to(revert_snapshot_handler))
+            .route("/api/snapshot/delete", web::post().to(delete_snapshot_handler))
             // Group routes
             .route("/api/group/list", web::get().to(list_groups_handler))
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))
