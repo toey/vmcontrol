@@ -2135,6 +2135,23 @@ function formatMemory(mb) {
     return mb + ' MB';
 }
 
+async function loadHostRam() {
+    try {
+        var response = await apiFetch('/api/host/ram');
+        var data = await safeJson(response);
+        if (data && data.host_total_mb) {
+            var maxMb = data.host_total_mb;
+            var slider = document.getElementById('start-memory-range');
+            var input = document.getElementById('start-memory-size');
+            if (slider) slider.max = maxMb;
+            if (input) input.max = maxMb;
+            window._hostRamMb = maxMb;
+        }
+    } catch (err) {
+        console.error('Failed to load host RAM info:', err);
+    }
+}
+
 function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
@@ -3066,6 +3083,7 @@ function initApp() {
             addDisk();
         });
     });
+    loadHostRam();
     loadVmList();
     loadIsoList();
     loadVmListTable();
