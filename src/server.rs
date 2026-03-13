@@ -1429,10 +1429,12 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
             crate::db::insert_disk(&nn, &size)
                 .map_err(|e| format!("DB insert error: {}", e))?;
 
-            // Copy UEFI NVRAM from source disk's owner VM (if exists)
-            // This preserves Windows/UEFI boot entries for template disks
+            // Copy UEFI NVRAM from any VM that uses this disk (preserves boot entries)
             let pctl_path = get_conf("pctl_path");
             let disk_path = get_conf("disk_path");
+            let mut nvram_copied = false;
+
+            // Strategy 1: check disk owner field
             if let Ok(disks) = crate::db::list_disks() {
                 let owner = disks.iter()
                     .find(|d| d.name == sn)
@@ -1442,12 +1444,43 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
                     let src_nvram = format!("{}/{}_efivars.fd", pctl_path, owner);
                     let dst_nvram = format!("{}/{}_efivars.fd", disk_path, nn);
                     if std::path::Path::new(&src_nvram).exists() {
-                        match std::fs::copy(&src_nvram, &dst_nvram) {
-                            Ok(_) => log::info!("Copied NVRAM {} -> {}", src_nvram, dst_nvram),
-                            Err(e) => log::warn!("Failed to copy NVRAM: {}", e),
+                        if let Ok(_) = std::fs::copy(&src_nvram, &dst_nvram) {
+                            log::info!("Copied NVRAM from owner '{}': {}", owner, dst_nvram);
+                            nvram_copied = true;
                         }
                     }
                 }
+            }
+
+            // Strategy 2: scan all VMs to find one that uses this disk in config
+            if !nvram_copied {
+                if let Ok(vms) = crate::db::list_vms() {
+                    for vm in &vms {
+                        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                            let uses_disk = cfg.get("disks")
+                                .and_then(|d| d.as_array())
+                                .map(|arr| arr.iter().any(|d| {
+                                    d.get("diskname").and_then(|n| n.as_str()) == Some(&sn)
+                                }))
+                                .unwrap_or(false);
+                            if uses_disk {
+                                let src_nvram = format!("{}/{}_efivars.fd", pctl_path, vm.smac);
+                                let dst_nvram = format!("{}/{}_efivars.fd", disk_path, nn);
+                                if std::path::Path::new(&src_nvram).exists() {
+                                    if let Ok(_) = std::fs::copy(&src_nvram, &dst_nvram) {
+                                        log::info!("Copied NVRAM from VM '{}': {}", vm.smac, dst_nvram);
+                                        nvram_copied = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !nvram_copied {
+                log::info!("No NVRAM found for source disk '{}' — new VM will use generic UEFI vars", sn);
             }
 
             Ok::<String, String>(format!("Full copy '{}' -> '{}' (standalone)", sn, nn))
