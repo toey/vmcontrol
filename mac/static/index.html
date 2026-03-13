@@ -29,8 +29,7 @@
     <nav id="tabs">
         <button class="tab active" data-tab="vmlist">VM List</button>
         <button class="tab" data-tab="create">Create VM</button>
-        <button class="tab" data-tab="createdisk">Create Disk</button>
-        <button class="tab" data-tab="listimage">List Image</button>
+        <button class="tab" data-tab="disks">Disks &amp; Images</button>
         <button class="tab" data-tab="mountiso">Mount ISO</button>
         <button class="tab" data-tab="livemigrate">Live Migrate</button>
         <button class="tab" data-tab="backup">Backup</button>
@@ -154,27 +153,15 @@
             </div>
         </div>
 
-        <!-- Create Disk -->
-        <div id="tab-createdisk" class="tab-panel">
-            <h2>Create Disk</h2>
-            <label>Disk Name <input type="text" id="createdisk-name" placeholder="my-disk-01"></label>
-            <label>Size <input type="text" id="createdisk-size" value="40G"></label>
-            <button class="execute-btn" onclick="executeCreateDisk()">Create Disk</button>
-            <fieldset style="margin-top:16px;">
-                <legend>Template Disks</legend>
-                <div id="disk-template-list" style="font-size:0.9em;"></div>
+        <!-- Disks & Images -->
+        <div id="tab-disks" class="tab-panel">
+            <h2>Disks &amp; Images</h2>
+            <fieldset>
+                <legend>Create Disk</legend>
+                <label>Disk Name <input type="text" id="createdisk-name" placeholder="my-disk-01"></label>
+                <label>Size <input type="text" id="createdisk-size" value="40G"></label>
+                <button class="execute-btn" onclick="executeCreateDisk()">Create Disk</button>
             </fieldset>
-            <fieldset style="margin-top:16px;">
-                <legend>Disk Files</legend>
-                <div id="disk-file-list" style="font-size:0.9em;"></div>
-            </fieldset>
-        </div>
-
-        <!-- List Image -->
-        <div id="tab-listimage" class="tab-panel">
-            <h2>List Images</h2>
-            <label>VM-NAME <select id="listimage-smac"><option value="">-- select VM --</option></select></label>
-            <button class="execute-btn" onclick="executeSimple('listimage')">List Images</button>
             <fieldset style="margin-top:16px;">
                 <legend>Upload &amp; Convert Image</legend>
                 <p class="form-desc">Supports: qcow2, vmdk (VMware), vdi (VirtualBox), vhdx (Hyper-V), raw, img</p>
@@ -184,6 +171,14 @@
                     <span id="image-progress-text"></span>
                 </div>
                 <button class="execute-btn" onclick="uploadImage()" style="margin-top:8px;">Upload &amp; Convert</button>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>Template Disks</legend>
+                <div id="disk-template-list" style="font-size:0.9em;"></div>
+            </fieldset>
+            <fieldset style="margin-top:16px;">
+                <legend>Disk Files</legend>
+                <div id="disk-file-list" style="font-size:0.9em;"></div>
             </fieldset>
             <fieldset style="margin-top:16px;">
                 <legend>Image Files</legend>

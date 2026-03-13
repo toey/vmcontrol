@@ -614,10 +614,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'mountiso') { loadIsoList(); }
         // Auto-load VM list when switching to vmlist tab
         if (tab.dataset.tab === 'vmlist') { loadVmListTable(); }
-        // Auto-load image list when switching to listimage tab (refresh disk list first for owner info)
-        if (tab.dataset.tab === 'listimage') { loadDiskList().then(function() { loadImageList(); }); }
-        // Auto-load disk list when switching to createdisk tab
-        if (tab.dataset.tab === 'createdisk') { loadDiskList(); }
+        // Auto-load disk list + image list when switching to disks tab
+        if (tab.dataset.tab === 'disks') { loadDiskList().then(function() { loadImageList(); }); }
         // Auto-load backup list when switching to backup tab
         if (tab.dataset.tab === 'backup') { loadBackupList(); loadFullBackupList(); loadSnapshotList(); }
         // Auto-load DHCP table when switching to dhcp tab
@@ -2588,7 +2586,7 @@ async function loadVmList() {
         var vms = await safeJson(response);
         window._vmList = vms;
         var selects = [
-            'listimage-smac', 'mountiso-smac',
+            'mountiso-smac',
             'livemigrate-smac', 'backup-smac',
             'fullbackup-vm', 'snapshot-vm',
             'metadata-smac'
