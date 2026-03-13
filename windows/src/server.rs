@@ -2452,6 +2452,532 @@ async fn import_vm_handler(
     }
 }
 
+/// Export an entire VM group as a single ZIP archive
+async fn export_group_handler(
+    req: actix_web::HttpRequest,
+    path: web::Path<String>,
+) -> HttpResponse {
+    let group_name = path.into_inner();
+
+    if group_name.is_empty() {
+        return HttpResponse::BadRequest().json(ApiResponse {
+            success: false,
+            message: "Group name cannot be empty".into(),
+            output: None,
+        });
+    }
+
+    // Get all VMs in this group
+    let all_vms = match crate::db::list_vms() {
+        Ok(v) => v,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: format!("Failed to list VMs: {}", e),
+                output: None,
+            });
+        }
+    };
+
+    let group_vms: Vec<_> = all_vms
+        .into_iter()
+        .filter(|vm| vm.group_name == group_name)
+        .collect();
+
+    if group_vms.is_empty() {
+        return HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: format!("No VMs found in group '{}'", group_name),
+            output: None,
+        });
+    }
+
+    // Check all VMs are stopped
+    for vm in &group_vms {
+        if vm.status == "running" {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: format!(
+                    "VM '{}' is running. Stop all VMs in the group first.",
+                    vm.smac
+                ),
+                output: None,
+            });
+        }
+    }
+
+    // Build group manifest
+    let vm_list: Vec<serde_json::Value> = group_vms
+        .iter()
+        .map(|vm| {
+            let config_val: serde_json::Value =
+                serde_json::from_str(&vm.config).unwrap_or_default();
+            serde_json::json!({
+                "smac": vm.smac,
+                "mac": vm.mac,
+                "disk_size": vm.disk_size,
+                "config": config_val,
+                "created_at": vm.created_at,
+            })
+        })
+        .collect();
+
+    let manifest = serde_json::json!({
+        "version": 1,
+        "group_name": group_name,
+        "vm_count": group_vms.len(),
+        "vms": vm_list,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let disk_path = get_conf("disk_path");
+    let safe_group: String = group_name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let tmp_zip = format!(
+        "{}/group_{}_export_{}.zip",
+        disk_path,
+        safe_group,
+        std::process::id()
+    );
+    let zip_path = tmp_zip.clone();
+    let manifest_json = serde_json::to_string_pretty(&manifest).unwrap_or_default();
+    let dp = disk_path.clone();
+
+    // Collect all disk names and NVRAM files per VM
+    let mut vm_disk_map: Vec<(String, Vec<String>)> = Vec::new();
+    for vm in &group_vms {
+        let config_val: serde_json::Value =
+            serde_json::from_str(&vm.config).unwrap_or_default();
+        let disk_names: Vec<String> = config_val
+            .get("disks")
+            .and_then(|d| d.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| d.get("diskname").and_then(|v| v.as_str()))
+                    .filter(|n| !n.is_empty())
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        vm_disk_map.push((vm.smac.clone(), disk_names));
+    }
+
+    let build_result = web::block(move || {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let file = std::fs::File::create(&zip_path)
+            .map_err(|e| format!("Failed to create zip: {}", e))?;
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        // Write group-manifest.json
+        zip.start_file("group-manifest.json", options)
+            .map_err(|e| format!("ZIP error: {}", e))?;
+        zip.write_all(manifest_json.as_bytes())
+            .map_err(|e| format!("ZIP write error: {}", e))?;
+
+        let qemu_img = get_conf("qemu_img_path");
+        let mut tmp_flattened: Vec<String> = Vec::new();
+
+        for (smac, disk_names) in &vm_disk_map {
+            // Write each disk for this VM
+            for disk_name in disk_names {
+                let qcow2_path = format!("{}/{}.qcow2", dp, disk_name);
+                if !std::path::Path::new(&qcow2_path).exists() {
+                    continue;
+                }
+
+                let has_backing = crate::operations::get_disk_backing_info(disk_name)
+                    .unwrap_or(None)
+                    .is_some();
+
+                let source_path = if has_backing {
+                    let tmp_path = format!(
+                        "{}/{}_export_flat_{}.qcow2",
+                        dp,
+                        disk_name,
+                        std::process::id()
+                    );
+                    let result = crate::ssh::run_cmd(
+                        &qemu_img,
+                        &["convert", "-O", "qcow2", &qcow2_path, &tmp_path],
+                    );
+                    if let Err(e) = result {
+                        for p in &tmp_flattened {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        return Err(format!(
+                            "Failed to flatten linked clone {}: {}",
+                            disk_name, e
+                        ));
+                    }
+                    tmp_flattened.push(tmp_path.clone());
+                    tmp_path
+                } else {
+                    qcow2_path.clone()
+                };
+
+                zip.start_file(
+                    format!("vms/{}/disks/{}.qcow2", smac, disk_name),
+                    options,
+                )
+                .map_err(|e| format!("ZIP error: {}", e))?;
+                let mut disk_file = std::fs::File::open(&source_path)
+                    .map_err(|e| format!("Failed to read disk {}: {}", disk_name, e))?;
+                std::io::copy(&mut disk_file, &mut zip)
+                    .map_err(|e| format!("ZIP write error for {}: {}", disk_name, e))?;
+            }
+
+            // Write NVRAM if exists
+            let nvram_path = format!("{}/{}_efivars.fd", dp, smac);
+            if std::path::Path::new(&nvram_path).exists() {
+                zip.start_file(format!("vms/{}/{}_efivars.fd", smac, smac), options)
+                    .map_err(|e| format!("ZIP error: {}", e))?;
+                let mut nvram_file = std::fs::File::open(&nvram_path)
+                    .map_err(|e| format!("Failed to read NVRAM {}: {}", smac, e))?;
+                std::io::copy(&mut nvram_file, &mut zip)
+                    .map_err(|e| format!("ZIP write error for NVRAM {}: {}", smac, e))?;
+            }
+        }
+
+        // Clean up temp flattened files
+        for p in &tmp_flattened {
+            let _ = std::fs::remove_file(p);
+        }
+
+        zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
+        Ok::<(), String>(())
+    })
+    .await;
+
+    match build_result {
+        Ok(Ok(())) => {
+            match actix_files::NamedFile::open_async(&tmp_zip).await {
+                Ok(f) => {
+                    let cleanup_path = tmp_zip.clone();
+                    actix_web::rt::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                        let _ = std::fs::remove_file(&cleanup_path);
+                    });
+                    f.set_content_disposition(actix_web::http::header::ContentDisposition {
+                        disposition: actix_web::http::header::DispositionType::Attachment,
+                        parameters: vec![
+                            actix_web::http::header::DispositionParam::Filename(format!(
+                                "group_{}.zip",
+                                safe_group
+                            )),
+                        ],
+                    })
+                    .into_response(&req)
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp_zip);
+                    HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: format!("Failed to open zip file: {}", e),
+                        output: None,
+                    })
+                }
+            }
+        }
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_file(&tmp_zip);
+            HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: e,
+                output: None,
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_zip);
+            HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: format!("Internal error: {}", e),
+                output: None,
+            })
+        }
+    }
+}
+
+/// Import a VM group from a ZIP archive
+async fn import_group_handler(
+    _req: actix_web::HttpRequest,
+    mut payload: web::Payload,
+) -> HttpResponse {
+    use futures_util::StreamExt;
+
+    let disk_path = get_conf("disk_path");
+    let _ = std::fs::create_dir_all(&disk_path);
+    let tmp_zip = format!("{}/group_import_{}.zip", disk_path, std::process::id());
+
+    // Stream uploaded ZIP to temp file
+    {
+        let mut file = match std::fs::File::create(&tmp_zip) {
+            Ok(f) => f,
+            Err(e) => {
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: format!("Failed to create temp file: {}", e),
+                    output: None,
+                });
+            }
+        };
+        while let Some(chunk) = payload.next().await {
+            match chunk {
+                Ok(data) => {
+                    if let Err(e) = std::io::Write::write_all(&mut file, &data) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&tmp_zip);
+                        return HttpResponse::InternalServerError().json(ApiResponse {
+                            success: false,
+                            message: format!("Failed to write data: {}", e),
+                            output: None,
+                        });
+                    }
+                }
+                Err(e) => {
+                    drop(file);
+                    let _ = std::fs::remove_file(&tmp_zip);
+                    return HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: format!("Upload stream error: {}", e),
+                        output: None,
+                    });
+                }
+            }
+        }
+    }
+
+    let zip_path = tmp_zip.clone();
+    let dp = disk_path.clone();
+
+    let import_result = web::block(move || {
+        use std::io::Read;
+
+        let file = std::fs::File::open(&zip_path)
+            .map_err(|e| format!("Failed to open zip: {}", e))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("Invalid ZIP file: {}", e))?;
+
+        // Read group-manifest.json
+        let manifest_json = {
+            let mut entry = archive
+                .by_name("group-manifest.json")
+                .map_err(|_| "ZIP missing group-manifest.json".to_string())?;
+            let mut buf = String::new();
+            entry
+                .read_to_string(&mut buf)
+                .map_err(|e| format!("Failed to read group-manifest.json: {}", e))?;
+            buf
+        };
+
+        let manifest: serde_json::Value = serde_json::from_str(&manifest_json)
+            .map_err(|e| format!("Invalid group-manifest.json: {}", e))?;
+
+        let group_name = manifest
+            .get("group_name")
+            .and_then(|v| v.as_str())
+            .ok_or("group-manifest.json missing 'group_name'")?
+            .to_string();
+
+        let vms_array = manifest
+            .get("vms")
+            .and_then(|v| v.as_array())
+            .ok_or("group-manifest.json missing 'vms' array")?;
+
+        let mut imported_names: Vec<String> = Vec::new();
+
+        for vm_meta in vms_array {
+            let orig_smac = vm_meta
+                .get("smac")
+                .and_then(|v| v.as_str())
+                .ok_or("VM entry missing 'smac'")?
+                .to_string();
+
+            // Use original smac name — check uniqueness
+            let smac = orig_smac.clone();
+            operations::validate_vm_name(&smac)?;
+
+            if crate::db::get_vm(&smac).is_ok() {
+                return Err(format!(
+                    "VM name '{}' already exists. Rename or delete it first.",
+                    smac
+                ));
+            }
+
+            let mut config = vm_meta
+                .get("config")
+                .cloned()
+                .unwrap_or(serde_json::json!({}));
+            let disk_size = vm_meta
+                .get("disk_size")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Generate new MAC addresses
+            if let Some(adapters) = config
+                .get_mut("network_adapters")
+                .and_then(|a| a.as_array_mut())
+            {
+                for adapter in adapters.iter_mut() {
+                    if let Some(obj) = adapter.as_object_mut() {
+                        let mut new_mac = operations::generate_random_mac();
+                        for _ in 0..100 {
+                            let test_config = serde_json::json!({
+                                "network_adapters": [{"mac": new_mac}]
+                            });
+                            if operations::validate_mac_uniqueness(&test_config, None).is_ok() {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            new_mac = operations::generate_random_mac();
+                        }
+                        obj.insert("mac".to_string(), serde_json::json!(new_mac));
+                    }
+                }
+            }
+
+            // Auto-assign new VNC port
+            let port = operations::next_vnc_port()?;
+            config
+                .as_object_mut()
+                .unwrap()
+                .insert("vnc_port".to_string(), serde_json::json!(port));
+
+            // Auto-assign new IPs
+            let new_ipv4 = operations::next_ipv4();
+            let new_internal = operations::next_internal_ip();
+            if let Some(mds) = config.get_mut("mds").and_then(|m| m.as_object_mut()) {
+                mds.insert("local_ipv4".to_string(), serde_json::json!(new_ipv4));
+                mds.insert("internal_ip".to_string(), serde_json::json!(new_internal));
+            }
+
+            // Validate MAC uniqueness
+            operations::validate_mac_uniqueness(&config, None)?;
+
+            // Extract disk files for this VM
+            let vm_prefix = format!("vms/{}/disks/", orig_smac);
+            let mut disk_entries: Vec<String> = Vec::new();
+            for i in 0..archive.len() {
+                let entry = archive
+                    .by_index(i)
+                    .map_err(|e| format!("ZIP entry error: {}", e))?;
+                let entry_name = entry.name().to_string();
+                if entry_name.starts_with(&vm_prefix) && entry_name.ends_with(".qcow2") {
+                    disk_entries.push(entry_name);
+                }
+            }
+
+            let mut disk_names: Vec<String> = Vec::new();
+            for entry_name in &disk_entries {
+                let filename = entry_name
+                    .strip_prefix(&vm_prefix)
+                    .unwrap_or(entry_name);
+                let safe_name: String = filename
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '.')
+                    .collect();
+                if safe_name.is_empty() || safe_name.contains("..") {
+                    continue;
+                }
+
+                let dest = format!("{}/{}", dp, safe_name);
+                if std::path::Path::new(&dest).exists() {
+                    return Err(format!(
+                        "Disk file '{}' already exists on this host",
+                        safe_name
+                    ));
+                }
+
+                let mut entry = archive
+                    .by_name(entry_name)
+                    .map_err(|e| format!("ZIP entry error: {}", e))?;
+                let mut out_file = std::fs::File::create(&dest)
+                    .map_err(|e| format!("Failed to create {}: {}", safe_name, e))?;
+                std::io::copy(&mut entry, &mut out_file)
+                    .map_err(|e| format!("Failed to extract {}: {}", safe_name, e))?;
+
+                let base = safe_name.trim_end_matches(".qcow2");
+                disk_names.push(base.to_string());
+            }
+
+            // Extract NVRAM if exists
+            let nvram_entry_name = format!("vms/{}/{}_efivars.fd", orig_smac, orig_smac);
+            if let Ok(mut entry) = archive.by_name(&nvram_entry_name) {
+                let nvram_dest = format!("{}/{}_efivars.fd", dp, smac);
+                let mut out_file = std::fs::File::create(&nvram_dest)
+                    .map_err(|e| format!("Failed to create NVRAM: {}", e))?;
+                std::io::copy(&mut entry, &mut out_file)
+                    .map_err(|e| format!("Failed to extract NVRAM: {}", e))?;
+            }
+
+            // Create DB entries
+            let config_str = serde_json::to_string(&config).unwrap_or_default();
+            let mac_str = config
+                .get("network_adapters")
+                .and_then(|a| a.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|a| a.get("mac"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            crate::db::insert_vm(&smac, &mac_str, &disk_size, &config_str)?;
+            if !group_name.is_empty() {
+                let _ = crate::db::set_vm_group(&smac, &group_name);
+            }
+
+            for disk_name in &disk_names {
+                let _ = crate::db::insert_disk(disk_name, "");
+                let _ = crate::db::set_disk_owner(disk_name, &smac);
+            }
+
+            imported_names.push(smac);
+        }
+
+        // Cleanup temp zip
+        let _ = std::fs::remove_file(&zip_path);
+
+        Ok(format!(
+            "Group '{}' imported successfully with {} VM(s): {}",
+            group_name,
+            imported_names.len(),
+            imported_names.join(", ")
+        ))
+    })
+    .await;
+
+    match import_result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse {
+            success: true,
+            message: msg,
+            output: None,
+        }),
+        Ok(Err(e)) => {
+            let _ = std::fs::remove_file(&tmp_zip);
+            HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: e,
+                output: None,
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_zip);
+            HttpResponse::InternalServerError().json(ApiResponse {
+                success: false,
+                message: format!("Internal error: {}", e),
+                output: None,
+            })
+        }
+    }
+}
+
 async fn list_backups_handler() -> HttpResponse {
     let live_path = get_conf("live_path");
     let _ = std::fs::create_dir_all(&live_path);
@@ -3834,6 +4360,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             // VM export/import routes
             .route("/api/vm/export/{smac}", web::get().to(export_vm_handler))
             .route("/api/vm/import", web::post().to(import_vm_handler))
+            // VM group export/import routes
+            .route("/api/group/export/{name}", web::get().to(export_group_handler))
+            .route("/api/group/import", web::post().to(import_group_handler))
             // ISO routes
             .route("/api/iso/list", web::get().to(list_isos_handler))
             .route("/api/iso/upload", web::post().to(upload_iso_handler))

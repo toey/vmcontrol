@@ -52,6 +52,13 @@
                     <progress id="vm-import-progress-bar" value="0" max="100" style="width:180px;"></progress>
                     <span id="vm-import-progress-text" style="font-size:0.85rem;color:#8b949e;"></span>
                 </div>
+                <span style="color:#30363d;margin:0 4px;">|</span>
+                <input type="file" id="group-import-file" accept=".zip" style="max-width:300px;">
+                <button class="execute-btn" onclick="importGroup()">Import Group</button>
+                <div id="group-import-progress" style="display:none; align-items:center; gap:6px;">
+                    <progress id="group-import-progress-bar" value="0" max="100" style="width:180px;"></progress>
+                    <span id="group-import-progress-text" style="font-size:0.85rem;color:#8b949e;"></span>
+                </div>
             </div>
             <div id="vm-list-table-wrap">
                 <table id="vm-list-table">

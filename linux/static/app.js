@@ -1725,6 +1725,98 @@ function importVm() {
     xhr.send(file);
 }
 
+// Export entire VM group as ZIP
+function exportGroup(groupName) {
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Exporting group ' + groupName + '...';
+
+    apiFetch('/api/group/export/' + encodeURIComponent(groupName)).then(function(response) {
+        if (!response.ok) {
+            return response.json().then(function(data) {
+                throw new Error(data.message || 'Export failed');
+            });
+        }
+        return response.blob();
+    }).then(function(blob) {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'group_' + groupName + '.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        statusEl.className = 'success';
+        statusEl.textContent = 'Exported group ' + groupName + '.zip';
+    }).catch(function(err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Group export error: ' + err.message;
+    });
+}
+
+// Import VM group from ZIP file
+function importGroup() {
+    var fileInput = document.getElementById('group-import-file');
+    if (!fileInput.files.length) {
+        alert('Please select a group .zip export file');
+        return;
+    }
+    var file = fileInput.files[0];
+    var statusEl = document.getElementById('status-indicator');
+    var progressDiv = document.getElementById('group-import-progress');
+    var progressBar = document.getElementById('group-import-progress-bar');
+    var progressText = document.getElementById('group-import-progress-text');
+
+    progressDiv.style.display = 'inline-flex';
+    progressBar.value = 0;
+    progressText.textContent = 'Uploading...';
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Importing group from ' + file.name + '...';
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/group/import');
+    xhr.setRequestHeader('X-Filename', file.name);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            var pct = Math.round(e.loaded / e.total * 100);
+            progressBar.value = pct;
+            progressText.textContent = pct + '% (' + formatSize(e.loaded) + ' / ' + formatSize(e.total) + ')';
+        }
+    };
+
+    xhr.onload = function() {
+        progressDiv.style.display = 'none';
+        try {
+            var data = JSON.parse(xhr.responseText);
+            if (data.success) {
+                statusEl.className = 'success';
+                statusEl.textContent = data.message;
+                fileInput.value = '';
+                loadVmListTable();
+                loadVmList();
+                loadDiskList();
+            } else {
+                statusEl.className = 'error';
+                statusEl.textContent = 'Group import error: ' + data.message;
+            }
+        } catch (e) {
+            statusEl.className = 'error';
+            statusEl.textContent = 'Group import failed';
+        }
+    };
+
+    xhr.onerror = function() {
+        progressDiv.style.display = 'none';
+        statusEl.className = 'error';
+        statusEl.textContent = 'Network error during group import';
+    };
+
+    xhr.send(file);
+}
+
 // ======== Switch Management ========
 
 async function loadSwitchList() {
@@ -2552,9 +2644,11 @@ async function loadVmListTable() {
             var groupLabel = groupName || '(Ungrouped)';
             var groupVms = grouped[groupName];
             // Group header row
+            var groupExportBtn = groupName ? ' <button onclick="exportGroup(\'' + escapeHtml(groupName).replace(/'/g, "\\'") + '\')" style="background:#1f6feb;color:#fff;border:none;border-radius:4px;padding:2px 8px;font-size:0.75rem;cursor:pointer;margin-left:8px;" title="Export entire group as ZIP">⬇ Export Group</button>' : '';
             html += '<tr class="group-header-row">' +
                 '<td colspan="7" style="background:#161b22;padding:8px 10px;font-weight:bold;color:#58a6ff;border-bottom:2px solid #30363d;font-size:0.9rem;">' +
                 '📁 ' + escapeHtml(groupLabel) + ' <small style="color:#8b949e;font-weight:normal;">(' + groupVms.length + ')</small>' +
+                groupExportBtn +
                 '</td></tr>';
 
             groupVms.forEach(function(vm) {
