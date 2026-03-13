@@ -103,7 +103,11 @@
             <div class="form-grid">
                 <fieldset>
                     <legend>CPU</legend>
-                    <label>vCPUs <input type="number" id="start-vcpus" value="2" min="1" max="128"></label>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <input type="range" id="start-vcpus-range" min="1" max="128" step="1" value="2" oninput="document.getElementById('start-vcpus').value=this.value;" style="flex:1;">
+                        <input type="number" id="start-vcpus" value="2" min="1" max="128" step="1" style="width:60px;" oninput="document.getElementById('start-vcpus-range').value=this.value;">
+                        <span style="color:#58a6ff;min-width:40px;">vCPUs</span>
+                    </div>
                 </fieldset>
                 <fieldset>
                     <legend>Memory</legend>

@@ -3965,6 +3965,7 @@ async fn list_internal_network_handler() -> HttpResponse {
 
 async fn host_ram_handler() -> HttpResponse {
     let host_ram = operations::host_total_ram_mb();
+    let host_cpus = operations::host_total_cpus();
     let used_ram = operations::running_vms_ram_mb(None);
     let reserved: u64 = 1024;
     let usable = host_ram.saturating_sub(reserved);
@@ -3972,6 +3973,7 @@ async fn host_ram_handler() -> HttpResponse {
 
     HttpResponse::Ok().json(serde_json::json!({
         "host_total_mb": host_ram,
+        "host_cpus": host_cpus,
         "reserved_mb": reserved,
         "usable_mb": usable,
         "running_vms_mb": used_ram,

@@ -290,6 +290,7 @@ function applyOsTemplate() {
 
     // Fill CPU / Memory / Features
     document.getElementById('start-vcpus').value = tpl.vcpus;
+    document.getElementById('start-vcpus-range').value = tpl.vcpus;
     document.getElementById('start-memory-size').value = tpl.memory;
     document.getElementById('start-memory-range').value = tpl.memory;
     document.getElementById('start-memory-label').textContent = formatMemory(tpl.memory);
@@ -587,6 +588,7 @@ function resetCreateForm() {
     document.getElementById('create-group').value = '';
     document.getElementById('create-group-new').value = '';
     document.getElementById('start-vcpus').value = '2';
+    document.getElementById('start-vcpus-range').value = '2';
     document.getElementById('start-memory-size').value = '2048';
     document.getElementById('start-memory-range').value = '2048';
     document.getElementById('start-memory-label').textContent = '2 GB';
@@ -2147,8 +2149,16 @@ async function loadHostRam() {
             if (input) input.max = maxMb;
             window._hostRamMb = maxMb;
         }
+        if (data && data.host_cpus) {
+            var maxCpus = data.host_cpus;
+            var cpuSlider = document.getElementById('start-vcpus-range');
+            var cpuInput = document.getElementById('start-vcpus');
+            if (cpuSlider) cpuSlider.max = maxCpus;
+            if (cpuInput) cpuInput.max = maxCpus;
+            window._hostCpus = maxCpus;
+        }
     } catch (err) {
-        console.error('Failed to load host RAM info:', err);
+        console.error('Failed to load host info:', err);
     }
 }
 
@@ -2801,6 +2811,7 @@ async function editVm(smac) {
                     vcpus = String(s * c * t);
                 }
                 document.getElementById('start-vcpus').value = vcpus;
+                document.getElementById('start-vcpus-range').value = vcpus;
             }
             if (config.memory) {
                 var memVal = config.memory.size || '2048';

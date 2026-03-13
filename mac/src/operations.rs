@@ -41,6 +41,42 @@ pub fn host_total_ram_mb() -> u64 {
     0
 }
 
+/// Get total logical CPU cores of the host
+pub fn host_total_cpus() -> u32 {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.logicalcpu"])
+            .output()
+        {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Ok(n) = s.trim().parse::<u32>() {
+                    return n;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("nproc").output() {
+            if let Ok(s) = String::from_utf8(output.stdout) {
+                if let Ok(n) = s.trim().parse::<u32>() {
+                    return n;
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(val) = std::env::var("NUMBER_OF_PROCESSORS") {
+            if let Ok(n) = val.parse::<u32>() {
+                return n;
+            }
+        }
+    }
+    0
+}
+
 /// Get total RAM allocated by running VMs (in MB)
 pub fn running_vms_ram_mb(exclude_smac: Option<&str>) -> u64 {
     let mut total: u64 = 0;
