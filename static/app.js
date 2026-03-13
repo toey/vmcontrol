@@ -916,6 +916,7 @@ function collectVmConfig() {
             mac: row.querySelector('.adapter-mac').value,
             vlan: row.querySelector('.adapter-vlan').value,
             mode: row.querySelector('.adapter-mode').value,
+            nic_model: row.querySelector('.adapter-nic-model') ? row.querySelector('.adapter-nic-model').value : 'virtio',
             switch_name: row.querySelector('.adapter-switch') ? row.querySelector('.adapter-switch').value : '',
             bridge_iface: row.querySelector('.adapter-bridge-iface') ? row.querySelector('.adapter-bridge-iface').value : '',
         };
@@ -1136,6 +1137,7 @@ function addNetworkAdapter(existing) {
     var mode = (existing && existing.mode) || 'nat';
     var switchName = (existing && existing.switch_name) || '';
     var bridgeIface = (existing && existing.bridge_iface) || '';
+    var nicModel = (existing && existing.nic_model) || 'virtio';
     var switchDisplay = mode === 'switch' ? '' : 'display:none;';
     var bridgeDisplay = mode === 'bridge' ? '' : 'display:none;';
     var vlanOpacity = mode === 'switch' ? '1' : '0.4';
@@ -1148,6 +1150,12 @@ function addNetworkAdapter(existing) {
             '<option value="nat"' + (mode === 'nat' ? ' selected' : '') + '>NAT</option>' +
             '<option value="switch"' + (mode === 'switch' ? ' selected' : '') + '>Switch</option>' +
             '<option value="bridge"' + (mode === 'bridge' ? ' selected' : '') + '>Bridge</option>' +
+        '</select>' +
+        '<select class="adapter-nic-model" title="NIC Model">' +
+            '<option value="virtio"' + (nicModel === 'virtio' ? ' selected' : '') + '>virtio</option>' +
+            '<option value="e1000"' + (nicModel === 'e1000' ? ' selected' : '') + '>e1000</option>' +
+            '<option value="e1000e"' + (nicModel === 'e1000e' ? ' selected' : '') + '>e1000e</option>' +
+            '<option value="rtl8139"' + (nicModel === 'rtl8139' ? ' selected' : '') + '>rtl8139</option>' +
         '</select>' +
         '<select class="adapter-switch" style="' + switchDisplay + '"><option value="">-- switch --</option></select>' +
         '<input class="adapter-bridge-iface" placeholder="Interface (optional)" style="' + bridgeDisplay + 'max-width:140px;" value="' + escapeHtml(bridgeIface) + '">' +

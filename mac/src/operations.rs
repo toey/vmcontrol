@@ -1016,12 +1016,14 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         }
 
         qemu_args.push("-device".into());
-        // Use virtio-net-pci for all VMs (including Windows):
-        // - Faster than e1000/e1000e
-        // - Works on both x86_64 and aarch64
-        // - Windows gets virtio drivers from virtio-win ISO (auto-mounted on cd3)
-        // - e1000e is unavailable on aarch64 virt machine
-        qemu_args.push(format!("virtio-net-pci,netdev=net{},mac={}", adapter.netid, adapter.mac));
+        // NIC model: virtio (fastest, needs driver) or e1000 (compatible, no driver needed)
+        let nic_device = match adapter.nic_model.as_str() {
+            "e1000" => "e1000",
+            "e1000e" => "e1000e",
+            "rtl8139" => "rtl8139",
+            _ => "virtio-net-pci", // default: virtio
+        };
+        qemu_args.push(format!("{},netdev=net{},mac={}", nic_device, adapter.netid, adapter.mac));
     }
 
     // Internal network — VM-to-VM communication on 192.168.100.0/24

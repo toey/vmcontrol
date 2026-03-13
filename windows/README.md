@@ -14,7 +14,7 @@ Cross-platform QEMU/KVM virtual machine management system written in Rust. Provi
 | **Multi-OS Host** | Windows, macOS, Linux with native service integration |
 | **VM Groups** | Organize VMs into logical groups |
 | **Networking** | NAT, Virtual Switch (VLAN), Bridge/TAP, Port Forwarding, Internal VM-to-VM |
-| **Cloud-Init** | EC2-compatible metadata service with per-VM config |
+| **Cloud-Init** | EC2-compatible MDS with 12+ configurable options (timezone, locale, DNS, NTP, swap, phone-home, etc.) |
 | **SSH Key Store** | Named SSH keys saved in DB, selectable per VM |
 | **VNC Console** | QEMU WebSocket VNC with bundled noVNC viewer + file transfer |
 | **Send Files to VM** | Transfer files via ISO mount or QEMU Guest Agent direct write |
@@ -24,13 +24,13 @@ Cross-platform QEMU/KVM virtual machine management system written in Rust. Provi
 | **Disk Editor** | Mount, browse, read/write files inside QCOW2 disks |
 | **Disk Export** | Download as qcow2 / raw / vmdk / vdi / vhdx |
 | **Image Import** | Upload vmdk/vdi/vhdx/raw with auto-conversion to qcow2 |
-| **VM Export/Import** | Export/import complete VMs as ZIP archives (config + disks) |
+| **VM Export/Import** | Export/import VMs or entire groups as ZIP archives |
 | **OS Templates** | Customizable presets with auto-clone disk on selection |
 | **ISO Mount** | Upload and hot-mount ISO images (up to 4 GB) |
-| **Windows Support** | Auto-mount virtio-win ISO, VNC toolbar buttons, Win11 bypass |
+| **Windows Support** | Auto-mount virtio-win ISO, UEFI NVRAM preservation, VNC toolbar, Win11 bypass |
 | **Live Migration** | Move running VMs between hosts |
 | **Backup** | Timestamped gzip-compressed snapshots |
-| **DHCP Management** | Track and manage IP leases |
+| **DHCP Management** | Subnet config, batch IP assignment, static leases |
 | **VFIO Passthrough** | PCI device passthrough (Linux) |
 
 ---
@@ -171,6 +171,8 @@ internal_mcast_port: 11111     # VM-to-VM multicast port
 
 The installer generates this file automatically. Edit to customize.
 
+> The installer also downloads `virtio-win-0.1.285.iso` to the ISO directory automatically (needed for Windows guest VMs).
+
 ### aarch64 (ARM64) Guests
 
 Ensure `qemu-system-aarch64` and EDK2 UEFI firmware (`edk2-aarch64-code.fd`) are installed. Select `aarch64` architecture when creating a VM. Uses QEMU `virt` machine type with `virtio-gpu-pci` display.
@@ -215,6 +217,8 @@ If `VMCONTROL_API_KEY` is not set, all requests are allowed without authenticati
 | `GET` | `/api/group/list` | List all group names |
 | `GET` | `/api/vm/export/{smac}` | Export VM as ZIP archive (config + disks) |
 | `POST` | `/api/vm/import` | Import VM from ZIP archive |
+| `GET` | `/api/group/export/{name}` | Export entire VM group as ZIP |
+| `POST` | `/api/group/import` | Import VM group from ZIP |
 
 ### Disks
 
@@ -277,6 +281,9 @@ Supported upload formats: qcow2, vmdk, vdi, vhdx, raw, img
 | `POST` | `/api/dhcp/add` | Add DHCP lease |
 | `POST` | `/api/dhcp/delete` | Delete DHCP lease |
 | `POST` | `/api/dhcp/sync` | Sync DHCP from VMs |
+| `GET` | `/api/dhcp/subnet` | Get subnet config (subnet, gateway, netmask, range) |
+| `POST` | `/api/dhcp/subnet` | Save subnet config |
+| `POST` | `/api/dhcp/batch-assign` | Auto-assign IPs from range to all VMs |
 
 ### VNC Console
 
@@ -465,7 +472,8 @@ Windows VMs get automatic enhancements:
 
 - **TPM 2.0**: swtpm emulator provides TPM device (required for Windows 11)
 - **virtio-win ISO**: Auto-mounted on cd3 for driver and guest agent installation
-- **VNC toolbar buttons**: Shift+F10 (CMD during install), Alt+Shift (switch language), Win11 Bypass (registry bypass for TPM/SecureBoot/NRO checks)
+- **UEFI NVRAM preservation**: Windows Boot Manager entries are preserved when cloning templates. Per-VM `{smac}_efivars.fd` files store UEFI boot configuration
+- **VNC toolbar buttons**: Shift+F10 (CMD during install), Alt+Shift (switch language), Win11 Bypass (registry bypass for TPM/SecureBoot/NRO checks), Ctrl+V Paste
 - **Secure Boot (ARM64)**: AAVMF firmware with Microsoft keys pre-enrolled
 
 ---
@@ -525,6 +533,18 @@ Each VM can be configured with cloud-init metadata:
 - **Custom Userdata** -- additional cloud-init YAML
 - **Internal IP** -- auto-assigned from pool for VM-to-VM networking
 - **Auto-install packages** -- `qemu-guest-agent` is installed automatically on Linux VMs
+- **Timezone** -- e.g. `Asia/Bangkok`
+- **Locale** -- e.g. `en_US.UTF-8`
+- **DNS Nameservers** -- comma-separated (e.g. `8.8.8.8, 1.1.1.1`)
+- **NTP Servers** -- comma-separated
+- **Swap Size** -- auto-create swap file (MB)
+- **Phone Home URL** -- cloud-init completion callback
+- **Power State** -- action after cloud-init completes (poweroff/reboot/none)
+- **Disable Root SSH** -- toggle
+- **Growpart** -- auto-expand root partition
+- **Extra Packages** -- comma-separated additional packages
+- **Extra Runcmd** -- additional shell commands (one per line)
+- **Write Files** -- JSON array of files to write
 
 The metadata service is EC2-compatible. VMs query it for their configuration during boot via cloud-init's NoCloud datasource.
 
@@ -564,6 +584,9 @@ SQLite with WAL mode. Tables:
 | `ssh_keys` | Named SSH public keys |
 | `template_images` | OS template to base image mappings |
 | `os_templates` | Custom OS template definitions |
+| `backups` | Backup metadata |
+| `snapshots` | Disk snapshot records |
+| `settings` | Key-value app settings (DHCP subnet, etc.) |
 
 ---
 
