@@ -1415,9 +1415,11 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
                 .map_err(|e| format!("DB insert error: {}", e))?;
             Ok::<String, String>(format!("Linked clone '{}' -> '{}' (backing: {})", sn, nn, sn))
         } else {
-            // Full copy (legacy behavior)
-            std::fs::copy(&src, &dst)
-                .map_err(|e| format!("Copy failed: {}", e))?;
+            // Full copy: use qemu-img convert to flatten any backing chain
+            let qemu_img = get_conf("qemu_img_path");
+            crate::ssh::run_cmd(&qemu_img, &[
+                "convert", "-O", "qcow2", &src, &dst
+            ]).map_err(|e| format!("Full copy failed: {}", e))?;
             let size = std::fs::metadata(&dst)
                 .map(|m| {
                     let mb = m.len() / 1024 / 1024;
@@ -1426,7 +1428,7 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
                 .unwrap_or_else(|_| "0".into());
             crate::db::insert_disk(&nn, &size)
                 .map_err(|e| format!("DB insert error: {}", e))?;
-            Ok::<String, String>(format!("Full copy '{}' -> '{}'", sn, nn))
+            Ok::<String, String>(format!("Full copy '{}' -> '{}' (standalone)", sn, nn))
         }
     })
     .await;
