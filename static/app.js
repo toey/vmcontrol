@@ -1518,7 +1518,7 @@ async function cloneDiskAsTemplate(source) {
         var response = await apiFetch('/api/disk/clone', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ source: source, name: newName }),
+            body: JSON.stringify({ source: source, name: newName, linked: false }),
         });
         var data = await safeJson(response);
         if (data.success) {
