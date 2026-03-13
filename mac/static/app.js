@@ -961,10 +961,17 @@ async function executeCreateVm() {
         return;
     }
     var config = collectVmConfig();
-    // Require at least one disk
-    if (!config.disks || config.disks.length === 0) {
-        alert('Please select at least one disk');
-        return;
+    // If no disk selected, auto-create one with the VM name
+    if (!config.disks || config.disks.length === 0 || config.disks.every(function(d) { return !d.diskname; })) {
+        var diskSize = val('createdisk-size') || '40G';
+        var statusEl = document.getElementById('status-indicator');
+        statusEl.className = 'loading';
+        statusEl.textContent = 'Auto-creating disk "' + vmName + '" (' + diskSize + ')...';
+        var diskOk = await apiCall('disk/create', { name: vmName, size: diskSize });
+        if (!diskOk) return;
+        await loadDiskList();
+        // Set the auto-created disk in config
+        config.disks = [{ diskid: 'hd0', diskname: vmName, 'iops-total': '0', 'iops-total-max': '0', 'iops-total-max-length': '0' }];
     }
     // Frontend MAC uniqueness check
     var macErr = validateMacUniqueness(config, null);
