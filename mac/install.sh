@@ -128,6 +128,25 @@ mkdir -p "$LIVE_PATH"
 mkdir -p "$STATIC_DIR"
 success "Directories created"
 
+# --- Step 3b: Download virtio-win ISO (for Windows guest VMs) ---
+VIRTIO_ISO="virtio-win-0.1.285.iso"
+VIRTIO_URL="https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.285-1/${VIRTIO_ISO}"
+VIRTIO_DEST="${ISO_PATH}/${VIRTIO_ISO}"
+
+if [[ -f "$VIRTIO_DEST" ]]; then
+    success "virtio-win ISO already exists: ${VIRTIO_ISO}"
+else
+    info "Downloading ${VIRTIO_ISO} (needed for Windows guest VMs)..."
+    if curl -L -o "$VIRTIO_DEST" "$VIRTIO_URL" 2>&1; then
+        success "Downloaded ${VIRTIO_ISO} ($(du -h "$VIRTIO_DEST" | awk '{print $1}'))"
+    else
+        warn "Failed to download virtio-win ISO. You can download it manually later:"
+        echo "       $VIRTIO_URL"
+        echo "       Place it in: $ISO_PATH/"
+        rm -f "$VIRTIO_DEST"
+    fi
+fi
+
 # --- Step 4: Copy binary & static files ---
 info "Installing binary and static files..."
 

@@ -500,6 +500,25 @@ if not exist "%STATIC_DIR%" mkdir "%STATIC_DIR%"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
 echo [OK]   Directories created
 
+:: --- Step 4b: Download virtio-win ISO (for Windows guest VMs) ---
+set "VIRTIO_ISO=virtio-win-0.1.285.iso"
+set "VIRTIO_URL=https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.285-1/%VIRTIO_ISO%"
+set "VIRTIO_DEST=%ISO_PATH%\%VIRTIO_ISO%"
+
+if exist "%VIRTIO_DEST%" (
+    echo [OK]   virtio-win ISO already exists: %VIRTIO_ISO%
+) else (
+    echo [INFO] Downloading %VIRTIO_ISO% ^(needed for Windows guest VMs^)...
+    powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%VIRTIO_URL%' -OutFile '%VIRTIO_DEST%' -UseBasicParsing; Write-Host '[OK]   Downloaded %VIRTIO_ISO%' } catch { Write-Host '[WARN] Failed to download virtio-win ISO:' $_.Exception.Message }"
+    if not exist "%VIRTIO_DEST%" (
+        echo [WARN] You can download it manually later:
+        echo        %VIRTIO_URL%
+        echo        Place it in: %ISO_PATH%\
+    )
+)
+
+echo.
+
 :: --- Step 5: Remove existing service (already stopped in Step 2b) ---
 where nssm >nul 2>&1
 if %errorlevel% equ 0 (
