@@ -3693,6 +3693,7 @@ async fn delete_dhcp_handler(body: web::Json<serde_json::Value>) -> HttpResponse
 }
 
 /// Auto-populate DHCP leases from all VM network adapters + MDS config
+/// Only assigns IP to the first adapter per VM (each VM has one local_ipv4)
 async fn sync_dhcp_handler() -> HttpResponse {
     let vms = crate::db::list_vms().unwrap_or_default();
     let mut count = 0;
@@ -3702,10 +3703,13 @@ async fn sync_dhcp_handler() -> HttpResponse {
             let ip = mds.and_then(|m| m.get("local_ipv4")).and_then(|v| v.as_str()).unwrap_or("");
             let hostname = mds.and_then(|m| m.get("hostname_prefix")).and_then(|v| v.as_str()).unwrap_or("");
             if let Some(adapters) = cfg.get("network_adapters").and_then(|v| v.as_array()) {
-                for adapter in adapters {
-                    let mac = adapter.get("mac").and_then(|v| v.as_str()).unwrap_or("");
-                    if !mac.is_empty() && !ip.is_empty() {
-                        let _ = crate::db::upsert_dhcp_lease(mac, ip, hostname, &vm.smac);
+                // Only assign IP to the first adapter with a MAC (one IP per VM)
+                if let Some(first_mac) = adapters.iter()
+                    .filter_map(|a| a.get("mac").and_then(|v| v.as_str()))
+                    .find(|m| !m.is_empty())
+                {
+                    if !ip.is_empty() {
+                        let _ = crate::db::upsert_dhcp_lease(first_mac, ip, hostname, &vm.smac);
                         count += 1;
                     }
                 }
