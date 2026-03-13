@@ -620,8 +620,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'mountiso') { loadIsoList(); }
         // Auto-load VM list when switching to vmlist tab
         if (tab.dataset.tab === 'vmlist') { loadVmListTable(); }
-        // Auto-load disk list + image list when switching to disks tab
-        if (tab.dataset.tab === 'disks') { loadDiskList().then(function() { loadImageList(); }); }
+        // Auto-load disk list when switching to disks tab
+        if (tab.dataset.tab === 'disks') { loadDiskList(); }
         // Auto-load backup list when switching to backup tab
         if (tab.dataset.tab === 'backup') { loadBackupList(); loadFullBackupList(); loadSnapshotList(); }
         // Auto-load DHCP table + subnet config when switching to dhcp tab
@@ -1374,13 +1374,38 @@ async function loadDiskList() {
             }
         }
 
-        // Render regular disk list
+        // Also fetch image files to find non-qcow2 files not in disk DB
+        var extraImages = [];
+        try {
+            var imgResp = await apiFetch('/api/image/list');
+            var images = await safeJson(imgResp);
+            var diskNames = new Set(disks.map(function(d) { return d.name + '.qcow2'; }));
+            images.forEach(function(img) {
+                if (!diskNames.has(img.name) && !img.name.endsWith('.qcow2')) {
+                    extraImages.push(img);
+                }
+            });
+        } catch (e) { /* ignore */ }
+
+        // Render regular disk list + non-qcow2 image files
         if (listDiv) {
-            if (regular.length === 0) {
-                listDiv.innerHTML = '<em style="color:#8b949e;">No disk files</em>';
-            } else {
-                listDiv.innerHTML = regular.map(renderDiskRow).join('') + renderDiskSummary(regular, 'Disks');
+            var html = '';
+            if (regular.length > 0) {
+                html += regular.map(renderDiskRow).join('') + renderDiskSummary(regular, 'Disks');
             }
+            if (extraImages.length > 0) {
+                html += extraImages.map(function(img) {
+                    var deleteBtn = '<button class="btn-remove" onclick="deleteImage(\'' + img.name.replace(/'/g, "\\'") + '\')">X</button>';
+                    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #333;">' +
+                        '<span>' + escapeHtml(img.name) + ' <small>(' + escapeHtml(formatSize(img.size)) + ')</small> <small style="color:#d29922;">[image]</small></span>' +
+                        '<span>' + deleteBtn + '</span>' +
+                        '</div>';
+                }).join('');
+            }
+            if (!html) {
+                html = '<em style="color:#8b949e;">No disk files</em>';
+            }
+            listDiv.innerHTML = html;
         }
 
         // Refresh any disk selects on the page
