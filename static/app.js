@@ -624,8 +624,8 @@ document.querySelectorAll('.tab').forEach(function(tab) {
         if (tab.dataset.tab === 'disks') { loadDiskList().then(function() { loadImageList(); }); }
         // Auto-load backup list when switching to backup tab
         if (tab.dataset.tab === 'backup') { loadBackupList(); loadFullBackupList(); loadSnapshotList(); }
-        // Auto-load DHCP table when switching to dhcp tab
-        if (tab.dataset.tab === 'dhcp') { loadDhcpTable(); }
+        // Auto-load DHCP table + subnet config when switching to dhcp tab
+        if (tab.dataset.tab === 'dhcp') { loadDhcpTable(); loadDhcpSubnet(); }
         // Auto-load internal network when switching to internal-net tab
         if (tab.dataset.tab === 'internal-net') { loadInternalNetwork(); }
         // Auto-load switch list when switching to switches tab
@@ -3069,6 +3069,66 @@ async function syncDhcpFromVms() {
     statusEl.textContent = 'Syncing DHCP leases from VM configs...';
     try {
         var response = await apiFetch('/api/dhcp/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+        });
+        var result = await safeJson(response);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
+        loadDhcpTable();
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
+    }
+}
+
+// ======== DHCP Subnet Config ========
+
+async function loadDhcpSubnet() {
+    try {
+        var response = await apiFetch('/api/dhcp/subnet');
+        var data = await safeJson(response);
+        document.getElementById('dhcp-subnet').value = data.subnet || '';
+        document.getElementById('dhcp-gateway').value = data.gateway || '';
+        document.getElementById('dhcp-netmask').value = data.netmask || '';
+        document.getElementById('dhcp-range-start').value = data.range_start || '';
+        document.getElementById('dhcp-range-end').value = data.range_end || '';
+    } catch (err) {
+        console.error('Failed to load DHCP subnet config:', err);
+    }
+}
+
+async function saveDhcpSubnet() {
+    var statusEl = document.getElementById('status-indicator');
+    try {
+        var response = await apiFetch('/api/dhcp/subnet', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                subnet: document.getElementById('dhcp-subnet').value.trim(),
+                gateway: document.getElementById('dhcp-gateway').value.trim(),
+                netmask: document.getElementById('dhcp-netmask').value.trim(),
+                range_start: document.getElementById('dhcp-range-start').value.trim(),
+                range_end: document.getElementById('dhcp-range-end').value.trim(),
+            })
+        });
+        var result = await safeJson(response);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
+    }
+}
+
+async function dhcpBatchAssign() {
+    if (!confirm('Auto-assign IPs from the configured range to all VMs without an existing lease?')) return;
+    var statusEl = document.getElementById('status-indicator');
+    statusEl.className = 'loading';
+    statusEl.textContent = 'Batch assigning IPs...';
+    try {
+        var response = await apiFetch('/api/dhcp/batch-assign', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: '{}'

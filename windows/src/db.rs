@@ -205,6 +205,38 @@ fn run_migrations(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("DB snapshots table init error: {}", e))?;
 
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL DEFAULT ''
+        );",
+    )
+    .map_err(|e| format!("DB settings table init error: {}", e))?;
+
+    Ok(())
+}
+
+/// Get a setting by key
+pub fn get_setting(key: &str) -> Result<Option<String>, String> {
+    let conn = open_db()?;
+    let mut stmt = conn
+        .prepare("SELECT value FROM settings WHERE key = ?1")
+        .map_err(|e| format!("DB query error: {}", e))?;
+    let result = stmt
+        .query_row(params![key], |row| row.get::<_, String>(0))
+        .ok();
+    Ok(result)
+}
+
+/// Set a setting (insert or update)
+pub fn set_setting(key: &str, value: &str) -> Result<(), String> {
+    let conn = open_db()?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = ?2",
+        params![key, value],
+    )
+    .map_err(|e| format!("DB setting upsert error: {}", e))?;
     Ok(())
 }
 

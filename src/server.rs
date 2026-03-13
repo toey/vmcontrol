@@ -3719,6 +3719,174 @@ async fn sync_dhcp_handler() -> HttpResponse {
     })
 }
 
+// ── DHCP Subnet Config ──
+
+async fn get_dhcp_subnet_handler() -> HttpResponse {
+    let subnet = crate::db::get_setting("dhcp_subnet").unwrap_or(None).unwrap_or_default();
+    let gateway = crate::db::get_setting("dhcp_gateway").unwrap_or(None).unwrap_or_default();
+    let netmask = crate::db::get_setting("dhcp_netmask").unwrap_or(None).unwrap_or_default();
+    let range_start = crate::db::get_setting("dhcp_range_start").unwrap_or(None).unwrap_or_default();
+    let range_end = crate::db::get_setting("dhcp_range_end").unwrap_or(None).unwrap_or_default();
+
+    HttpResponse::Ok().json(serde_json::json!({
+        "subnet": if subnet.is_empty() { "10.0.1.0".to_string() } else { subnet },
+        "gateway": if gateway.is_empty() { "10.0.1.1".to_string() } else { gateway },
+        "netmask": if netmask.is_empty() { "255.255.255.0".to_string() } else { netmask },
+        "range_start": if range_start.is_empty() { "10.0.1.10".to_string() } else { range_start },
+        "range_end": if range_end.is_empty() { "10.0.1.254".to_string() } else { range_end },
+    }))
+}
+
+async fn set_dhcp_subnet_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let fields = [
+        ("subnet", "dhcp_subnet"),
+        ("gateway", "dhcp_gateway"),
+        ("netmask", "dhcp_netmask"),
+        ("range_start", "dhcp_range_start"),
+        ("range_end", "dhcp_range_end"),
+    ];
+    for (json_key, db_key) in &fields {
+        if let Some(val) = body.get(*json_key).and_then(|v| v.as_str()) {
+            if let Err(e) = crate::db::set_setting(db_key, val) {
+                return HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: e,
+                    output: None,
+                });
+            }
+        }
+    }
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        message: "DHCP subnet config saved".into(),
+        output: None,
+    })
+}
+
+/// Batch-assign sequential IPs from the configured DHCP range to all VMs
+async fn dhcp_batch_assign_handler() -> HttpResponse {
+    // Read subnet config
+    let range_start = crate::db::get_setting("dhcp_range_start")
+        .unwrap_or(None)
+        .unwrap_or_else(|| "10.0.1.10".to_string());
+    let range_end = crate::db::get_setting("dhcp_range_end")
+        .unwrap_or(None)
+        .unwrap_or_else(|| "10.0.1.254".to_string());
+
+    // Parse start/end IPs
+    let parse_ip = |ip: &str| -> Option<[u8; 4]> {
+        let parts: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
+        if parts.len() == 4 {
+            Some([parts[0], parts[1], parts[2], parts[3]])
+        } else {
+            None
+        }
+    };
+
+    let start = match parse_ip(&range_start) {
+        Some(s) => s,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: format!("Invalid range_start IP: {}", range_start),
+                output: None,
+            });
+        }
+    };
+    let end = match parse_ip(&range_end) {
+        Some(e) => e,
+        None => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: format!("Invalid range_end IP: {}", range_end),
+                output: None,
+            });
+        }
+    };
+
+    // Get all VMs
+    let vms = crate::db::list_vms().unwrap_or_default();
+
+    // Collect existing static DHCP assignments to skip
+    let existing = crate::db::list_dhcp_leases().unwrap_or_default();
+    let used_ips: std::collections::HashSet<String> = existing
+        .iter()
+        .map(|l| l.ip.clone())
+        .collect();
+
+    // Generate IPs in range
+    let mut current = start;
+    let mut count = 0u32;
+
+    for vm in &vms {
+        if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+            if let Some(adapters) = cfg.get("network_adapters").and_then(|v| v.as_array()) {
+                for adapter in adapters {
+                    let mac = adapter.get("mac").and_then(|v| v.as_str()).unwrap_or("");
+                    if mac.is_empty() {
+                        continue;
+                    }
+
+                    // Check if this MAC already has a static lease
+                    let has_lease = existing.iter().any(|l| l.mac == mac && !l.ip.is_empty());
+                    if has_lease {
+                        continue;
+                    }
+
+                    // Find next available IP
+                    loop {
+                        let ip = format!("{}.{}.{}.{}", current[0], current[1], current[2], current[3]);
+                        // Advance to next IP
+                        if current[3] < end[3] || (current[3] == end[3] && current == end) {
+                            // Still in range
+                        } else {
+                            break; // Out of range
+                        }
+                        if !used_ips.contains(&ip) {
+                            let hostname = cfg
+                                .get("mds")
+                                .and_then(|m| m.get("hostname_prefix"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let _ = crate::db::upsert_dhcp_lease(mac, &ip, hostname, &vm.smac);
+
+                            // Also update VM config with assigned IP
+                            if let Ok(mut cfg_mut) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                                if cfg_mut.get("mds").is_none() {
+                                    cfg_mut["mds"] = serde_json::json!({});
+                                }
+                                cfg_mut["mds"]["local_ipv4"] = serde_json::Value::String(ip.clone());
+                                let _ = crate::db::update_vm(&vm.smac, &cfg_mut.to_string());
+                            }
+
+                            count += 1;
+                            // Advance IP
+                            current[3] += 1;
+                            if current[3] > end[3] {
+                                // Out of range
+                            }
+                            break;
+                        }
+                        current[3] += 1;
+                        if current[3] > end[3] {
+                            break;
+                        }
+                    }
+
+                    // Only assign to the first adapter per VM
+                    break;
+                }
+            }
+        }
+    }
+
+    HttpResponse::Ok().json(ApiResponse {
+        success: true,
+        message: format!("Assigned {} IPs from {} to {}", count, range_start, range_end),
+        output: None,
+    })
+}
+
 // ── MAC address listing ──
 async fn list_macs_handler() -> HttpResponse {
     let vms = crate::db::list_vms().unwrap_or_default();
@@ -4402,6 +4570,9 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/dhcp/add", web::post().to(add_dhcp_handler))
             .route("/api/dhcp/delete", web::post().to(delete_dhcp_handler))
             .route("/api/dhcp/sync", web::post().to(sync_dhcp_handler))
+            .route("/api/dhcp/subnet", web::get().to(get_dhcp_subnet_handler))
+            .route("/api/dhcp/subnet", web::post().to(set_dhcp_subnet_handler))
+            .route("/api/dhcp/batch-assign", web::post().to(dhcp_batch_assign_handler))
             // Switch routes
             .route("/api/switch/list", web::get().to(list_switches_handler))
             .route("/api/switch/create", web::post().to(create_switch_handler))

@@ -331,9 +331,21 @@
         <!-- DHCP Table -->
         <div id="tab-dhcp" class="tab-panel">
             <h2>DHCP Table</h2>
-            <p class="form-desc">Manage static IP assignments for VMs. Sync from VM configs or add manually.</p>
-            <div class="btn-group" style="margin-bottom:12px;">
+            <p class="form-desc">Manage static IP assignments for VMs. Configure subnet to keep all VMs in the same network.</p>
+            <fieldset>
+                <legend>Subnet Settings</legend>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                    <label>Subnet <input type="text" id="dhcp-subnet" placeholder="10.0.1.0" style="width:120px;"></label>
+                    <label>Gateway <input type="text" id="dhcp-gateway" placeholder="10.0.1.1" style="width:120px;"></label>
+                    <label>Netmask <input type="text" id="dhcp-netmask" placeholder="255.255.255.0" style="width:130px;"></label>
+                    <label>Range Start <input type="text" id="dhcp-range-start" placeholder="10.0.1.10" style="width:120px;"></label>
+                    <label>Range End <input type="text" id="dhcp-range-end" placeholder="10.0.1.254" style="width:120px;"></label>
+                    <button class="execute-btn" onclick="saveDhcpSubnet()" style="height:36px;">Save</button>
+                </div>
+            </fieldset>
+            <div class="btn-group" style="margin:12px 0;">
                 <button class="execute-btn" onclick="syncDhcpFromVms()">Sync from VMs</button>
+                <button class="execute-btn" onclick="dhcpBatchAssign()">Batch Assign IPs</button>
             </div>
             <fieldset>
                 <legend>Add / Edit Lease</legend>
