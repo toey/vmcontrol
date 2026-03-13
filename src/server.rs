@@ -3913,6 +3913,65 @@ async fn list_macs_handler() -> HttpResponse {
     HttpResponse::Ok().json(serde_json::json!({ "macs": macs }))
 }
 
+// ── Set Internal IP ──
+
+async fn set_internal_ip_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let smac = match body.get("smac").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => {
+            return HttpResponse::BadRequest().json(ApiResponse {
+                success: false,
+                message: "Missing 'smac' field".into(),
+                output: None,
+            });
+        }
+    };
+    let ip = body.get("internal_ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    match crate::db::get_vm(&smac) {
+        Ok(vm) => {
+            if let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&vm.config) {
+                if cfg.get("mds").is_none() {
+                    cfg["mds"] = serde_json::json!({});
+                }
+                if ip.is_empty() {
+                    // Remove internal IP
+                    if let Some(mds) = cfg.get_mut("mds") {
+                        if let Some(obj) = mds.as_object_mut() {
+                            obj.remove("internal_ip");
+                        }
+                    }
+                } else {
+                    cfg["mds"]["internal_ip"] = serde_json::Value::String(ip.clone());
+                }
+                if let Err(e) = crate::db::update_vm(&smac, &cfg.to_string()) {
+                    return HttpResponse::InternalServerError().json(ApiResponse {
+                        success: false,
+                        message: e,
+                        output: None,
+                    });
+                }
+                HttpResponse::Ok().json(ApiResponse {
+                    success: true,
+                    message: format!("Internal IP set to '{}' for {}", ip, smac),
+                    output: None,
+                })
+            } else {
+                HttpResponse::InternalServerError().json(ApiResponse {
+                    success: false,
+                    message: "Failed to parse VM config".into(),
+                    output: None,
+                })
+            }
+        }
+        Err(e) => HttpResponse::NotFound().json(ApiResponse {
+            success: false,
+            message: e,
+            output: None,
+        }),
+    }
+}
+
 // ── Port Forwarding ──
 
 async fn get_port_forwards_handler(path: web::Path<String>) -> HttpResponse {
@@ -4567,6 +4626,7 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/ip/list", web::get().to(list_ip_pool_handler))
             // Internal network routes (VM-to-VM in NAT)
             .route("/api/internal-network", web::get().to(list_internal_network_handler))
+            .route("/api/internal-network/set-ip", web::post().to(set_internal_ip_handler))
             // Host resource info
             .route("/api/host/ram", web::get().to(host_ram_handler))
             // DHCP routes

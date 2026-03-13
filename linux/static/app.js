@@ -1972,21 +1972,127 @@ async function loadInternalNetwork() {
         var nextIp = data.next_available || '';
         infoEl.innerHTML = '<strong>Used:</strong> ' + total + ' / 245 &nbsp;&nbsp; <strong>Next available:</strong> ' + (nextIp || 'none') + ' &nbsp;&nbsp; <strong>Subnet:</strong> 192.168.100.0/24';
         if (members.length === 0) {
-            tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;opacity:0.6;">No VMs with internal IP assigned</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;opacity:0.6;">No VMs with internal IP assigned</td></tr>';
         } else {
             members.forEach(function(m) {
                 var statusClass = m.status === 'running' ? 'success' : '';
+                var vmName = escapeHtml(m.vm_name || '');
+                var ip = escapeHtml(m.internal_ip || '');
                 var tr = document.createElement('tr');
-                tr.innerHTML = '<td>' + (m.vm_name || '') + '</td>'
-                    + '<td><code>' + (m.internal_ip || '') + '</code></td>'
+                tr.innerHTML = '<td>' + vmName + '</td>'
+                    + '<td><code>' + ip + '</code></td>'
                     + '<td><code style="font-size:0.85em;">' + (m.internal_mac || '') + '</code></td>'
                     + '<td>' + (m.hostname || '') + '</td>'
-                    + '<td><span class="' + statusClass + '">' + (m.status || 'stopped') + '</span></td>';
+                    + '<td><span class="' + statusClass + '">' + (m.status || 'stopped') + '</span></td>'
+                    + '<td>'
+                    + '<button class="btn-vm-action btn-vm-edit" onclick="editInternalIp(\'' + vmName + '\',\'' + ip + '\')">Edit</button> '
+                    + '<button class="btn-vm-action btn-vm-delete" onclick="removeInternalIpFor(\'' + vmName + '\')">Remove</button>'
+                    + '</td>';
                 tbody.appendChild(tr);
             });
         }
+        // Populate VM select with VMs that don't have internal IP yet
+        populateIntNetVmSelect(members);
+
+        // Pre-fill next available IP
+        var ipInput = document.getElementById('intnet-ip-input');
+        if (ipInput && !ipInput.value && nextIp) {
+            ipInput.value = nextIp;
+        }
     } catch (err) {
         infoEl.textContent = 'Error: ' + err.message;
+    }
+}
+
+function populateIntNetVmSelect(existingMembers) {
+    var sel = document.getElementById('intnet-vm-select');
+    if (!sel) return;
+    var existingVms = new Set(existingMembers.map(function(m) { return m.vm_name; }));
+    sel.innerHTML = '<option value="">-- select VM --</option>';
+    // Get all VMs
+    apiFetch('/api/vm/list').then(function(r) { return safeJson(r); }).then(function(data) {
+        var vms = data.vms || data || [];
+        if (Array.isArray(vms)) {
+            vms.forEach(function(vm) {
+                var name = vm.smac || vm.name || '';
+                if (name && !existingVms.has(name)) {
+                    var opt = document.createElement('option');
+                    opt.value = name;
+                    opt.textContent = name;
+                    sel.appendChild(opt);
+                }
+            });
+        }
+    }).catch(function() {});
+}
+
+function editInternalIp(vmName, currentIp) {
+    var sel = document.getElementById('intnet-vm-select');
+    var ipInput = document.getElementById('intnet-ip-input');
+    // Add the VM as option if not already there, and select it
+    var found = false;
+    for (var i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === vmName) { found = true; break; }
+    }
+    if (!found) {
+        var opt = document.createElement('option');
+        opt.value = vmName;
+        opt.textContent = vmName;
+        sel.appendChild(opt);
+    }
+    sel.value = vmName;
+    ipInput.value = currentIp;
+    ipInput.focus();
+    ipInput.select();
+}
+
+async function setInternalIp() {
+    var smac = document.getElementById('intnet-vm-select').value;
+    var ip = document.getElementById('intnet-ip-input').value.trim();
+    if (!smac) { alert('Select a VM first'); return; }
+    if (!ip) { alert('Enter an IP address'); return; }
+    var statusEl = document.getElementById('status-indicator');
+    try {
+        var response = await apiFetch('/api/internal-network/set-ip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ smac: smac, internal_ip: ip })
+        });
+        var result = await safeJson(response);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
+        if (result.success) {
+            document.getElementById('intnet-ip-input').value = '';
+            loadInternalNetwork();
+        }
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
+    }
+}
+
+async function removeInternalIp() {
+    var smac = document.getElementById('intnet-vm-select').value;
+    if (!smac) { alert('Select a VM first'); return; }
+    await removeInternalIpFor(smac);
+}
+
+async function removeInternalIpFor(vmName) {
+    if (!confirm('Remove internal IP for ' + vmName + '?')) return;
+    var statusEl = document.getElementById('status-indicator');
+    try {
+        var response = await apiFetch('/api/internal-network/set-ip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ smac: vmName, internal_ip: '' })
+        });
+        var result = await safeJson(response);
+        statusEl.className = result.success ? 'success' : 'error';
+        statusEl.textContent = result.message || '';
+        loadInternalNetwork();
+    } catch (err) {
+        statusEl.className = 'error';
+        statusEl.textContent = 'Error: ' + err.message;
     }
 }
 

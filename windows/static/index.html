@@ -377,11 +377,20 @@
         <!-- Internal Network (VM-to-VM) -->
         <div id="tab-internal-net" class="tab-panel">
             <h2>Internal Network (VM-to-VM)</h2>
-            <p class="form-desc">Shared L2 network (192.168.100.0/24) for NAT VMs to communicate with each other. Each VM automatically gets an internal IP when created.</p>
+            <p class="form-desc">Shared L2 network (192.168.100.0/24) for NAT VMs to communicate with each other. Each VM automatically gets an internal IP when created. Click on an IP to edit it.</p>
             <div class="btn-group" style="margin-bottom:12px;">
                 <button class="execute-btn" onclick="loadInternalNetwork()">Refresh</button>
             </div>
             <fieldset>
+                <legend>Assign IP to VM</legend>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                    <label>VM <select id="intnet-vm-select" style="width:180px;"><option value="">-- select VM --</option></select></label>
+                    <label>Internal IP <input type="text" id="intnet-ip-input" placeholder="192.168.100.x" style="width:150px;"></label>
+                    <button class="execute-btn" onclick="setInternalIp()" style="height:36px;">Set IP</button>
+                    <button class="btn-vm-action btn-vm-delete" onclick="removeInternalIp()" style="height:36px;">Remove IP</button>
+                </div>
+            </fieldset>
+            <fieldset style="margin-top:12px;">
                 <legend>IP Pool — 192.168.100.0/24</legend>
                 <div id="internal-net-info" style="font-size:0.9em;margin-bottom:8px;"></div>
                 <table id="internal-net-table" style="width:100%;">
@@ -392,6 +401,7 @@
                             <th>MAC</th>
                             <th>Hostname</th>
                             <th>Status</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody></tbody>
