@@ -1428,6 +1428,28 @@ async fn clone_disk_handler(body: web::Json<serde_json::Value>) -> HttpResponse 
                 .unwrap_or_else(|_| "0".into());
             crate::db::insert_disk(&nn, &size)
                 .map_err(|e| format!("DB insert error: {}", e))?;
+
+            // Copy UEFI NVRAM from source disk's owner VM (if exists)
+            // This preserves Windows/UEFI boot entries for template disks
+            let pctl_path = get_conf("pctl_path");
+            let disk_path = get_conf("disk_path");
+            if let Ok(disks) = crate::db::list_disks() {
+                let owner = disks.iter()
+                    .find(|d| d.name == sn)
+                    .map(|d| d.owner.clone())
+                    .unwrap_or_default();
+                if !owner.is_empty() {
+                    let src_nvram = format!("{}/{}_efivars.fd", pctl_path, owner);
+                    let dst_nvram = format!("{}/{}_efivars.fd", disk_path, nn);
+                    if std::path::Path::new(&src_nvram).exists() {
+                        match std::fs::copy(&src_nvram, &dst_nvram) {
+                            Ok(_) => log::info!("Copied NVRAM {} -> {}", src_nvram, dst_nvram),
+                            Err(e) => log::warn!("Failed to copy NVRAM: {}", e),
+                        }
+                    }
+                }
+            }
+
             Ok::<String, String>(format!("Full copy '{}' -> '{}' (standalone)", sn, nn))
         }
     })

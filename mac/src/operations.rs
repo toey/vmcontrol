@@ -527,9 +527,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             let secure_vars = get_conf_or("edk2_aarch64_secure_vars",
                 "/opt/homebrew/share/qemu/AAVMF_VARS.ms.fd");
             bios = secure_code;
-            // Copy NVRAM template with pre-enrolled Microsoft Secure Boot keys
+            // Copy NVRAM: prefer template NVRAM (preserves boot entries), fallback to generic
             if !std::path::Path::new(&nvram_file).exists() {
-                if std::path::Path::new(&secure_vars).exists() {
+                if let Some(tpl_nvram) = find_template_nvram(cfg) {
+                    log::info!("Using template NVRAM: {}", tpl_nvram);
+                    let _ = std::fs::copy(&tpl_nvram, &nvram_file);
+                } else if std::path::Path::new(&secure_vars).exists() {
                     let _ = std::fs::copy(&secure_vars, &nvram_file);
                 } else {
                     // Create empty 64MB vars file as fallback
@@ -543,16 +546,19 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             if !std::path::Path::new(&bios).exists() {
                 return Err(format!("aarch64 requires UEFI firmware but '{}' not found. Install EDK2 or set edk2_aarch64_bios in config.", bios));
             }
-            // Per-VM NVRAM file (copy from template if not exists)
+            // Per-VM NVRAM file: prefer template NVRAM, fallback to generic
             if !std::path::Path::new(&nvram_file).exists() {
-                // Try to copy from edk2-arm-vars.fd template
-                let vars_template = get_conf("edk2_aarch64_bios")
-                    .replace("aarch64-code.fd", "arm-vars.fd");
-                if std::path::Path::new(&vars_template).exists() {
-                    let _ = std::fs::copy(&vars_template, &nvram_file);
+                if let Some(tpl_nvram) = find_template_nvram(cfg) {
+                    log::info!("Using template NVRAM: {}", tpl_nvram);
+                    let _ = std::fs::copy(&tpl_nvram, &nvram_file);
                 } else {
-                    // Create empty 64MB vars file
-                    let _ = std::fs::write(&nvram_file, vec![0u8; 64 * 1024 * 1024]);
+                    let vars_template = get_conf("edk2_aarch64_bios")
+                        .replace("aarch64-code.fd", "arm-vars.fd");
+                    if std::path::Path::new(&vars_template).exists() {
+                        let _ = std::fs::copy(&vars_template, &nvram_file);
+                    } else {
+                        let _ = std::fs::write(&nvram_file, vec![0u8; 64 * 1024 * 1024]);
+                    }
                 }
             }
             if is_windows {
@@ -602,10 +608,13 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                 "/opt/homebrew/share/qemu/edk2-i386-vars.fd");
 
             if std::path::Path::new(&secure_code).exists() {
-                // Per-VM NVRAM file (copy from template if not exists)
+                // Per-VM NVRAM file: prefer template NVRAM, fallback to generic
                 let nvram_file = format!("{}/{}_efivars.fd", pctl_path, ismac);
                 if !std::path::Path::new(&nvram_file).exists() {
-                    if std::path::Path::new(&vars_template).exists() {
+                    if let Some(tpl_nvram) = find_template_nvram(cfg) {
+                        log::info!("Using template NVRAM: {}", tpl_nvram);
+                        let _ = std::fs::copy(&tpl_nvram, &nvram_file);
+                    } else if std::path::Path::new(&vars_template).exists() {
                         let _ = std::fs::copy(&vars_template, &nvram_file);
                     } else {
                         let _ = std::fs::write(&nvram_file, vec![0u8; 256 * 1024]);
@@ -2237,6 +2246,28 @@ pub fn delete_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, Strin
         let _ = db::delete_snapshot_record(snapshot_id, &r.disk_name);
     }
     Ok(format!("Deleted snapshot '{}'", snapshot_id))
+}
+
+/// Find a saved UEFI NVRAM from the template disk that a VM's disk was cloned from.
+/// Checks each of the VM's disks for a matching `{disk_name}_efivars.fd` in the disk directory,
+/// or follows the backing chain to find a template NVRAM.
+pub fn find_template_nvram(cfg: &VmStartConfig) -> Option<String> {
+    let disk_path = get_conf("disk_path");
+    for disk in &cfg.disks {
+        // Direct: check if this disk has a saved NVRAM (e.g. from clone-as-template)
+        let nvram = format!("{}/{}_efivars.fd", disk_path, disk.diskname);
+        if std::path::Path::new(&nvram).exists() {
+            return Some(nvram);
+        }
+        // Follow backing chain: check template disk's NVRAM
+        if let Ok(Some(backing)) = get_disk_backing_info(&disk.diskname) {
+            let backing_nvram = format!("{}/{}_efivars.fd", disk_path, backing);
+            if std::path::Path::new(&backing_nvram).exists() {
+                return Some(backing_nvram);
+            }
+        }
+    }
+    None
 }
 
 /// Query the actual backing file from a qcow2 disk header using qemu-img info
