@@ -291,6 +291,8 @@ function applyOsTemplate() {
     // Fill CPU / Memory / Features
     document.getElementById('start-vcpus').value = tpl.vcpus;
     document.getElementById('start-memory-size').value = tpl.memory;
+    document.getElementById('start-memory-range').value = tpl.memory;
+    document.getElementById('start-memory-label').textContent = formatMemory(tpl.memory);
     document.getElementById('start-is-windows').value = tpl.is_windows;
     document.getElementById('start-arch').value = tpl.arch || 'x86_64';
 
@@ -586,6 +588,8 @@ function resetCreateForm() {
     document.getElementById('create-group-new').value = '';
     document.getElementById('start-vcpus').value = '2';
     document.getElementById('start-memory-size').value = '2048';
+    document.getElementById('start-memory-range').value = '2048';
+    document.getElementById('start-memory-label').textContent = '2 GB';
     document.getElementById('start-arch').value = 'x86_64';
     document.getElementById('start-is-windows').value = '0';
     document.getElementById('start-cloudinit').value = '1';
@@ -2125,6 +2129,12 @@ async function loadIsoList() {
 }
 
 // Format bytes to human readable
+function formatMemory(mb) {
+    mb = parseInt(mb) || 0;
+    if (mb >= 1024) return (mb / 1024) + ' GB';
+    return mb + ' MB';
+}
+
 function formatSize(bytes) {
     if (bytes < 1024) return bytes + ' B';
     if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
@@ -2776,7 +2786,10 @@ async function editVm(smac) {
                 document.getElementById('start-vcpus').value = vcpus;
             }
             if (config.memory) {
-                document.getElementById('start-memory-size').value = config.memory.size || '2048';
+                var memVal = config.memory.size || '2048';
+                document.getElementById('start-memory-size').value = memVal;
+                document.getElementById('start-memory-range').value = memVal;
+                document.getElementById('start-memory-label').textContent = formatMemory(memVal);
             }
             if (config.features) {
                 document.getElementById('start-is-windows').value = config.features.is_windows || '0';

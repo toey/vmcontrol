@@ -107,7 +107,11 @@
                 </fieldset>
                 <fieldset>
                     <legend>Memory</legend>
-                    <label>Size (MB) <input type="text" id="start-memory-size" value="2048"></label>
+                    <div style="display:flex;align-items:center;gap:12px;">
+                        <input type="range" id="start-memory-range" min="256" max="65536" step="256" value="2048" oninput="document.getElementById('start-memory-size').value=this.value;document.getElementById('start-memory-label').textContent=formatMemory(this.value);" style="flex:1;">
+                        <input type="number" id="start-memory-size" value="2048" min="256" max="65536" step="256" style="width:80px;" oninput="document.getElementById('start-memory-range').value=this.value;document.getElementById('start-memory-label').textContent=formatMemory(this.value);">
+                        <span id="start-memory-label" style="color:#58a6ff;min-width:50px;">2 GB</span>
+                    </div>
                 </fieldset>
                 <fieldset>
                     <legend>Features</legend>
