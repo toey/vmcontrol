@@ -2703,7 +2703,8 @@ async function editVm(smac) {
                 addNetworkAdapter();
             }
 
-            // Fill Disks
+            // Fill Disks — ensure disk list is loaded before populating selects
+            await loadDiskList();
             var diskContainer = document.getElementById('start-disks');
             diskContainer.innerHTML = '';
             if (config.disks && config.disks.length > 0) {
