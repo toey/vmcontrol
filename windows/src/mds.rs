@@ -172,8 +172,13 @@ fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     }
 
     // ── disable_root_ssh ──
+    // Cloud-init default is disable_root: true which prepends
+    // no-port-forwarding,command="echo Please login as..." to root's authorized_keys.
+    // We must explicitly set false to allow normal root SSH access.
     if config.disable_root_ssh {
         ud.push_str("disable_root: true\n");
+    } else {
+        ud.push_str("disable_root: false\n");
     }
 
     // ── timezone ──
