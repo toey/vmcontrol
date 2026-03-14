@@ -929,7 +929,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     output_log.push_str(&format!("vlan   : {} (mcast 230.{}.{}.1:{})\n",
                         vlan_id, mcast_hi, mcast_lo, sw.mcast_port));
                     qemu_args.push(format!(
-                        "socket,id=net{},mcast=230.{}.{}.1:{},localaddr=127.0.0.1",
+                        "socket,id=net{},mcast=230.{}.{}.1:{}",
                         adapter.netid, mcast_hi, mcast_lo, sw.mcast_port
                     ));
                 }
