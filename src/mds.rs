@@ -100,6 +100,7 @@ fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("ssh_pwauth: true\n");
     ud.push_str("users:\n");
+    ud.push_str("  - default\n");
     ud.push_str("  - name: root\n");
     ud.push_str("    primary_group: root\n");
     ud.push_str("    groups: root\n");

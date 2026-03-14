@@ -309,8 +309,10 @@
                         <option value="poweroff">Power Off</option>
                     </select>
                 </label>
-                <label style="display:inline-flex;align-items:center;gap:6px;margin:6px 0;width:auto;"><input type="checkbox" id="mds-disable-root-ssh" style="display:inline;margin:0;width:auto;"> Disable Root SSH</label><br>
-                <label style="display:inline-flex;align-items:center;gap:6px;margin:6px 0;width:auto;"><input type="checkbox" id="mds-growpart" checked style="display:inline;margin:0;width:auto;"> Auto-Grow Partition</label>
+                <div style="display:flex;flex-direction:column;gap:8px;margin:8px 0;">
+                    <label style="display:inline-flex;align-items:center;gap:6px;margin:0;width:auto;cursor:pointer;"><input type="checkbox" id="mds-disable-root-ssh" style="display:inline;margin:0;width:auto;min-width:auto;"> <span>Disable Root SSH</span></label>
+                    <label style="display:inline-flex;align-items:center;gap:6px;margin:0;width:auto;cursor:pointer;"><input type="checkbox" id="mds-growpart" checked style="display:inline;margin:0;width:auto;min-width:auto;"> <span>Auto-Grow Partition</span></label>
+                </div>
                 <label>Extra Run Commands (one per line)
                     <textarea id="mds-extra-runcmd" rows="4" placeholder="apt-get install -y nginx&#10;systemctl enable nginx"></textarea>
                 </label>
