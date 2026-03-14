@@ -215,10 +215,13 @@ fn generate_seed_iso(vm_name: &str) -> Result<(String, String), String> {
     };
 
     // Generate meta-data (NoCloud format with full MDS fields)
-    // Avoid duplicated hostnames like "GW-GW" when prefix equals VM name
+    // Avoid duplicated hostnames like "GW-GW" or "vm-vm3" when VM name already
+    // starts with the prefix (or equals it)
     let hostname = if config.hostname_prefix.is_empty()
         || config.hostname_prefix == vm_name
         || config.hostname_prefix == "nocloud"
+        || vm_name.starts_with(&format!("{}-", config.hostname_prefix))
+        || vm_name.starts_with(&config.hostname_prefix)
     {
         vm_name.to_string()
     } else {
