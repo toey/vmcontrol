@@ -746,7 +746,10 @@ if %errorlevel% equ 0 (
 echo.
 echo [INFO] Adding firewall rule for port 8080...
 netsh advfirewall firewall delete rule name="vmcontrol" >nul 2>&1
+netsh advfirewall firewall delete rule name="vmcontrol-vnc" >nul 2>&1
 netsh advfirewall firewall add rule name="vmcontrol" dir=in action=allow protocol=tcp localport=8080 enable=yes >nul
+:: VNC WebSocket range (12001-13000) — QEMU binds one port per VM for the noVNC console.
+netsh advfirewall firewall add rule name="vmcontrol-vnc" dir=in action=allow protocol=tcp localport=12001-13000 enable=yes >nul
 echo [OK]   Firewall rule added
 
 echo.
