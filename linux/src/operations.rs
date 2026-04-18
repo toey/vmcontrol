@@ -104,6 +104,101 @@ pub fn running_vms_ram_mb(exclude_smac: Option<&str>) -> u64 {
     total
 }
 
+/// Setup TAP + bridge for virtual switch on Linux
+/// Creates a bridge for the switch (if not exists) and a TAP interface for the VM adapter
+#[cfg(target_os = "linux")]
+fn setup_switch_tap(bridge_name: &str, tap_name: &str, output_log: &mut String) -> Result<(), String> {
+    use std::process::Command;
+    let use_sudo = get_conf_or("bridge_sudo", "true") == "true";
+    let sudo_path = get_conf_or("bridge_sudo_path", "/usr/bin/sudo");
+
+    let run = |args: &[&str]| -> Result<(), String> {
+        let result = if use_sudo {
+            Command::new(&sudo_path).args(args).output()
+        } else {
+            Command::new(args[0]).args(&args[1..]).output()
+        };
+        match result {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Ignore "already exists" or "File exists" errors
+                if stderr.contains("exists") || stderr.contains("RTNETLINK") {
+                    Ok(())
+                } else {
+                    Err(format!("{:?} failed: {}", args, stderr.trim()))
+                }
+            }
+            Err(e) => Err(format!("{:?} exec error: {}", args, e)),
+        }
+    };
+
+    // Create bridge if not exists
+    let _ = run(&["ip", "link", "add", bridge_name, "type", "bridge"]);
+    run(&["ip", "link", "set", bridge_name, "up"])
+        .map_err(|e| format!("Failed to bring up bridge {}: {}", bridge_name, e))?;
+    output_log.push_str(&format!("switch-tap: bridge {} up\n", bridge_name));
+
+    // Remove stale TAP if exists (from previous run)
+    let _ = run(&["ip", "link", "del", tap_name]);
+
+    // Create TAP interface
+    run(&["ip", "tuntap", "add", "mode", "tap", tap_name])
+        .map_err(|e| format!("Failed to create TAP {}: {}", tap_name, e))?;
+
+    // Subsequent failures must roll back the TAP we just created so we don't leak it.
+    if let Err(e) = run(&["ip", "link", "set", tap_name, "master", bridge_name]) {
+        let _ = run(&["ip", "link", "del", tap_name]);
+        return Err(format!("Failed to add TAP {} to bridge {}: {}", tap_name, bridge_name, e));
+    }
+    if let Err(e) = run(&["ip", "link", "set", tap_name, "up"]) {
+        let _ = run(&["ip", "link", "del", tap_name]);
+        return Err(format!("Failed to bring up TAP {}: {}", tap_name, e));
+    }
+    output_log.push_str(&format!("switch-tap: tap {} → bridge {}\n", tap_name, bridge_name));
+
+    Ok(())
+}
+
+/// Clean up TAP interfaces for a VM's switch adapters on Linux
+#[cfg(target_os = "linux")]
+fn cleanup_switch_taps(smac: &str) {
+    use std::process::Command;
+    // Load VM config to find switch adapters
+    let vm = match db::get_vm(smac) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let cfg: VmStartConfig = match serde_json::from_str(&vm.config) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let use_sudo = get_conf_or("bridge_sudo", "true") == "true";
+    let sudo_path = get_conf_or("bridge_sudo_path", "/usr/bin/sudo");
+
+    for adapter in &cfg.network_adapters {
+        if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
+            let mac_clean = smac.replace(":", "");
+            let mac_suffix = &mac_clean[mac_clean.len().saturating_sub(4)..];
+            let tap_name = format!("vt{}n{}", mac_suffix, adapter.netid);
+            let result = if use_sudo {
+                Command::new(&sudo_path)
+                    .args(["ip", "link", "del", &tap_name])
+                    .output()
+            } else {
+                Command::new("ip")
+                    .args(["link", "del", &tap_name])
+                    .output()
+            };
+            if let Ok(o) = result {
+                if o.status.success() {
+                    eprintln!("switch-tap: cleaned up {}", tap_name);
+                }
+            }
+        }
+    }
+}
+
 /// VNC port range constants
 pub const VNC_PORT_MIN: u16 = 12001;
 pub const VNC_PORT_MAX: u16 = 13000;
@@ -911,8 +1006,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-netdev".into());
 
         if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
-            // Virtual switch mode — QEMU socket multicast with VLAN
-            // (macOS has no OVS kernel module, so we use multicast for L2 switching)
+            // Virtual switch mode
             let vlan_id: u16 = adapter.vlan.parse().unwrap_or(0);
             if vlan_id > 4094 {
                 return Err(format!(
@@ -920,18 +1014,56 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     vlan_id, adapter.netid
                 ));
             }
-            let mcast_hi = vlan_id / 256;
-            let mcast_lo = vlan_id % 256;
             match db::get_switch_by_name(&adapter.switch_name) {
                 Ok(sw) => {
-                    output_log.push_str(&format!("switch : {} (mcast port {})\n",
-                        adapter.switch_name, sw.mcast_port));
-                    output_log.push_str(&format!("vlan   : {} (mcast 230.{}.{}.1:{})\n",
-                        vlan_id, mcast_hi, mcast_lo, sw.mcast_port));
-                    qemu_args.push(format!(
-                        "socket,id=net{},mcast=230.{}.{}.1:{}",
-                        adapter.netid, mcast_hi, mcast_lo, sw.mcast_port
-                    ));
+                    if sw.mcast_port <= 0 || sw.mcast_port > u16::MAX as i64 {
+                        return Err(format!(
+                            "Switch '{}' has invalid port {} (must be 1..={})",
+                            adapter.switch_name, sw.mcast_port, u16::MAX
+                        ));
+                    }
+                    let switch_port = sw.mcast_port as u16;
+                    let mcast_hi = vlan_id / 256;
+                    let mcast_lo = vlan_id % 256;
+                    #[cfg(target_os = "linux")]
+                    {
+                        // Linux: TAP + bridge per (switch, vlan) pair for L2 isolation.
+                        // Bridge name fits 15-char ifname limit: vb<sw_id>v<vlan> (max ~11 chars).
+                        let bridge_name = format!("vb{}v{}", sw.id, vlan_id);
+                        let mac_clean = smac.replace(":", "");
+                        let mac_suffix = &mac_clean[mac_clean.len().saturating_sub(4)..];
+                        let tap_name = format!("vt{}n{}", mac_suffix, adapter.netid);
+                        output_log.push_str(&format!(
+                            "switch : {} vlan {} → bridge {} tap {}\n",
+                            adapter.switch_name, vlan_id, bridge_name, tap_name
+                        ));
+                        setup_switch_tap(&bridge_name, &tap_name, &mut output_log)?;
+                        qemu_args.push(format!(
+                            "tap,id=net{},ifname={},script=no,downscript=no",
+                            adapter.netid, tap_name
+                        ));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        // macOS/Windows: UDP multicast for many-to-many L2 switching.
+                        // VLAN encoded in mcast address → separate broadcast domain per VLAN.
+                        output_log.push_str(&format!(
+                            "switch : {} (mcast port {})\n",
+                            adapter.switch_name, switch_port
+                        ));
+                        output_log.push_str(&format!(
+                            "vlan   : {} (mcast 230.{}.{}.1:{})\n",
+                            vlan_id, mcast_hi, mcast_lo, switch_port
+                        ));
+                        qemu_args.push(format!(
+                            "socket,id=net{},mcast=230.{}.{}.1:{}",
+                            adapter.netid, mcast_hi, mcast_lo, switch_port
+                        ));
+                    }
+                    let _ = &sw;
+                    let _ = switch_port;
+                    let _ = mcast_hi;
+                    let _ = mcast_lo;
                 }
                 Err(e) => {
                     return Err(format!(
@@ -1227,10 +1359,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     output_log.push_str(&format!("guest-agent: socket {}\n", qga_sock));
 
     // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
-    // Bridge/vmnet modes require sudo on macOS
+    // Bridge/vmnet modes require sudo on macOS; TAP+bridge switches require sudo on Linux
     let needs_bridge = cfg.network_adapters.iter().any(|a| a.mode == "bridge");
     let needs_vmnet_internal = cfg!(target_os = "macos") && !mds_config.internal_ip.is_empty();
-    let needs_sudo = needs_bridge || needs_vmnet_internal;
+    let needs_switch_tap = cfg!(target_os = "linux")
+        && cfg.network_adapters.iter().any(|a| a.mode == "switch" && !a.switch_name.is_empty());
+    let needs_sudo = needs_bridge || needs_vmnet_internal || needs_switch_tap;
     let use_sudo = needs_sudo && get_conf_or("bridge_sudo", "true") == "true";
 
     let (pid, log_path) = if use_sudo {
@@ -1280,6 +1414,9 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
+    // Clean up TAP interfaces before stopping QEMU (Linux switch mode)
+    #[cfg(target_os = "linux")]
+    cleanup_switch_taps(&cmd.smac);
     let pctl_output = send_cmd_pctl("stop", &cmd.smac);
     output.push_str(&pctl_output);
     // Only mark stopped if the QEMU monitor command succeeded (no error reported)
@@ -1313,6 +1450,9 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     if !std::path::Path::new(&sock_path).exists() {
         // Monitor socket gone = QEMU exited
         let _ = db::set_vm_status(&cmd.smac, "stopped");
+        // Clean up TAP interfaces (Linux switch mode)
+        #[cfg(target_os = "linux")]
+        cleanup_switch_taps(&cmd.smac);
         output.push_str("VM stopped.\n");
     } else {
         // QEMU still running — guest is shutting down
@@ -1332,6 +1472,10 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
             return Err(format!("VM '{}' is running — stop the VM first", cmd.smac));
         }
     }
+
+    // Clean up any leftover TAP interfaces (Linux switch mode)
+    #[cfg(target_os = "linux")]
+    cleanup_switch_taps(&cmd.smac);
 
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);

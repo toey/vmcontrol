@@ -99,6 +99,7 @@ pub fn save_mds_config(config: &MdsConfig) -> Result<(), String> {
 fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("ssh_pwauth: true\n");
+    ud.push_str("ssh_deletekeys: false\n");
     ud.push_str("users:\n");
     ud.push_str("  - default\n");
     ud.push_str("  - name: root\n");

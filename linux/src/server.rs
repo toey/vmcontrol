@@ -3271,15 +3271,11 @@ async fn create_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
     match crate::db::insert_switch(&name) {
         Ok(id) => {
-            // Create OVS bridge
-            let bridge_name = format!("vs-{}", name);
-            let ovs = crate::config::get_conf("ovs_vsctl_path");
-            if !ovs.is_empty() {
-                let _ = crate::ssh::run_cmd(&ovs, &["--may-exist", "add-br", &bridge_name]);
-            }
+            // Host bridges/TAPs are created lazily per (switch, vlan) pair when a VM starts;
+            // no host-side provisioning needed at switch-create time.
             HttpResponse::Ok().json(ApiResponse {
                 success: true,
-                message: format!("Switch '{}' created (ID: {}, bridge: {})", name, id, bridge_name),
+                message: format!("Switch '{}' created (ID: {})", name, id),
                 output: Some(id.to_string()),
             })
         }
