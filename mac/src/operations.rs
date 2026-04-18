@@ -1093,6 +1093,9 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     {
                         // macOS/Windows: UDP multicast for many-to-many L2 switching.
                         // VLAN encoded in mcast address → separate broadcast domain per VLAN.
+                        // Windows rejects mcast bind without an explicit localaddr on a
+                        // multicast-capable interface; loopback works. macOS errors with
+                        // localaddr=127.0.0.1 so omit it there.
                         output_log.push_str(&format!(
                             "switch : {} (mcast port {})\n",
                             adapter.switch_name, switch_port
@@ -1101,6 +1104,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                             "vlan   : {} (mcast 230.{}.{}.1:{})\n",
                             vlan_id, mcast_hi, mcast_lo, switch_port
                         ));
+                        #[cfg(target_os = "windows")]
+                        qemu_args.push(format!(
+                            "socket,id=net{},mcast=230.{}.{}.1:{},localaddr=127.0.0.1",
+                            adapter.netid, mcast_hi, mcast_lo, switch_port
+                        ));
+                        #[cfg(not(target_os = "windows"))]
                         qemu_args.push(format!(
                             "socket,id=net{},mcast=230.{}.{}.1:{}",
                             adapter.netid, mcast_hi, mcast_lo, switch_port
@@ -1224,9 +1233,16 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         }
         #[cfg(not(target_os = "macos"))]
         {
-            // Linux/Windows: use multicast socket (works reliably)
+            // Linux/Windows: use multicast socket. Windows needs an explicit
+            // localaddr on a multicast-capable interface; loopback works.
             let internal_mcast_port = get_conf_or("internal_mcast_port", "11111");
             output_log.push_str(&format!("internal_net: 230.0.100.1:{}\n", internal_mcast_port));
+            #[cfg(target_os = "windows")]
+            qemu_args.push(format!(
+                "socket,id=netint,mcast=230.0.100.1:{},localaddr=127.0.0.1",
+                internal_mcast_port
+            ));
+            #[cfg(not(target_os = "windows"))]
             qemu_args.push(format!(
                 "socket,id=netint,mcast=230.0.100.1:{}",
                 internal_mcast_port
