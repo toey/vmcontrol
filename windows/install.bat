@@ -636,16 +636,19 @@ if not exist "%CONFIG_YAML%" (
 
 echo.
 
-:: --- Step 8: Generate API key (always regenerate on install) ---
+:: --- Step 8: Leave API key unconfigured (server starts unauthenticated) ---
+:: Generate one later from the web UI (Generate New Key) if you want auth.
 set "API_KEY_FILE=%PCTL_PATH%\.api_key"
-for /f "delims=" %%K in ('powershell -NoProfile -Command "[System.BitConverter]::ToString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).Replace('-','')"') do set "API_KEY=%%K"
-echo !API_KEY!> "%API_KEY_FILE%"
-echo [OK]   API key generated and saved to %API_KEY_FILE%
-
-:: Set system environment variable so it persists across reboots
-setx VMCONTROL_API_KEY "!API_KEY!" /M >nul 2>&1
-set "VMCONTROL_API_KEY=!API_KEY!"
-echo [OK]   VMCONTROL_API_KEY set as system environment variable
+set "API_KEY="
+if exist "%API_KEY_FILE%" (
+    del /f /q "%API_KEY_FILE%" >nul 2>&1
+    echo [INFO] Removed stale .api_key from previous install
+)
+:: Clear any system-wide VMCONTROL_API_KEY set by older install.bat versions.
+setx VMCONTROL_API_KEY "" /M >nul 2>&1
+reg delete "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment" /v VMCONTROL_API_KEY /f >nul 2>&1
+set "VMCONTROL_API_KEY="
+echo [OK]   API key auth disabled (generate one later from the web UI if needed)
 
 echo.
 
@@ -664,17 +667,18 @@ if %errorlevel% equ 0 (
     nssm set %SERVICE_NAME% AppStderr "%LOG_DIR%\vm_ctl.stderr.log"
     nssm set %SERVICE_NAME% AppRotateFiles 1
     nssm set %SERVICE_NAME% AppRotateBytes 10485760
-    nssm set %SERVICE_NAME% AppEnvironmentExtra "VMCONTROL_API_KEY=!API_KEY!"
+    :: Don't bake VMCONTROL_API_KEY into the service env -- leave auth off.
+    nssm set %SERVICE_NAME% AppEnvironmentExtra "" >nul 2>&1
     nssm start %SERVICE_NAME%
     echo [OK]   Service installed and started via NSSM
 ) else (
     echo [WARN] NSSM not found. Using Scheduled Task as fallback...
     echo        Download NSSM: https://nssm.cc/download
     echo.
-    :: Create a launcher script that sets working directory and API key before running
+    :: Create a launcher script that sets working directory before running.
+    :: No VMCONTROL_API_KEY baked in -- server runs unauthenticated by default.
     (
         echo @echo off
-        echo set "VMCONTROL_API_KEY=!API_KEY!"
         echo cd /d "%CTL_BIN%"
         echo "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080
     ) > "%CTL_BIN%\start_vmcontrol.bat"
@@ -728,8 +732,7 @@ echo   Logs:        %LOG_DIR%\
 echo   DB:          %PCTL_PATH%\vmcontrol.db ^(auto-created^)
 echo.
 echo   Web UI:      http://localhost:8080
-echo   API Key:     !API_KEY!
-echo   Key File:    %API_KEY_FILE%
+echo   API Key:     (not set — open in browser directly; use "Generate New Key" in UI to enable auth)
 echo.
 where nssm >nul 2>&1
 if %errorlevel% equ 0 (
