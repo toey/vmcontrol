@@ -57,14 +57,40 @@ if /I "%ARCH%"=="ARM64" (
 echo.
 echo [INFO] Checking prerequisites...
 
-where cargo >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ERR] Rust toolchain not found.
-    echo       Install from: https://rustup.rs
-    pause
-    exit /b 1
+:: Skip Rust check when a pre-built vm_ctl.exe ships next to install.bat
+:: (release ZIPs from GitHub Actions put the binary here, no build needed).
+set "PREBUILT_CHECK=%~dp0vm_ctl.exe"
+if exist "%PREBUILT_CHECK%" (
+    echo [OK]   Pre-built vm_ctl.exe found -- skipping Rust toolchain check
+) else (
+    where cargo >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo [INFO] Rust toolchain not found. Installing via winget...
+        where winget >nul 2>&1
+        if !errorlevel! equ 0 (
+            winget install -e --id Rustlang.Rustup --accept-package-agreements --accept-source-agreements --silent
+            :: winget installs to %USERPROFILE%\.cargo\bin but PATH in the
+            :: current shell doesn't pick it up — add it for this session.
+            set "PATH=%USERPROFILE%\.cargo\bin;!PATH!"
+            where cargo >nul 2>&1
+            if !errorlevel! neq 0 (
+                echo [ERR] Rust install finished but cargo still not on PATH.
+                echo       Close and re-open the terminal, then re-run install.bat.
+                echo       Or install manually from: https://rustup.rs
+                pause
+                exit /b 1
+            )
+            echo [OK]   Rust installed via winget
+        ) else (
+            echo [ERR] Rust toolchain not found and winget unavailable.
+            echo       Install Rust manually from: https://rustup.rs then re-run.
+            pause
+            exit /b 1
+        )
+    ) else (
+        echo [OK]   cargo found
+    )
 )
-echo [OK]   cargo found
 
 :: On ARM64, check for qemu-system-aarch64 as primary binary
 if /I "%ARCH%"=="ARM64" (
