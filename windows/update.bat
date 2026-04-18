@@ -73,6 +73,12 @@ if !errorlevel! neq 0 (
     popd & pause & exit /b 1
 )
 
+echo [INFO] Restoring any tracked files missing from working tree...
+:: Some Windows antivirus / sync tools occasionally nuke vendored JS (noVNC / pako).
+:: git pull won't re-fetch a file that's just missing locally, so explicitly
+:: restore every tracked path from HEAD — no-op for clean trees.
+git restore --source=HEAD --worktree -- . 2>nul
+
 echo [INFO] Clearing cached pre-built vm_ctl.exe so the new source rebuilds...
 if exist "%SCRIPT_DIR%vm_ctl.exe" del /f /q "%SCRIPT_DIR%vm_ctl.exe" >nul 2>&1
 
