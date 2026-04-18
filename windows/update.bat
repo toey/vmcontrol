@@ -15,8 +15,37 @@ pushd "%SCRIPT_DIR%.."
 
 where git >nul 2>&1
 if %errorlevel% neq 0 (
-    echo [ERR] git not found on PATH. Install from: https://git-scm.com/download/win
-    popd & pause & exit /b 1
+    :: Git for Windows not installed in this shell -- auto-install silently.
+    set "ARCH=%PROCESSOR_ARCHITECTURE%"
+    set "GIT_SETUP=%TEMP%\git-for-windows-setup.exe"
+    echo [INFO] git not on PATH. Downloading Git for Windows latest release...
+    if /I "!ARCH!"=="ARM64" (
+        set "GIT_ASSET_PATTERN=arm64\.exe$"
+    ) else (
+        set "GIT_ASSET_PATTERN=64-bit\.exe$"
+    )
+    powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; $r = Invoke-RestMethod 'https://api.github.com/repos/git-for-windows/git/releases/latest' -Headers @{'User-Agent'='vmcontrol-installer'}; $a = $r.assets | Where-Object { $_.name -match '!GIT_ASSET_PATTERN!' -and $_.name -notmatch 'MinGit|Portable' } | Select-Object -First 1; if (-not $a) { Write-Host 'No Git asset matched !GIT_ASSET_PATTERN!'; exit 2 }; Write-Host ('[INFO] Downloading ' + $a.browser_download_url); Invoke-WebRequest $a.browser_download_url -OutFile '!GIT_SETUP!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+    if !errorlevel! neq 0 (
+        echo [ERR] Failed to download Git installer. Install manually from:
+        echo       https://git-scm.com/download/win
+        popd & pause & exit /b 1
+    )
+    echo [INFO] Running silent install ^(this takes a minute or two^)...
+    "!GIT_SETUP!" /VERYSILENT /NORESTART /NOCANCEL /SP- /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS /COMPONENTS="icons,ext\reg\shellhere,assoc,assoc_sh"
+    if !errorlevel! neq 0 if !errorlevel! neq 3010 (
+        echo [ERR] Git installer exited with code !errorlevel!.
+        popd & pause & exit /b 1
+    )
+    :: Add git to this shell's PATH (installer updates the system PATH for new shells only).
+    if exist "%ProgramFiles%\Git\cmd\git.exe" (
+        set "PATH=%ProgramFiles%\Git\cmd;!PATH!"
+    )
+    where git >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo [ERR] Git installed but still not on PATH. Close and re-open this shell, then re-run update.bat.
+        popd & pause & exit /b 1
+    )
+    echo [OK]   Git for Windows installed
 )
 
 if not exist ".git" (
