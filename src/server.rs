@@ -3132,8 +3132,9 @@ async fn create_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResp
             success: false, message: "Missing 'vm_name'".into(), output: None,
         }),
     };
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let result = web::block(move || operations::create_snapshot(&vm_name, &note)).await;
+    let result = web::block(move || operations::create_snapshot(&vm_name, &name, &note)).await;
     match result {
         Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
         Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
@@ -3191,6 +3192,43 @@ async fn delete_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResp
         }),
     };
     let result = web::block(move || operations::delete_snapshot(&vm_name, &snapshot_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn create_live_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let result = web::block(move || operations::live_snapshot_create(&vm_name, &name)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn restore_live_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let snapshot_id = match body.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'snapshot_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::live_snapshot_restore(&vm_name, &snapshot_id)).await;
     match result {
         Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
         Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
@@ -4609,6 +4647,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/snapshot/list/{vm_name}", web::get().to(list_snapshots_handler))
             .route("/api/snapshot/revert", web::post().to(revert_snapshot_handler))
             .route("/api/snapshot/delete", web::post().to(delete_snapshot_handler))
+            .route("/api/snapshot/live/create", web::post().to(create_live_snapshot_handler))
+            .route("/api/snapshot/live/restore", web::post().to(restore_live_snapshot_handler))
             // Group routes
             .route("/api/group/list", web::get().to(list_groups_handler))
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))

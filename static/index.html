@@ -256,6 +256,7 @@
                 <legend>Snapshot (qcow2 Internal)</legend>
                 <p style="color:#8b949e;font-size:12px;margin:0 0 8px 0;">Point-in-time snapshot inside qcow2 file. Fast, uses delta storage. VM must be stopped.</p>
                 <label>VM-NAME <select id="snapshot-vm" onchange="loadSnapshotList()"><option value="">-- select VM --</option></select></label>
+                <label>Name <input type="text" id="snapshot-name" placeholder="e.g. before-upgrade (blank = auto-generate)" style="width:280px;"></label>
                 <label>Note <input type="text" id="snapshot-note" placeholder="Optional description" style="width:250px;"></label>
                 <button class="execute-btn" onclick="createSnapshot()">Create Snapshot</button>
                 <div id="snapshot-list" style="font-size:0.9em;margin-top:12px;"></div>

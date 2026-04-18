@@ -199,6 +199,34 @@ fn cleanup_switch_taps(smac: &str) {
     }
 }
 
+/// Ensure a writable pflash NVRAM file is in qcow2 format (converting in-place from raw).
+/// savevm refuses to run if any writable device backed by raw is attached, so NVRAM must be qcow2.
+/// Idempotent: returns Ok if already qcow2 or if file is missing (caller creates it later).
+fn ensure_nvram_qcow2(nvram_file: &str) -> Result<(), String> {
+    if !std::path::Path::new(nvram_file).exists() {
+        return Ok(());
+    }
+    let qemu_img = get_conf("qemu_img_path");
+    if qemu_img.is_empty() {
+        return Err("qemu_img_path not configured".into());
+    }
+    let info = crate::ssh::run_cmd(&qemu_img, &["info", "--output=json", nvram_file])
+        .unwrap_or_default();
+    if info.contains("\"format\": \"qcow2\"") {
+        return Ok(());
+    }
+    let tmp = format!("{}.qcow2.tmp", nvram_file);
+    let _ = std::fs::remove_file(&tmp);
+    crate::ssh::run_cmd(
+        &qemu_img,
+        &["convert", "-f", "raw", "-O", "qcow2", nvram_file, &tmp],
+    )
+    .map_err(|e| format!("NVRAM qcow2 convert failed: {}", e))?;
+    std::fs::rename(&tmp, nvram_file)
+        .map_err(|e| format!("NVRAM rename failed: {}", e))?;
+    Ok(())
+}
+
 /// VNC port range constants
 pub const VNC_PORT_MIN: u16 = 12001;
 pub const VNC_PORT_MAX: u16 = 13000;
@@ -616,7 +644,16 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     };
     let pctl_path = get_conf("pctl_path");
     let disk_path = get_conf("disk_path");
-    let qemu_accel = get_conf("qemu_accel");
+    // Pick accelerator per-VM: native (hvf/kvm) when guest arch matches host,
+    // multi-threaded TCG when crossing architectures. The config's qemu_accel
+    // is only used in the matching case — cross-arch always needs TCG.
+    let host_arch = std::env::consts::ARCH;
+    let arch_match = host_arch == cfg.features.arch;
+    let qemu_accel = if arch_match {
+        get_conf_or("qemu_accel", if cfg!(target_os = "macos") { "hvf:tcg" } else { "kvm:tcg" })
+    } else {
+        get_conf_or("qemu_accel_cross", "tcg,thread=multi")
+    };
     let qemu_machine = if is_aarch64 { "virt".to_string() } else { get_conf("qemu_machine") };
 
     // ensure directories exist
@@ -703,14 +740,22 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         }
 
-        // pflash0 = firmware code (read-only), pflash1 = NVRAM (read-write)
+        // pflash0 = firmware code (read-only), pflash1 = NVRAM (read-write).
+        // NVRAM must be qcow2 so savevm (live snapshot) can include it.
+        ensure_nvram_qcow2(&nvram_file)?;
         qemu_args.push("-drive".into());
         qemu_args.push(format!("if=pflash,format=raw,readonly=on,file={}", bios));
         qemu_args.push("-drive".into());
-        qemu_args.push(format!("if=pflash,format=raw,file={}", nvram_file));
-        // CPU for aarch64 — use "host" with HVF on Apple Silicon for best performance
+        qemu_args.push(format!("if=pflash,format=qcow2,file={}", nvram_file));
+        // CPU for aarch64 — "host" only works under HVF/KVM. Fall back to "max"
+        // under TCG (e.g. x86 host emulating aarch64 guest).
+        let cpu_model = if qemu_accel.starts_with("hvf") || qemu_accel.starts_with("kvm") {
+            get_conf_or("qemu_cpu_aarch64", "host")
+        } else {
+            get_conf_or("qemu_cpu_aarch64", "max")
+        };
         qemu_args.push("-cpu".into());
-        qemu_args.push("host".into());
+        qemu_args.push(cpu_model);
         // Display: ramfb for early UEFI boot + virtio-gpu for OS
         qemu_args.push("-device".into());
         qemu_args.push("ramfb".into());
@@ -755,13 +800,14 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     }
                 }
                 // pflash0 = secure firmware code (read-only)
-                // pflash1 = NVRAM with Secure Boot keys (read-write)
+                // pflash1 = NVRAM with Secure Boot keys (read-write, qcow2 for savevm).
+                ensure_nvram_qcow2(&nvram_file)?;
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
                     "if=pflash,format=raw,readonly=on,file={}", secure_code));
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
-                    "if=pflash,format=raw,file={}", nvram_file));
+                    "if=pflash,format=qcow2,file={}", nvram_file));
                 // SMM required for Secure Boot on x86_64
                 qemu_args.push("-global".into());
                 qemu_args.push("driver=cfi.pflash01,property=secure,value=on".into());
@@ -1210,16 +1256,20 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             "/opt/homebrew/share/qemu/edk2-x86_64-secure-code.fd");
         std::path::Path::new(&sc).exists()
     };
+    // Pass accelerator via -accel so sub-options like "tcg,thread=multi" work.
+    // Cannot combine -accel with -machine accel=... so leave accel out of -machine.
     qemu_args.push("-machine".into());
     if is_aarch64 {
         // virt machine: highmem=on for PCI MMIO above 4GB (required by Windows ARM64)
-        qemu_args.push(format!("type={},accel={},highmem=on", qemu_machine, qemu_accel));
+        qemu_args.push(format!("type={},highmem=on", qemu_machine));
     } else if use_secureboot {
         // q35 + smm=on required for UEFI Secure Boot
-        qemu_args.push(format!("type=q35,accel={},smm=on", qemu_accel));
+        qemu_args.push("type=q35,smm=on".to_string());
     } else {
-        qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
+        qemu_args.push(format!("type={}", qemu_machine));
     }
+    qemu_args.push("-accel".into());
+    qemu_args.push(qemu_accel.clone());
 
     // SMP — if vcpus is set, auto-compute topology; otherwise use explicit values
     let vcpus: u32 = cfg.cpu.vcpus.parse().unwrap_or(0);
@@ -2315,7 +2365,7 @@ fn format_bytes(bytes: u64) -> String {
 // ======== Snapshot operations ========
 
 /// Create a qcow2 internal snapshot for all disks of a VM
-pub fn create_snapshot(vm_name: &str, note: &str) -> Result<String, String> {
+pub fn create_snapshot(vm_name: &str, name: &str, note: &str) -> Result<String, String> {
     sanitize_name(vm_name)?;
     let vm = db::get_vm(vm_name)?;
     if vm.status == "running" {
@@ -2325,9 +2375,18 @@ pub fn create_snapshot(vm_name: &str, note: &str) -> Result<String, String> {
     let disk_path = get_conf("disk_path");
     let qemu_img = get_conf("qemu_img_path");
 
-    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let rnd = generate_random_password(4);
-    let snapshot_id = format!("snap_{}_{}", ts, rnd);
+    let snapshot_id = if !name.is_empty() {
+        sanitize_name(name).map_err(|e| format!("Invalid snapshot name: {}", e))?;
+        let existing = db::list_snapshots_by_vm(vm_name)?;
+        if existing.iter().any(|r| r.snapshot_id == name) {
+            return Err(format!("Snapshot '{}' already exists for VM '{}'", name, vm_name));
+        }
+        name.to_string()
+    } else {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let rnd = generate_random_password(4);
+        format!("snap_{}_{}", ts, rnd)
+    };
 
     let mut created: Vec<String> = Vec::new();
     for dname in &disk_names {
@@ -2409,10 +2468,67 @@ pub fn revert_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, Strin
     Ok(format!("Reverted {} disk(s) to snapshot '{}'", reverted, snapshot_id))
 }
 
-/// Delete a snapshot from disk(s) and DB
+/// Create a live snapshot (VM running, RAM + device state included) via QEMU HMP savevm.
+/// snapshot_id is prefixed with "live_" so callers can tell them apart from offline snapshots.
+pub fn live_snapshot_create(vm_name: &str, name: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status != "running" {
+        return Err("VM must be running to create a live snapshot".into());
+    }
+    let disk_names = get_vm_disk_names(vm_name)?;
+
+    let snapshot_id = if !name.is_empty() {
+        sanitize_name(name).map_err(|e| format!("Invalid snapshot name: {}", e))?;
+        format!("live_{}", name)
+    } else {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let rnd = generate_random_password(4);
+        format!("live_{}_{}", ts, rnd)
+    };
+
+    let existing = db::list_snapshots_by_vm(vm_name)?;
+    if existing.iter().any(|r| r.snapshot_id == snapshot_id) {
+        return Err(format!("Snapshot '{}' already exists for VM '{}'", snapshot_id, vm_name));
+    }
+
+    let hmp = format!("savevm {}", snapshot_id);
+    let out = crate::api_helpers::qemu_monitor_cmd(vm_name, &hmp)?;
+    // savevm prints nothing on success; any output indicates an error from QEMU.
+    if !out.trim().is_empty() {
+        return Err(format!("savevm failed: {}", out.trim()));
+    }
+
+    let note = if name.is_empty() { String::from("live") } else { format!("live: {}", name) };
+    for dname in &disk_names {
+        db::insert_snapshot(&snapshot_id, dname, vm_name, &note)?;
+    }
+    Ok(format!("Live snapshot '{}' created", snapshot_id))
+}
+
+/// Restore a live snapshot (RAM + device state) via QEMU HMP loadvm.
+pub fn live_snapshot_restore(vm_name: &str, snapshot_id: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    sanitize_name(snapshot_id)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status != "running" {
+        return Err("VM must be running to restore a live snapshot".into());
+    }
+    let hmp = format!("loadvm {}", snapshot_id);
+    let out = crate::api_helpers::qemu_monitor_cmd(vm_name, &hmp)?;
+    if !out.trim().is_empty() {
+        return Err(format!("loadvm failed: {}", out.trim()));
+    }
+    Ok(format!("Restored VM '{}' to live snapshot '{}'", vm_name, snapshot_id))
+}
+
+/// Delete a snapshot from disk(s) and DB.
+/// Uses HMP `delvm` when the VM is running (qemu-img can't touch a live qcow2),
+/// otherwise falls back to qemu-img snapshot -d.
 pub fn delete_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, String> {
     sanitize_name(vm_name)?;
     sanitize_name(snapshot_id)?;
+    let vm = db::get_vm(vm_name)?;
     let records = db::list_snapshots_by_vm(vm_name)?;
     let snap_disks: Vec<&db::SnapshotRecord> = records.iter()
         .filter(|r| r.snapshot_id == snapshot_id)
@@ -2420,14 +2536,24 @@ pub fn delete_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, Strin
     if snap_disks.is_empty() {
         return Err(format!("Snapshot '{}' not found for VM '{}'", snapshot_id, vm_name));
     }
-    let disk_path = get_conf("disk_path");
-    let qemu_img = get_conf("qemu_img_path");
 
-    for r in &snap_disks {
-        let disk_file = format!("{}/{}.qcow2", disk_path, r.disk_name);
-        if std::path::Path::new(&disk_file).exists() {
-            let _ = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-d", snapshot_id, &disk_file]);
+    if vm.status == "running" {
+        let hmp = format!("delvm {}", snapshot_id);
+        let out = crate::api_helpers::qemu_monitor_cmd(vm_name, &hmp)?;
+        if !out.trim().is_empty() {
+            return Err(format!("delvm failed: {}", out.trim()));
         }
+    } else {
+        let disk_path = get_conf("disk_path");
+        let qemu_img = get_conf("qemu_img_path");
+        for r in &snap_disks {
+            let disk_file = format!("{}/{}.qcow2", disk_path, r.disk_name);
+            if std::path::Path::new(&disk_file).exists() {
+                let _ = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-d", snapshot_id, &disk_file]);
+            }
+        }
+    }
+    for r in &snap_disks {
         let _ = db::delete_snapshot_record(snapshot_id, &r.disk_name);
     }
     Ok(format!("Deleted snapshot '{}'", snapshot_id))
