@@ -4528,7 +4528,10 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             for vm in &vms {
                 if vm.status == "running" {
                     let sock_path = format!("{}/{}", pctl_path, vm.smac);
+                    #[cfg(unix)]
                     let alive = std::os::unix::net::UnixStream::connect(&sock_path).is_ok();
+                    #[cfg(windows)]
+                    let alive = uds_windows::UnixStream::connect(&sock_path).is_ok();
                     if !alive {
                         println!("Stale VM '{}': marked running but QEMU not found — setting to stopped", vm.smac);
                         let _ = crate::db::set_vm_status(&vm.smac, "stopped");

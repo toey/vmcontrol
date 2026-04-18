@@ -329,7 +329,10 @@ pub fn generate_userdata_nocloud(config: &MdsConfig, hostname: &str, vmctl_passw
 
 fn get_mac_from_kea(client_ip: &str, socket_path: &str) -> Option<String> {
     use std::io::{Read, Write};
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
 
     if socket_path.is_empty() {
         return None;
