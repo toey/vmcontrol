@@ -5,3 +5,8 @@
 .claude/
 linux/target2/
 mac/target2/
+
+# Local dev config override — production installs read /opt/ctl/bin/config.yaml
+# when this file is absent, so committing one traps developers on dev paths.
+/config.yaml
+/config.yaml.devbak
