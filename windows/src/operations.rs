@@ -258,6 +258,25 @@ fn cleanup_switch_taps_windows(smac: &str) {
     }
 }
 
+/// Kill the websockify proxy for a VM if one was spawned at start.
+fn cleanup_websockify(smac: &str) {
+    let pctl_path = get_conf("pctl_path");
+    let pid_file = format!("{}/{}_wsp.pid", pctl_path, smac);
+    if let Ok(pid_str) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = pid_str.trim().parse::<u32>() {
+            #[cfg(target_os = "windows")]
+            let _ = std::process::Command::new("taskkill")
+                .args(["/F", "/PID", &pid.to_string()])
+                .output();
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .output();
+        }
+        let _ = std::fs::remove_file(&pid_file);
+    }
+}
+
 /// Clean up TAP interfaces for a VM's switch adapters on Linux
 #[cfg(target_os = "linux")]
 fn cleanup_switch_taps(smac: &str) {
@@ -1012,7 +1031,56 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     // to expose the VNC WebSocket for browsers on other machines.
     let vnc_bind_host = get_conf_or("vnc_bind_host", "127.0.0.1");
     qemu_args.push("-display".into());
-    qemu_args.push(format!("vnc={}:{},websocket={}", vnc_bind_host, vnc_display, vnc_port));
+
+    // External websockify proxy: if websockify_path is set and the binary exists,
+    // skip QEMU's built-in WebSocket and spawn websockify to proxy ws_port -> 5900+N.
+    // Useful on Windows where QEMU's WebSocket doesn't dual-stack IPv4/IPv6.
+    let websockify_path = get_conf("websockify_path");
+    let use_websockify = !websockify_path.is_empty()
+        && std::path::Path::new(&websockify_path).exists();
+
+    if use_websockify {
+        // QEMU binds raw VNC on loopback; websockify handles WebSocket upgrade.
+        qemu_args.push(format!("vnc=127.0.0.1:{}", vnc_display));
+        let raw_vnc_port = 5900u16 + vnc_display;
+        let ws_listen = format!("{}:{}", vnc_bind_host, vnc_port);
+        let ws_target = format!("127.0.0.1:{}", raw_vnc_port);
+        let pid_file = format!("{}/{}_wsp.pid", pctl_path, ismac);
+
+        // Kill any stale websockify for this VM
+        if let Ok(prev_pid_str) = std::fs::read_to_string(&pid_file) {
+            if let Ok(prev_pid) = prev_pid_str.trim().parse::<u32>() {
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/PID", &prev_pid.to_string()])
+                    .output();
+                #[cfg(unix)]
+                let _ = std::process::Command::new("kill")
+                    .arg(prev_pid.to_string())
+                    .output();
+            }
+        }
+
+        match std::process::Command::new(&websockify_path)
+            .args([&ws_listen, &ws_target])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                let _ = std::fs::write(&pid_file, child.id().to_string());
+                output_log.push_str(&format!(
+                    "VNC: websockify {} -> {} (PID {})\n",
+                    ws_listen, ws_target, child.id()
+                ));
+            }
+            Err(e) => {
+                return Err(format!("Failed to spawn websockify: {}", e));
+            }
+        }
+    } else {
+        qemu_args.push(format!("vnc={}:{},websocket={}", vnc_bind_host, vnc_display, vnc_port));
+    }
 
     // Memory — validate against host RAM
     let vm_ram: u64 = cfg.memory.size.parse().unwrap_or(0);
@@ -1629,6 +1697,7 @@ pub fn stop(json_str: &str) -> Result<String, String> {
     cleanup_switch_taps(&cmd.smac);
     #[cfg(target_os = "windows")]
     cleanup_switch_taps_windows(&cmd.smac);
+    cleanup_websockify(&cmd.smac);
     let pctl_output = send_cmd_pctl("stop", &cmd.smac);
     output.push_str(&pctl_output);
     // Only mark stopped if the QEMU monitor command succeeded (no error reported)
@@ -1692,6 +1761,7 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
     cleanup_switch_taps(&cmd.smac);
     #[cfg(target_os = "windows")]
     cleanup_switch_taps_windows(&cmd.smac);
+    cleanup_websockify(&cmd.smac);
 
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);

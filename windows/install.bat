@@ -176,6 +176,7 @@ echo.
 :: --- Step 2a.8: Auto-install swtpm via MSYS2 (for Windows 11 guest TPM 2.0) ---
 set "SWTPM_PATH=C:\msys64\mingw64\bin\swtpm.exe"
 set "MKISOFS_PATH=C:\msys64\mingw64\bin\mkisofs.exe"
+set "WEBSOCKIFY_PATH=C:\msys64\mingw64\bin\websockify.exe"
 if not exist "%SWTPM_PATH%" (
     if not exist "C:\msys64\usr\bin\bash.exe" (
         echo [INFO] MSYS2 not installed. Downloading latest installer...
@@ -193,8 +194,8 @@ if not exist "%SWTPM_PATH%" (
             goto :after_swtpm
         )
     )
-    echo [INFO] Installing swtpm + cdrtools via pacman...
-    C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-swtpm mingw-w64-x86_64-cdrtools"
+    echo [INFO] Installing swtpm + cdrtools + python via pacman...
+    C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-swtpm mingw-w64-x86_64-cdrtools mingw-w64-x86_64-python mingw-w64-x86_64-python-pip"
     if !errorlevel! neq 0 (
         echo [WARN] pacman install swtpm failed. Windows 11 guests will need Win11 Bypass.
         goto :after_swtpm
@@ -208,6 +209,29 @@ if not exist "%SWTPM_PATH%" (
     echo [OK]   swtpm already present at %SWTPM_PATH%
 )
 :after_swtpm
+
+:: --- Step 2a.9: Auto-install websockify via pip (noVNC WebSocket proxy) ---
+if not exist "%WEBSOCKIFY_PATH%" (
+    if exist "C:\msys64\mingw64\bin\python.exe" (
+        echo [INFO] Installing websockify via pip...
+        C:\msys64\mingw64\bin\python.exe -m pip install --quiet --no-warn-script-location websockify
+        if exist "%WEBSOCKIFY_PATH%" (
+            echo [OK]   websockify installed at %WEBSOCKIFY_PATH%
+        ) else (
+            :: pip may drop a .exe shim or a bare script; try the no-extension fallback
+            if exist "C:\msys64\mingw64\bin\websockify" (
+                set "WEBSOCKIFY_PATH=C:\msys64\mingw64\bin\websockify"
+                echo [OK]   websockify installed at !WEBSOCKIFY_PATH!
+            ) else (
+                echo [WARN] websockify not found after pip install
+            )
+        )
+    ) else (
+        echo [WARN] MSYS2 python not installed; skipping websockify
+    )
+) else (
+    echo [OK]   websockify already present at %WEBSOCKIFY_PATH%
+)
 
 echo.
 
@@ -707,6 +731,7 @@ if not exist "%CONFIG_YAML%" (
         echo edk2_x86_vars: %EDK2_X86_VARS%
         echo swtpm_path: %SWTPM_PATH%
         echo mkisofs_path: %MKISOFS_PATH%
+        echo websockify_path: %WEBSOCKIFY_PATH%
         :: TCG tuning: qemu64 avoids the Haswell-v4 CPUID features TCG doesn't
         :: emulate (pcid/invpcid/tsc-deadline/spec-ctrl). thread=multi gives each
         :: vCPU its own host core. TCG is safe on Parallels (no nested virt);
@@ -751,6 +776,11 @@ if not exist "%CONFIG_YAML%" (
     if !errorlevel! neq 0 (
         echo mkisofs_path: %MKISOFS_PATH%>> "%CONFIG_YAML%"
         echo [INFO] Added mkisofs_path to existing config.yaml
+    )
+    findstr /c:"websockify_path" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo websockify_path: %WEBSOCKIFY_PATH%>> "%CONFIG_YAML%"
+        echo [INFO] Added websockify_path to existing config.yaml
     )
     findstr /c:"qemu_cpu_x86" "%CONFIG_YAML%" >nul 2>&1
     if !errorlevel! neq 0 (
