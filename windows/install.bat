@@ -871,6 +871,46 @@ echo [OK]   Firewall rule added
 
 echo.
 
+:: --- Step 10b: Health check + auto-heal stale API key env ---
+echo [INFO] Waiting for service to come up...
+set "HEALTH_HTTP="
+for /l %%i in (1,1,10) do (
+    if "!HEALTH_HTTP!"=="" (
+        timeout /t 1 /nobreak >nul
+        for /f "tokens=*" %%R in ('curl -s -o nul -w "%%{http_code}" http://127.0.0.1:8080/api/vm/list 2^>nul') do set "HEALTH_HTTP=%%R"
+    )
+)
+if "!HEALTH_HTTP!"=="200" (
+    echo [OK]   /api/vm/list responds 200 -- server healthy
+) else if "!HEALTH_HTTP!"=="401" (
+    echo [WARN] /api/vm/list returned 401 -- stale API key still in service env
+    echo [INFO] Killing service + retrying after clean env...
+    where nssm >nul 2>&1 && nssm stop %SERVICE_NAME% >nul 2>&1
+    schtasks /end /tn %SERVICE_NAME% >nul 2>&1
+    taskkill /f /im vm_ctl.exe >nul 2>&1
+    timeout /t 2 /nobreak >nul
+    where nssm >nul 2>&1 && (
+        nssm set %SERVICE_NAME% AppEnvironmentExtra "" >nul 2>&1
+        nssm start %SERVICE_NAME%
+    ) || (
+        schtasks /delete /tn %SERVICE_NAME% /f >nul 2>&1
+        schtasks /create /tn %SERVICE_NAME% /tr "\"%CTL_BIN%\start_vmcontrol.bat\"" /sc onstart /ru SYSTEM /f >nul
+        schtasks /run /tn %SERVICE_NAME% >nul 2>&1
+    )
+    timeout /t 3 /nobreak >nul
+    for /f "tokens=*" %%R in ('curl -s -o nul -w "%%{http_code}" http://127.0.0.1:8080/api/vm/list 2^>nul') do set "HEALTH_HTTP=%%R"
+    if "!HEALTH_HTTP!"=="200" (
+        echo [OK]   Service recovered after re-create
+    ) else (
+        echo [WARN] Still !HEALTH_HTTP! -- manually: del C:\vmcontrol\.api_key and restart.bat
+    )
+) else (
+    echo [WARN] /api/vm/list returned '!HEALTH_HTTP!' -- service may not be running
+    echo        Check: C:\vmcontrol\bin\status.bat
+)
+
+echo.
+
 :: --- Step 11: Create Desktop shortcut (Admin PowerShell) ---
 echo [INFO] Creating desktop shortcut...
 set "DESKTOP=%USERPROFILE%\Desktop"
