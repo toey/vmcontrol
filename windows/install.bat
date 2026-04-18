@@ -12,6 +12,8 @@ set "QEMU_PATH=C:\Program Files\qemu\qemu-system-x86_64.exe"
 set "QEMU_AARCH64_PATH=C:\Program Files\qemu\qemu-system-aarch64.exe"
 set "QEMU_IMG_PATH=C:\Program Files\qemu\qemu-img.exe"
 set "EDK2_AARCH64_BIOS=C:\Program Files\qemu\share\edk2-aarch64-code.fd"
+set "EDK2_X86_SECURE_CODE=C:\Program Files\qemu\share\edk2-x86_64-secure-code.fd"
+set "EDK2_X86_VARS=C:\Program Files\qemu\share\edk2-i386-vars.fd"
 set "CTL_BIN=C:\vmcontrol\bin"
 set "CONFIG_YAML=C:\vmcontrol\bin\config.yaml"
 set "PCTL_PATH=C:\vmcontrol"
@@ -663,6 +665,8 @@ if not exist "%CONFIG_YAML%" (
         echo qemu_img_path: %QEMU_IMG_PATH%
         echo qemu_aarch64_path: %QEMU_AARCH64_PATH%
         echo edk2_aarch64_bios: %EDK2_AARCH64_BIOS%
+        echo edk2_x86_secure_code: %EDK2_X86_SECURE_CODE%
+        echo edk2_x86_vars: %EDK2_X86_VARS%
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
@@ -680,6 +684,14 @@ if not exist "%CONFIG_YAML%" (
     )
 ) else (
     echo [WARN] config.yaml already exists -- skipping ^(preserving your customizations^)
+    :: Migrate: older installs don't have edk2_x86_secure_code / edk2_x86_vars,
+    :: so Windows VMs fall back to the Mac default path and Secure Boot stays off.
+    findstr /c:"edk2_x86_secure_code" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo edk2_x86_secure_code: %EDK2_X86_SECURE_CODE%>> "%CONFIG_YAML%"
+        echo edk2_x86_vars: %EDK2_X86_VARS%>> "%CONFIG_YAML%"
+        echo [INFO] Added edk2_x86_secure_code / edk2_x86_vars to existing config.yaml
+    )
 )
 
 echo.
