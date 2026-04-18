@@ -105,6 +105,33 @@ if exist "%PREBUILT_CHECK%" (
     )
 )
 
+:: --- Step 2a: Auto-install QEMU if missing ---
+set "QEMU_MISSING=0"
+if /I "%ARCH%"=="ARM64" (
+    if not exist "%QEMU_AARCH64_PATH%" if not exist "%QEMU_PATH%" set "QEMU_MISSING=1"
+) else (
+    if not exist "%QEMU_PATH%" set "QEMU_MISSING=1"
+)
+
+if "!QEMU_MISSING!"=="1" (
+    echo.
+    echo [INFO] QEMU not found. Downloading latest installer from qemu.weilnetz.de...
+    if /I "%ARCH%"=="ARM64" (
+        set "QEMU_BASE_URL=https://qemu.weilnetz.de/aarch64/"
+    ) else (
+        set "QEMU_BASE_URL=https://qemu.weilnetz.de/w64/"
+    )
+    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12'; $u='!QEMU_BASE_URL!'; $p=Invoke-WebRequest $u -UseBasicParsing; $f=$p.Links.href | Where-Object {$_ -match '^qemu-.*-setup-\d{8}\.exe$'} | Sort-Object -Descending | Select-Object -First 1; if(-not $f){Write-Host '[ERR] No installer URL found on '+$u; exit 2}; $setup=Join-Path $env:TEMP $f; Write-Host ('[INFO] Downloading '+$u+$f); Invoke-WebRequest ($u+$f) -OutFile $setup -UseBasicParsing; Write-Host '[INFO] Running silent install (/S)...'; $p2=Start-Process $setup -ArgumentList '/S' -Wait -PassThru; exit $p2.ExitCode"
+    if !errorlevel! neq 0 (
+        echo [ERR] QEMU auto-install failed. Download manually from:
+        echo       !QEMU_BASE_URL!
+        pause
+        exit /b 1
+    )
+    echo [OK]   QEMU installed to C:\Program Files\qemu
+    echo.
+)
+
 :: On ARM64, check for qemu-system-aarch64 as primary binary
 if /I "%ARCH%"=="ARM64" (
     if exist "%QEMU_AARCH64_PATH%" (
