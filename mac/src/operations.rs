@@ -901,7 +901,16 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         // CPU for x86_64 — configurable model (default: Haswell-v4)
         // "Haswell-v4" provides SSE4.2/AVX/AVX2 with proper CPUID brand string.
         // On native x86 with KVM, set qemu_cpu_x86=host in config.yaml for best performance.
-        let cpu_model = get_conf_or("qemu_cpu_x86", "Haswell-v4");
+        // On Windows default to "qemu64" instead: QEMU builds for Windows typically
+        // run under TCG (no KVM, WHPX often unavailable under Parallels/nested virt)
+        // and TCG doesn't emulate the Haswell features (pcid/invpcid/tsc-deadline/
+        // spec-ctrl), which floods the log with warnings and can hit gen_pinsr
+        // assertions. qemu64 is a safe baseline.
+        #[cfg(target_os = "windows")]
+        let cpu_default = "qemu64";
+        #[cfg(not(target_os = "windows"))]
+        let cpu_default = "Haswell-v4";
+        let cpu_model = get_conf_or("qemu_cpu_x86", cpu_default);
         qemu_args.push("-cpu".into());
         qemu_args.push(cpu_model);
         qemu_args.extend([
