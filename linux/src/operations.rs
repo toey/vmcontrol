@@ -1089,13 +1089,10 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                             adapter.netid, tap_name
                         ));
                     }
-                    #[cfg(not(target_os = "linux"))]
+                    #[cfg(target_os = "macos")]
                     {
-                        // macOS/Windows: UDP multicast for many-to-many L2 switching.
+                        // UDP multicast for many-to-many L2 switching.
                         // VLAN encoded in mcast address → separate broadcast domain per VLAN.
-                        // Windows rejects mcast bind without an explicit localaddr on a
-                        // multicast-capable interface; loopback works. macOS errors with
-                        // localaddr=127.0.0.1 so omit it there.
                         output_log.push_str(&format!(
                             "switch : {} (mcast port {})\n",
                             adapter.switch_name, switch_port
@@ -1104,15 +1101,25 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                             "vlan   : {} (mcast 230.{}.{}.1:{})\n",
                             vlan_id, mcast_hi, mcast_lo, switch_port
                         ));
-                        #[cfg(target_os = "windows")]
-                        qemu_args.push(format!(
-                            "socket,id=net{},mcast=230.{}.{}.1:{},localaddr=127.0.0.1",
-                            adapter.netid, mcast_hi, mcast_lo, switch_port
-                        ));
-                        #[cfg(not(target_os = "windows"))]
                         qemu_args.push(format!(
                             "socket,id=net{},mcast=230.{}.{}.1:{}",
                             adapter.netid, mcast_hi, mcast_lo, switch_port
+                        ));
+                    }
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Windows QEMU can't mcast bind (group address rejected) and
+                        // loopback doesn't carry multicast, so switch networking has
+                        // no equivalent single-command netdev. Fall back to user-mode
+                        // (SLIRP) so the VM at least boots with NAT; VM-to-VM traffic
+                        // over a switch is not supported on Windows without TAP-Windows.
+                        output_log.push_str(&format!(
+                            "switch : {} (skipped — switch net not supported on Windows; using NAT fallback)\n",
+                            adapter.switch_name
+                        ));
+                        qemu_args.push(format!(
+                            "user,id=net{}",
+                            adapter.netid
                         ));
                     }
                     let _ = &sw;
@@ -1218,41 +1225,48 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
 
     // Internal network — VM-to-VM communication on 192.168.100.0/24
     if !mds_config.internal_ip.is_empty() {
-        let internal_mac = derive_internal_mac(&mds_config.internal_ip);
-
-        output_log.push_str(&format!("internal_ip : {}\n", mds_config.internal_ip));
-        output_log.push_str(&format!("internal_mac: {}\n", internal_mac));
-
-        qemu_args.push("-netdev".into());
-        #[cfg(target_os = "macos")]
+        #[cfg(target_os = "windows")]
         {
-            // macOS: use vmnet-host for reliable VM-to-VM communication
-            // (multicast sockets don't work reliably on macOS)
-            qemu_args.push("vmnet-host,id=netint,start-address=192.168.100.1,end-address=192.168.100.254,subnet-mask=255.255.255.0".into());
-            output_log.push_str("internal_net: vmnet-host 192.168.100.0/24\n");
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Linux/Windows: use multicast socket. Windows needs an explicit
-            // localaddr on a multicast-capable interface; loopback works.
-            let internal_mcast_port = get_conf_or("internal_mcast_port", "11111");
-            output_log.push_str(&format!("internal_net: 230.0.100.1:{}\n", internal_mcast_port));
-            #[cfg(target_os = "windows")]
-            qemu_args.push(format!(
-                "socket,id=netint,mcast=230.0.100.1:{},localaddr=127.0.0.1",
-                internal_mcast_port
-            ));
-            #[cfg(not(target_os = "windows"))]
-            qemu_args.push(format!(
-                "socket,id=netint,mcast=230.0.100.1:{}",
-                internal_mcast_port
+            // QEMU's mcast netdev binds directly to the multicast group address,
+            // which Windows' socket stack rejects ("address not available"), and
+            // loopback on Windows doesn't carry multicast. No reliable
+            // one-command replacement exists, so skip the internal adapter and
+            // warn. Primary NAT/bridge adapters still work for MDS access.
+            output_log.push_str(&format!(
+                "internal_ip : {} (skipped — internal net not supported on Windows)\n",
+                mds_config.internal_ip
             ));
         }
-        qemu_args.push("-device".into());
-        qemu_args.push(format!(
-            "virtio-net-pci,netdev=netint,mac={}",
-            internal_mac
-        ));
+        #[cfg(not(target_os = "windows"))]
+        {
+            let internal_mac = derive_internal_mac(&mds_config.internal_ip);
+
+            output_log.push_str(&format!("internal_ip : {}\n", mds_config.internal_ip));
+            output_log.push_str(&format!("internal_mac: {}\n", internal_mac));
+
+            qemu_args.push("-netdev".into());
+            #[cfg(target_os = "macos")]
+            {
+                // macOS: use vmnet-host for reliable VM-to-VM communication
+                // (multicast sockets don't work reliably on macOS)
+                qemu_args.push("vmnet-host,id=netint,start-address=192.168.100.1,end-address=192.168.100.254,subnet-mask=255.255.255.0".into());
+                output_log.push_str("internal_net: vmnet-host 192.168.100.0/24\n");
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let internal_mcast_port = get_conf_or("internal_mcast_port", "11111");
+                output_log.push_str(&format!("internal_net: 230.0.100.1:{}\n", internal_mcast_port));
+                qemu_args.push(format!(
+                    "socket,id=netint,mcast=230.0.100.1:{}",
+                    internal_mcast_port
+                ));
+            }
+            qemu_args.push("-device".into());
+            qemu_args.push(format!(
+                "virtio-net-pci,netdev=netint,mac={}",
+                internal_mac
+            ));
+        }
     }
 
     // PCI Passthrough — VFIO devices (GPU, NIC, etc.)
