@@ -292,37 +292,32 @@ if exist "%PREBUILT_LOCAL%" (
             echo [WARN] No MSVC Build Tools detected
             echo [INFO] ARM64 Windows requires MSVC toolchain ^(GNU is not available^)
             echo.
-            :: Try auto-install via winget
-            where winget >nul 2>&1
-            if !errorlevel! equ 0 (
-                echo [INFO] Installing Visual Studio Build Tools via winget...
-                echo [INFO] This may take several minutes. Please wait...
-                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
-                if !errorlevel! equ 0 (
-                    echo [OK]   Visual Studio Build Tools installed ^(with ARM64 tools^)
-                    echo [INFO] Switching to stable-msvc toolchain...
-                    rustup toolchain install stable-msvc >nul 2>&1
-                    rustup default stable-msvc >nul 2>&1
-                    echo [OK]   Switched to stable-msvc ^(aarch64-pc-windows-msvc^)
-                    set "USE_TOOLCHAIN=msvc"
-                ) else (
-                    echo [ERR] winget install failed. Please install manually:
-                    echo       https://visualstudio.microsoft.com/visual-cpp-build-tools/
-                    echo       Select "Desktop development with C++"
-                    echo       Also check "ARM64/ARM64EC build tools" in Individual Components
-                    echo       Then re-run install.bat
-                    pause
-                    exit /b 1
-                )
-            ) else (
-                echo [ERR] winget not available and no Build Tools found.
-                echo       Please install Visual Studio Build Tools manually:
+            :: Download VS Build Tools bootstrapper directly (avoids winget / msstore issues)
+            set "VSBT_URL=https://aka.ms/vs/17/release/vs_BuildTools.exe"
+            set "VSBT_EXE=%TEMP%\vs_BuildTools.exe"
+            echo [INFO] Downloading Visual Studio Build Tools bootstrapper...
+            powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest '!VSBT_URL!' -OutFile '!VSBT_EXE!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+            if !errorlevel! neq 0 (
+                echo [ERR] Failed to download VS Build Tools. Install manually:
                 echo       https://visualstudio.microsoft.com/visual-cpp-build-tools/
-                echo       Select "Desktop development with C++"
-                echo       Then re-run install.bat
                 pause
                 exit /b 1
             )
+            echo [INFO] Installing VS Build Tools ^(ARM64 + Clang^) -- this may take several minutes...
+            "!VSBT_EXE!" --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --includeRecommended
+            :: Exit codes 3010 (restart required) and 0 are both success; others = failure
+            if !errorlevel! neq 0 if !errorlevel! neq 3010 (
+                echo [ERR] VS Build Tools installer exited with code !errorlevel!.
+                echo       Install manually from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
+                pause
+                exit /b 1
+            )
+            echo [OK]   Visual Studio Build Tools installed ^(ARM64 + Clang^)
+            echo [INFO] Switching to stable-msvc toolchain...
+            rustup toolchain install stable-msvc >nul 2>&1
+            rustup default stable-msvc >nul 2>&1
+            echo [OK]   Switched to stable-msvc ^(aarch64-pc-windows-msvc^)
+            set "USE_TOOLCHAIN=msvc"
         )
     ) else (
         :: x86_64: Try MSVC first, then GNU
@@ -357,27 +352,28 @@ if exist "%PREBUILT_LOCAL%" (
         ) else (
             echo [WARN] No C linker detected ^(no cl.exe / no dlltool.exe^)
             echo.
-            :: Try auto-install via winget
-            where winget >nul 2>&1
-            if !errorlevel! equ 0 (
-                echo [INFO] Installing Visual Studio Build Tools via winget...
-                echo [INFO] This may take several minutes. Please wait...
-                winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --quiet --wait" --accept-package-agreements --accept-source-agreements
-                if !errorlevel! equ 0 (
+            :: Download VS Build Tools bootstrapper directly (avoids winget / msstore issues)
+            set "VSBT_URL=https://aka.ms/vs/17/release/vs_BuildTools.exe"
+            set "VSBT_EXE=%TEMP%\vs_BuildTools.exe"
+            echo [INFO] Downloading Visual Studio Build Tools bootstrapper...
+            powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest '!VSBT_URL!' -OutFile '!VSBT_EXE!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+            if !errorlevel! neq 0 (
+                echo [WARN] Failed to download VS Build Tools. Attempting build with current toolchain...
+                set "USE_TOOLCHAIN=unknown"
+            ) else (
+                echo [INFO] Installing VS Build Tools -- this may take several minutes...
+                "!VSBT_EXE!" --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended
+                if !errorlevel! neq 0 if !errorlevel! neq 3010 (
+                    echo [WARN] VS Build Tools exited with code !errorlevel!. Attempting build anyway...
+                    set "USE_TOOLCHAIN=unknown"
+                ) else (
                     echo [OK]   Visual Studio Build Tools installed
                     echo [INFO] Switching to stable-msvc toolchain...
                     rustup toolchain install stable-msvc >nul 2>&1
                     rustup default stable-msvc >nul 2>&1
                     echo [OK]   Switched to stable-msvc
                     set "USE_TOOLCHAIN=msvc"
-                ) else (
-                    echo [ERR] winget install failed.
-                    echo [INFO] Attempting build with current toolchain...
-                    set "USE_TOOLCHAIN=unknown"
                 )
-            ) else (
-                echo [INFO] Attempting build with current toolchain...
-                set "USE_TOOLCHAIN=unknown"
             )
         )
     )
