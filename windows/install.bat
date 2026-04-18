@@ -714,6 +714,9 @@ if not exist "%CONFIG_YAML%" (
         :: Platform enabled for hardware acceleration.
         echo qemu_cpu_x86: qemu64
         echo qemu_accel: tcg,thread=multi
+        :: Bind VNC on all interfaces so browsers on other machines (e.g. the
+        :: host when Windows is a Parallels guest) can reach the WebSocket.
+        echo vnc_bind_host: 0.0.0.0
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
@@ -758,6 +761,11 @@ if not exist "%CONFIG_YAML%" (
     if !errorlevel! neq 0 (
         echo qemu_accel: tcg,thread=multi>> "%CONFIG_YAML%"
         echo [INFO] Added qemu_accel: tcg,thread=multi to existing config.yaml
+    )
+    findstr /c:"vnc_bind_host" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo vnc_bind_host: 0.0.0.0>> "%CONFIG_YAML%"
+        echo [INFO] Added vnc_bind_host: 0.0.0.0 to existing config.yaml
     )
 )
 

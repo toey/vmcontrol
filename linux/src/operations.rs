@@ -1008,8 +1008,11 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         return Err(format!("VNC port {} out of valid range ({}-{})", vnc_port, VNC_PORT_MIN, VNC_PORT_MAX));
     }
     let vnc_display = vnc_port - VNC_PORT_BASE;
+    // Bind address defaults to loopback; set vnc_bind_host=0.0.0.0 in config.yaml
+    // to expose the VNC WebSocket for browsers on other machines.
+    let vnc_bind_host = get_conf_or("vnc_bind_host", "127.0.0.1");
     qemu_args.push("-display".into());
-    qemu_args.push(format!("vnc=127.0.0.1:{},websocket={}", vnc_display, vnc_port));
+    qemu_args.push(format!("vnc={}:{},websocket={}", vnc_bind_host, vnc_display, vnc_port));
 
     // Memory — validate against host RAM
     let vm_ram: u64 = cfg.memory.size.parse().unwrap_or(0);
