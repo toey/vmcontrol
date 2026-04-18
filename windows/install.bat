@@ -175,6 +175,7 @@ echo.
 
 :: --- Step 2a.8: Auto-install swtpm via MSYS2 (for Windows 11 guest TPM 2.0) ---
 set "SWTPM_PATH=C:\msys64\mingw64\bin\swtpm.exe"
+set "MKISOFS_PATH=C:\msys64\mingw64\bin\mkisofs.exe"
 if not exist "%SWTPM_PATH%" (
     if not exist "C:\msys64\usr\bin\bash.exe" (
         echo [INFO] MSYS2 not installed. Downloading latest installer...
@@ -192,8 +193,8 @@ if not exist "%SWTPM_PATH%" (
             goto :after_swtpm
         )
     )
-    echo [INFO] Installing swtpm via pacman ^(libtpms + mingw-w64-swtpm^)...
-    C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-swtpm"
+    echo [INFO] Installing swtpm + cdrtools via pacman...
+    C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-swtpm mingw-w64-x86_64-cdrtools"
     if !errorlevel! neq 0 (
         echo [WARN] pacman install swtpm failed. Windows 11 guests will need Win11 Bypass.
         goto :after_swtpm
@@ -705,6 +706,7 @@ if not exist "%CONFIG_YAML%" (
         echo edk2_x86_secure_code: %EDK2_X86_SECURE_CODE%
         echo edk2_x86_vars: %EDK2_X86_VARS%
         echo swtpm_path: %SWTPM_PATH%
+        echo mkisofs_path: %MKISOFS_PATH%
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
@@ -734,6 +736,11 @@ if not exist "%CONFIG_YAML%" (
     if !errorlevel! neq 0 (
         echo swtpm_path: %SWTPM_PATH%>> "%CONFIG_YAML%"
         echo [INFO] Added swtpm_path to existing config.yaml
+    )
+    findstr /c:"mkisofs_path" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo mkisofs_path: %MKISOFS_PATH%>> "%CONFIG_YAML%"
+        echo [INFO] Added mkisofs_path to existing config.yaml
     )
 )
 

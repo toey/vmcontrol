@@ -551,7 +551,19 @@ fn generate_seed_iso(vm_name: &str) -> Result<(String, String), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        return Err("Seed ISO generation not supported on Windows — disable cloud-init or create ISO manually".into());
+        // Needs mkisofs from MSYS2 mingw-w64-x86_64-cdrtools
+        // (install.bat auto-installs alongside swtpm).
+        let mkisofs_path = get_conf_or("mkisofs_path", "C:\\msys64\\mingw64\\bin\\mkisofs.exe");
+        if !std::path::Path::new(&mkisofs_path).exists() {
+            return Err(format!(
+                "mkisofs not found at {} — re-run install.bat to install MSYS2 cdrtools, or set mkisofs_path in config.yaml",
+                mkisofs_path
+            ));
+        }
+        run_cmd(&mkisofs_path, &[
+            "-output", &iso_path, "-volid", "CIDATA",
+            "-joliet", "-rock", &seed_dir,
+        ]).map_err(|e| format!("Failed to create seed ISO: {}", e))?;
     }
 
     // Cleanup seed directory
