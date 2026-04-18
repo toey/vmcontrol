@@ -964,7 +964,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
             output_log.push_str("TPM 2.0 : swtpm emulator\n");
         } else {
+            #[cfg(target_os = "macos")]
             output_log.push_str("TPM 2.0 : swtpm not found (install with: brew install swtpm)\n");
+            #[cfg(target_os = "linux")]
+            output_log.push_str("TPM 2.0 : swtpm not found (install with: apt/dnf install swtpm)\n");
+            #[cfg(target_os = "windows")]
+            output_log.push_str("TPM 2.0 : swtpm not available on Windows — use Win11 Bypass in the VNC console if the guest is Windows 11\n");
         }
     }
 
