@@ -720,6 +720,18 @@ for %%S in (start.bat stop.bat restart.bat status.bat) do (
 echo [OK]   Service scripts installed: start.bat, stop.bat, restart.bat, status.bat
 
 :: --- Step 7: Generate config.yaml ---
+:: Detect stale Mac/Linux paths in an existing config (e.g. qemu_path pointing
+:: at /opt/homebrew/...) and scrap it — regeneration below will recreate it
+:: with the correct Windows paths. A .bak copy is kept just in case.
+if exist "%CONFIG_YAML%" (
+    findstr /r /c:"^qemu_path: */" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [WARN] config.yaml has Unix-style paths -- backing up and regenerating
+        copy /y "%CONFIG_YAML%" "%CONFIG_YAML%.bak" >nul 2>&1
+        del /f /q "%CONFIG_YAML%" >nul 2>&1
+    )
+)
+
 if not exist "%CONFIG_YAML%" (
     echo [INFO] Generating config.yaml with detected paths...
     (
@@ -905,8 +917,25 @@ if "!HEALTH_HTTP!"=="200" (
         echo [WARN] Still !HEALTH_HTTP! -- manually: del C:\vmcontrol\.api_key and restart.bat
     )
 ) else (
-    echo [WARN] /api/vm/list returned '!HEALTH_HTTP!' -- service may not be running
-    echo        Check: C:\vmcontrol\bin\status.bat
+    echo [WARN] /api/vm/list returned '!HEALTH_HTTP!' -- service not responding
+    echo [INFO] Attempting to (re)start the service...
+    taskkill /f /im vm_ctl.exe >nul 2>&1
+    where nssm >nul 2>&1 && (
+        nssm start %SERVICE_NAME% >nul 2>&1
+    ) || (
+        schtasks /run /tn %SERVICE_NAME% >nul 2>&1
+    )
+    timeout /t 5 /nobreak >nul
+    for /f "tokens=*" %%R in ('curl -s -o nul -w "%%{http_code}" http://127.0.0.1:8080/api/vm/list 2^>nul') do set "HEALTH_HTTP=%%R"
+    if "!HEALTH_HTTP!"=="200" (
+        echo [OK]   Service started
+    ) else (
+        echo [ERR] Service still not responding ^(code '!HEALTH_HTTP!'^).
+        echo       Run manually to see the error:
+        echo         cd /d %CTL_BIN%
+        echo         vm_ctl.exe server 0.0.0.0:8080
+        echo       Then check: C:\vmcontrol\bin\status.bat
+    )
 )
 
 echo.
