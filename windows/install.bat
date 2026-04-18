@@ -173,6 +173,43 @@ if exist "%TAP_CTL%" (
 
 echo.
 
+:: --- Step 2a.8: Auto-install swtpm via MSYS2 (for Windows 11 guest TPM 2.0) ---
+set "SWTPM_PATH=C:\msys64\mingw64\bin\swtpm.exe"
+if not exist "%SWTPM_PATH%" (
+    if not exist "C:\msys64\usr\bin\bash.exe" (
+        echo [INFO] MSYS2 not installed. Downloading latest installer...
+        set "MSYS_SETUP=%TEMP%\msys2-setup.exe"
+        powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; $r = Invoke-RestMethod 'https://api.github.com/repos/msys2/msys2-installer/releases/latest' -Headers @{'User-Agent'='vmcontrol-installer'}; $a = $r.assets | Where-Object { $_.name -match '^msys2-x86_64-\d{8}\.exe$' } | Select-Object -First 1; if (-not $a) { exit 2 }; Write-Host ('[INFO] Downloading ' + $a.browser_download_url); Invoke-WebRequest $a.browser_download_url -OutFile '!MSYS_SETUP!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+        if !errorlevel! neq 0 (
+            echo [WARN] Failed to download MSYS2. TPM 2.0 won't be available.
+            echo        Windows 11 guests need the Win11 Bypass button in the VNC UI.
+            goto :after_swtpm
+        )
+        echo [INFO] Silent installing MSYS2 to C:\msys64 ^(takes several minutes^)...
+        "!MSYS_SETUP!" in --confirm-command --accept-messages --root C:\msys64
+        if !errorlevel! neq 0 if !errorlevel! neq 3010 (
+            echo [WARN] MSYS2 installer exited with code !errorlevel!. TPM 2.0 may not work.
+            goto :after_swtpm
+        )
+    )
+    echo [INFO] Installing swtpm via pacman ^(libtpms + mingw-w64-swtpm^)...
+    C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-swtpm"
+    if !errorlevel! neq 0 (
+        echo [WARN] pacman install swtpm failed. Windows 11 guests will need Win11 Bypass.
+        goto :after_swtpm
+    )
+    if exist "%SWTPM_PATH%" (
+        echo [OK]   swtpm installed at %SWTPM_PATH%
+    ) else (
+        echo [WARN] swtpm.exe not found at expected path after install: %SWTPM_PATH%
+    )
+) else (
+    echo [OK]   swtpm already present at %SWTPM_PATH%
+)
+:after_swtpm
+
+echo.
+
 :: On ARM64, check for qemu-system-aarch64 as primary binary
 if /I "%ARCH%"=="ARM64" (
     if exist "%QEMU_AARCH64_PATH%" (
@@ -667,6 +704,7 @@ if not exist "%CONFIG_YAML%" (
         echo edk2_aarch64_bios: %EDK2_AARCH64_BIOS%
         echo edk2_x86_secure_code: %EDK2_X86_SECURE_CODE%
         echo edk2_x86_vars: %EDK2_X86_VARS%
+        echo swtpm_path: %SWTPM_PATH%
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
@@ -691,6 +729,11 @@ if not exist "%CONFIG_YAML%" (
         echo edk2_x86_secure_code: %EDK2_X86_SECURE_CODE%>> "%CONFIG_YAML%"
         echo edk2_x86_vars: %EDK2_X86_VARS%>> "%CONFIG_YAML%"
         echo [INFO] Added edk2_x86_secure_code / edk2_x86_vars to existing config.yaml
+    )
+    findstr /c:"swtpm_path" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo swtpm_path: %SWTPM_PATH%>> "%CONFIG_YAML%"
+        echo [INFO] Added swtpm_path to existing config.yaml
     )
 )
 
