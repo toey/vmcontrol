@@ -80,3 +80,9 @@ popd
 
 echo [INFO] Handing off to install.bat for rebuild + reinstall...
 call "%SCRIPT_DIR%install.bat"
+
+echo.
+echo ================================================================
+echo   update.bat finished
+echo ================================================================
+pause
