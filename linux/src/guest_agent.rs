@@ -1,7 +1,10 @@
 use crate::config::get_conf;
 use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::time::Duration;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use uds_windows::UnixStream;
 
 /// Send a QGA command and get the JSON response
 pub fn qga_command(

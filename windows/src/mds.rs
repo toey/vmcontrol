@@ -99,6 +99,7 @@ pub fn save_mds_config(config: &MdsConfig) -> Result<(), String> {
 fn generate_userdata_base(config: &MdsConfig, vmctl_password: &str) -> String {
     let mut ud = String::from("#cloud-config\n");
     ud.push_str("ssh_pwauth: true\n");
+    ud.push_str("ssh_deletekeys: false\n");
     ud.push_str("users:\n");
     ud.push_str("  - default\n");
     ud.push_str("  - name: root\n");
@@ -328,7 +329,10 @@ pub fn generate_userdata_nocloud(config: &MdsConfig, hostname: &str, vmctl_passw
 
 fn get_mac_from_kea(client_ip: &str, socket_path: &str) -> Option<String> {
     use std::io::{Read, Write};
+    #[cfg(unix)]
     use std::os::unix::net::UnixStream;
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
 
     if socket_path.is_empty() {
         return None;

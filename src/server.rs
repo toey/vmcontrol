@@ -3132,8 +3132,9 @@ async fn create_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResp
             success: false, message: "Missing 'vm_name'".into(), output: None,
         }),
     };
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let note = body.get("note").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let result = web::block(move || operations::create_snapshot(&vm_name, &note)).await;
+    let result = web::block(move || operations::create_snapshot(&vm_name, &name, &note)).await;
     match result {
         Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
         Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
@@ -3191,6 +3192,43 @@ async fn delete_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResp
         }),
     };
     let result = web::block(move || operations::delete_snapshot(&vm_name, &snapshot_id)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn create_live_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let result = web::block(move || operations::live_snapshot_create(&vm_name, &name)).await;
+    match result {
+        Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
+        Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
+        Err(e) => HttpResponse::InternalServerError().json(ApiResponse { success: false, message: e.to_string(), output: None }),
+    }
+}
+
+async fn restore_live_snapshot_handler(body: web::Json<serde_json::Value>) -> HttpResponse {
+    let vm_name = match body.get("vm_name").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'vm_name'".into(), output: None,
+        }),
+    };
+    let snapshot_id = match body.get("snapshot_id").and_then(|v| v.as_str()) {
+        Some(n) if !n.is_empty() => n.to_string(),
+        _ => return HttpResponse::BadRequest().json(ApiResponse {
+            success: false, message: "Missing 'snapshot_id'".into(), output: None,
+        }),
+    };
+    let result = web::block(move || operations::live_snapshot_restore(&vm_name, &snapshot_id)).await;
     match result {
         Ok(Ok(msg)) => HttpResponse::Ok().json(ApiResponse { success: true, message: msg, output: None }),
         Ok(Err(e)) => HttpResponse::BadRequest().json(ApiResponse { success: false, message: e, output: None }),
@@ -3271,15 +3309,11 @@ async fn create_switch_handler(body: web::Json<serde_json::Value>) -> HttpRespon
     }
     match crate::db::insert_switch(&name) {
         Ok(id) => {
-            // Create OVS bridge
-            let bridge_name = format!("vs-{}", name);
-            let ovs = crate::config::get_conf("ovs_vsctl_path");
-            if !ovs.is_empty() {
-                let _ = crate::ssh::run_cmd(&ovs, &["--may-exist", "add-br", &bridge_name]);
-            }
+            // Host bridges/TAPs are created lazily per (switch, vlan) pair when a VM starts;
+            // no host-side provisioning needed at switch-create time.
             HttpResponse::Ok().json(ApiResponse {
                 success: true,
-                message: format!("Switch '{}' created (ID: {}, bridge: {})", name, id, bridge_name),
+                message: format!("Switch '{}' created (ID: {})", name, id),
                 output: Some(id.to_string()),
             })
         }
@@ -4494,7 +4528,10 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             for vm in &vms {
                 if vm.status == "running" {
                     let sock_path = format!("{}/{}", pctl_path, vm.smac);
+                    #[cfg(unix)]
                     let alive = std::os::unix::net::UnixStream::connect(&sock_path).is_ok();
+                    #[cfg(windows)]
+                    let alive = uds_windows::UnixStream::connect(&sock_path).is_ok();
                     if !alive {
                         println!("Stale VM '{}': marked running but QEMU not found — setting to stopped", vm.smac);
                         let _ = crate::db::set_vm_status(&vm.smac, "stopped");
@@ -4613,6 +4650,8 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
             .route("/api/snapshot/list/{vm_name}", web::get().to(list_snapshots_handler))
             .route("/api/snapshot/revert", web::post().to(revert_snapshot_handler))
             .route("/api/snapshot/delete", web::post().to(delete_snapshot_handler))
+            .route("/api/snapshot/live/create", web::post().to(create_live_snapshot_handler))
+            .route("/api/snapshot/live/restore", web::post().to(restore_live_snapshot_handler))
             // Group routes
             .route("/api/group/list", web::get().to(list_groups_handler))
             .route("/api/vm/set-group", web::post().to(set_vm_group_handler))

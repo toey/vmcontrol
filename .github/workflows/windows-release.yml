@@ -1,0 +1,82 @@
+name: Windows Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Attach ZIPs to a GitHub Release (requires a tag to exist)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            arch: x64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable-msvc for ${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-msvc --profile minimal
+          rustup default stable-msvc
+          rustup target add ${{ matrix.target }}
+          rustc --version
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      - name: Build release
+        shell: pwsh
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage package contents
+        shell: pwsh
+        run: |
+          $stage = "dist/vmcontrol-win-${{ matrix.arch }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/vm_ctl.exe" "$stage/"
+          Copy-Item -Recurse static "$stage/static"
+          Copy-Item windows/install.bat "$stage/"
+          if (Test-Path windows/readme.txt) { Copy-Item windows/readme.txt "$stage/" }
+          Get-ChildItem -Recurse $stage | Select-Object FullName, Length
+
+      - name: Zip artifact
+        shell: pwsh
+        run: |
+          $out = "vmcontrol-win-${{ matrix.arch }}.zip"
+          Compress-Archive -Path "dist/vmcontrol-win-${{ matrix.arch }}/*" -DestinationPath $out
+          Get-Item $out | Select-Object Name, Length
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmcontrol-win-${{ matrix.arch }}
+          path: vmcontrol-win-${{ matrix.arch }}.zip
+          if-no-files-found: error
+
+      - name: Attach to release (tag push only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: vmcontrol-win-${{ matrix.arch }}.zip

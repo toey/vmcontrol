@@ -104,6 +104,129 @@ pub fn running_vms_ram_mb(exclude_smac: Option<&str>) -> u64 {
     total
 }
 
+/// Setup TAP + bridge for virtual switch on Linux
+/// Creates a bridge for the switch (if not exists) and a TAP interface for the VM adapter
+#[cfg(target_os = "linux")]
+fn setup_switch_tap(bridge_name: &str, tap_name: &str, output_log: &mut String) -> Result<(), String> {
+    use std::process::Command;
+    let use_sudo = get_conf_or("bridge_sudo", "true") == "true";
+    let sudo_path = get_conf_or("bridge_sudo_path", "/usr/bin/sudo");
+
+    let run = |args: &[&str]| -> Result<(), String> {
+        let result = if use_sudo {
+            Command::new(&sudo_path).args(args).output()
+        } else {
+            Command::new(args[0]).args(&args[1..]).output()
+        };
+        match result {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                // Ignore "already exists" or "File exists" errors
+                if stderr.contains("exists") || stderr.contains("RTNETLINK") {
+                    Ok(())
+                } else {
+                    Err(format!("{:?} failed: {}", args, stderr.trim()))
+                }
+            }
+            Err(e) => Err(format!("{:?} exec error: {}", args, e)),
+        }
+    };
+
+    // Create bridge if not exists
+    let _ = run(&["ip", "link", "add", bridge_name, "type", "bridge"]);
+    run(&["ip", "link", "set", bridge_name, "up"])
+        .map_err(|e| format!("Failed to bring up bridge {}: {}", bridge_name, e))?;
+    output_log.push_str(&format!("switch-tap: bridge {} up\n", bridge_name));
+
+    // Remove stale TAP if exists (from previous run)
+    let _ = run(&["ip", "link", "del", tap_name]);
+
+    // Create TAP interface
+    run(&["ip", "tuntap", "add", "mode", "tap", tap_name])
+        .map_err(|e| format!("Failed to create TAP {}: {}", tap_name, e))?;
+
+    // Subsequent failures must roll back the TAP we just created so we don't leak it.
+    if let Err(e) = run(&["ip", "link", "set", tap_name, "master", bridge_name]) {
+        let _ = run(&["ip", "link", "del", tap_name]);
+        return Err(format!("Failed to add TAP {} to bridge {}: {}", tap_name, bridge_name, e));
+    }
+    if let Err(e) = run(&["ip", "link", "set", tap_name, "up"]) {
+        let _ = run(&["ip", "link", "del", tap_name]);
+        return Err(format!("Failed to bring up TAP {}: {}", tap_name, e));
+    }
+    output_log.push_str(&format!("switch-tap: tap {} → bridge {}\n", tap_name, bridge_name));
+
+    Ok(())
+}
+
+/// Clean up TAP interfaces for a VM's switch adapters on Linux
+#[cfg(target_os = "linux")]
+fn cleanup_switch_taps(smac: &str) {
+    use std::process::Command;
+    // Load VM config to find switch adapters
+    let vm = match db::get_vm(smac) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let cfg: VmStartConfig = match serde_json::from_str(&vm.config) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let use_sudo = get_conf_or("bridge_sudo", "true") == "true";
+    let sudo_path = get_conf_or("bridge_sudo_path", "/usr/bin/sudo");
+
+    for adapter in &cfg.network_adapters {
+        if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
+            let mac_clean = smac.replace(":", "");
+            let mac_suffix = &mac_clean[mac_clean.len().saturating_sub(4)..];
+            let tap_name = format!("vt{}n{}", mac_suffix, adapter.netid);
+            let result = if use_sudo {
+                Command::new(&sudo_path)
+                    .args(["ip", "link", "del", &tap_name])
+                    .output()
+            } else {
+                Command::new("ip")
+                    .args(["link", "del", &tap_name])
+                    .output()
+            };
+            if let Ok(o) = result {
+                if o.status.success() {
+                    eprintln!("switch-tap: cleaned up {}", tap_name);
+                }
+            }
+        }
+    }
+}
+
+/// Ensure a writable pflash NVRAM file is in qcow2 format (converting in-place from raw).
+/// savevm refuses to run if any writable device backed by raw is attached, so NVRAM must be qcow2.
+/// Idempotent: returns Ok if already qcow2 or if file is missing (caller creates it later).
+fn ensure_nvram_qcow2(nvram_file: &str) -> Result<(), String> {
+    if !std::path::Path::new(nvram_file).exists() {
+        return Ok(());
+    }
+    let qemu_img = get_conf("qemu_img_path");
+    if qemu_img.is_empty() {
+        return Err("qemu_img_path not configured".into());
+    }
+    let info = crate::ssh::run_cmd(&qemu_img, &["info", "--output=json", nvram_file])
+        .unwrap_or_default();
+    if info.contains("\"format\": \"qcow2\"") {
+        return Ok(());
+    }
+    let tmp = format!("{}.qcow2.tmp", nvram_file);
+    let _ = std::fs::remove_file(&tmp);
+    crate::ssh::run_cmd(
+        &qemu_img,
+        &["convert", "-f", "raw", "-O", "qcow2", nvram_file, &tmp],
+    )
+    .map_err(|e| format!("NVRAM qcow2 convert failed: {}", e))?;
+    std::fs::rename(&tmp, nvram_file)
+        .map_err(|e| format!("NVRAM rename failed: {}", e))?;
+    Ok(())
+}
+
 /// VNC port range constants
 pub const VNC_PORT_MIN: u16 = 12001;
 pub const VNC_PORT_MAX: u16 = 13000;
@@ -521,7 +644,16 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     };
     let pctl_path = get_conf("pctl_path");
     let disk_path = get_conf("disk_path");
-    let qemu_accel = get_conf("qemu_accel");
+    // Pick accelerator per-VM: native (hvf/kvm) when guest arch matches host,
+    // multi-threaded TCG when crossing architectures. The config's qemu_accel
+    // is only used in the matching case — cross-arch always needs TCG.
+    let host_arch = std::env::consts::ARCH;
+    let arch_match = host_arch == cfg.features.arch;
+    let qemu_accel = if arch_match {
+        get_conf_or("qemu_accel", if cfg!(target_os = "macos") { "hvf:tcg" } else { "kvm:tcg" })
+    } else {
+        get_conf_or("qemu_accel_cross", "tcg,thread=multi")
+    };
     let qemu_machine = if is_aarch64 { "virt".to_string() } else { get_conf("qemu_machine") };
 
     // ensure directories exist
@@ -608,14 +740,22 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             }
         }
 
-        // pflash0 = firmware code (read-only), pflash1 = NVRAM (read-write)
+        // pflash0 = firmware code (read-only), pflash1 = NVRAM (read-write).
+        // NVRAM must be qcow2 so savevm (live snapshot) can include it.
+        ensure_nvram_qcow2(&nvram_file)?;
         qemu_args.push("-drive".into());
         qemu_args.push(format!("if=pflash,format=raw,readonly=on,file={}", bios));
         qemu_args.push("-drive".into());
-        qemu_args.push(format!("if=pflash,format=raw,file={}", nvram_file));
-        // CPU for aarch64 — use "host" with HVF on Apple Silicon for best performance
+        qemu_args.push(format!("if=pflash,format=qcow2,file={}", nvram_file));
+        // CPU for aarch64 — "host" only works under HVF/KVM. Fall back to "max"
+        // under TCG (e.g. x86 host emulating aarch64 guest).
+        let cpu_model = if qemu_accel.starts_with("hvf") || qemu_accel.starts_with("kvm") {
+            get_conf_or("qemu_cpu_aarch64", "host")
+        } else {
+            get_conf_or("qemu_cpu_aarch64", "max")
+        };
         qemu_args.push("-cpu".into());
-        qemu_args.push("host".into());
+        qemu_args.push(cpu_model);
         // Display: ramfb for early UEFI boot + virtio-gpu for OS
         qemu_args.push("-device".into());
         qemu_args.push("ramfb".into());
@@ -660,13 +800,14 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     }
                 }
                 // pflash0 = secure firmware code (read-only)
-                // pflash1 = NVRAM with Secure Boot keys (read-write)
+                // pflash1 = NVRAM with Secure Boot keys (read-write, qcow2 for savevm).
+                ensure_nvram_qcow2(&nvram_file)?;
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
                     "if=pflash,format=raw,readonly=on,file={}", secure_code));
                 qemu_args.push("-drive".into());
                 qemu_args.push(format!(
-                    "if=pflash,format=raw,file={}", nvram_file));
+                    "if=pflash,format=qcow2,file={}", nvram_file));
                 // SMM required for Secure Boot on x86_64
                 qemu_args.push("-global".into());
                 qemu_args.push("driver=cfi.pflash01,property=secure,value=on".into());
@@ -911,8 +1052,7 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
         qemu_args.push("-netdev".into());
 
         if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
-            // Virtual switch mode — QEMU socket multicast with VLAN
-            // (macOS has no OVS kernel module, so we use multicast for L2 switching)
+            // Virtual switch mode
             let vlan_id: u16 = adapter.vlan.parse().unwrap_or(0);
             if vlan_id > 4094 {
                 return Err(format!(
@@ -920,18 +1060,56 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     vlan_id, adapter.netid
                 ));
             }
-            let mcast_hi = vlan_id / 256;
-            let mcast_lo = vlan_id % 256;
             match db::get_switch_by_name(&adapter.switch_name) {
                 Ok(sw) => {
-                    output_log.push_str(&format!("switch : {} (mcast port {})\n",
-                        adapter.switch_name, sw.mcast_port));
-                    output_log.push_str(&format!("vlan   : {} (mcast 230.{}.{}.1:{})\n",
-                        vlan_id, mcast_hi, mcast_lo, sw.mcast_port));
-                    qemu_args.push(format!(
-                        "socket,id=net{},mcast=230.{}.{}.1:{}",
-                        adapter.netid, mcast_hi, mcast_lo, sw.mcast_port
-                    ));
+                    if sw.mcast_port <= 0 || sw.mcast_port > u16::MAX as i64 {
+                        return Err(format!(
+                            "Switch '{}' has invalid port {} (must be 1..={})",
+                            adapter.switch_name, sw.mcast_port, u16::MAX
+                        ));
+                    }
+                    let switch_port = sw.mcast_port as u16;
+                    let mcast_hi = vlan_id / 256;
+                    let mcast_lo = vlan_id % 256;
+                    #[cfg(target_os = "linux")]
+                    {
+                        // Linux: TAP + bridge per (switch, vlan) pair for L2 isolation.
+                        // Bridge name fits 15-char ifname limit: vb<sw_id>v<vlan> (max ~11 chars).
+                        let bridge_name = format!("vb{}v{}", sw.id, vlan_id);
+                        let mac_clean = smac.replace(":", "");
+                        let mac_suffix = &mac_clean[mac_clean.len().saturating_sub(4)..];
+                        let tap_name = format!("vt{}n{}", mac_suffix, adapter.netid);
+                        output_log.push_str(&format!(
+                            "switch : {} vlan {} → bridge {} tap {}\n",
+                            adapter.switch_name, vlan_id, bridge_name, tap_name
+                        ));
+                        setup_switch_tap(&bridge_name, &tap_name, &mut output_log)?;
+                        qemu_args.push(format!(
+                            "tap,id=net{},ifname={},script=no,downscript=no",
+                            adapter.netid, tap_name
+                        ));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        // macOS/Windows: UDP multicast for many-to-many L2 switching.
+                        // VLAN encoded in mcast address → separate broadcast domain per VLAN.
+                        output_log.push_str(&format!(
+                            "switch : {} (mcast port {})\n",
+                            adapter.switch_name, switch_port
+                        ));
+                        output_log.push_str(&format!(
+                            "vlan   : {} (mcast 230.{}.{}.1:{})\n",
+                            vlan_id, mcast_hi, mcast_lo, switch_port
+                        ));
+                        qemu_args.push(format!(
+                            "socket,id=net{},mcast=230.{}.{}.1:{}",
+                            adapter.netid, mcast_hi, mcast_lo, switch_port
+                        ));
+                    }
+                    let _ = &sw;
+                    let _ = switch_port;
+                    let _ = mcast_hi;
+                    let _ = mcast_lo;
                 }
                 Err(e) => {
                     return Err(format!(
@@ -1078,16 +1256,20 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
             "/opt/homebrew/share/qemu/edk2-x86_64-secure-code.fd");
         std::path::Path::new(&sc).exists()
     };
+    // Pass accelerator via -accel so sub-options like "tcg,thread=multi" work.
+    // Cannot combine -accel with -machine accel=... so leave accel out of -machine.
     qemu_args.push("-machine".into());
     if is_aarch64 {
         // virt machine: highmem=on for PCI MMIO above 4GB (required by Windows ARM64)
-        qemu_args.push(format!("type={},accel={},highmem=on", qemu_machine, qemu_accel));
+        qemu_args.push(format!("type={},highmem=on", qemu_machine));
     } else if use_secureboot {
         // q35 + smm=on required for UEFI Secure Boot
-        qemu_args.push(format!("type=q35,accel={},smm=on", qemu_accel));
+        qemu_args.push("type=q35,smm=on".to_string());
     } else {
-        qemu_args.push(format!("type={},accel={}", qemu_machine, qemu_accel));
+        qemu_args.push(format!("type={}", qemu_machine));
     }
+    qemu_args.push("-accel".into());
+    qemu_args.push(qemu_accel.clone());
 
     // SMP — if vcpus is set, auto-compute topology; otherwise use explicit values
     let vcpus: u32 = cfg.cpu.vcpus.parse().unwrap_or(0);
@@ -1227,10 +1409,12 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     output_log.push_str(&format!("guest-agent: socket {}\n", qga_sock));
 
     // Start VM as a background process (no -daemonize, which breaks WebSocket VNC)
-    // Bridge/vmnet modes require sudo on macOS
+    // Bridge/vmnet modes require sudo on macOS; TAP+bridge switches require sudo on Linux
     let needs_bridge = cfg.network_adapters.iter().any(|a| a.mode == "bridge");
     let needs_vmnet_internal = cfg!(target_os = "macos") && !mds_config.internal_ip.is_empty();
-    let needs_sudo = needs_bridge || needs_vmnet_internal;
+    let needs_switch_tap = cfg!(target_os = "linux")
+        && cfg.network_adapters.iter().any(|a| a.mode == "switch" && !a.switch_name.is_empty());
+    let needs_sudo = needs_bridge || needs_vmnet_internal || needs_switch_tap;
     let use_sudo = needs_sudo && get_conf_or("bridge_sudo", "true") == "true";
 
     let (pid, log_path) = if use_sudo {
@@ -1280,6 +1464,9 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
+    // Clean up TAP interfaces before stopping QEMU (Linux switch mode)
+    #[cfg(target_os = "linux")]
+    cleanup_switch_taps(&cmd.smac);
     let pctl_output = send_cmd_pctl("stop", &cmd.smac);
     output.push_str(&pctl_output);
     // Only mark stopped if the QEMU monitor command succeeded (no error reported)
@@ -1313,6 +1500,9 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     if !std::path::Path::new(&sock_path).exists() {
         // Monitor socket gone = QEMU exited
         let _ = db::set_vm_status(&cmd.smac, "stopped");
+        // Clean up TAP interfaces (Linux switch mode)
+        #[cfg(target_os = "linux")]
+        cleanup_switch_taps(&cmd.smac);
         output.push_str("VM stopped.\n");
     } else {
         // QEMU still running — guest is shutting down
@@ -1332,6 +1522,10 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
             return Err(format!("VM '{}' is running — stop the VM first", cmd.smac));
         }
     }
+
+    // Clean up any leftover TAP interfaces (Linux switch mode)
+    #[cfg(target_os = "linux")]
+    cleanup_switch_taps(&cmd.smac);
 
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);
@@ -2171,7 +2365,7 @@ fn format_bytes(bytes: u64) -> String {
 // ======== Snapshot operations ========
 
 /// Create a qcow2 internal snapshot for all disks of a VM
-pub fn create_snapshot(vm_name: &str, note: &str) -> Result<String, String> {
+pub fn create_snapshot(vm_name: &str, name: &str, note: &str) -> Result<String, String> {
     sanitize_name(vm_name)?;
     let vm = db::get_vm(vm_name)?;
     if vm.status == "running" {
@@ -2181,9 +2375,18 @@ pub fn create_snapshot(vm_name: &str, note: &str) -> Result<String, String> {
     let disk_path = get_conf("disk_path");
     let qemu_img = get_conf("qemu_img_path");
 
-    let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let rnd = generate_random_password(4);
-    let snapshot_id = format!("snap_{}_{}", ts, rnd);
+    let snapshot_id = if !name.is_empty() {
+        sanitize_name(name).map_err(|e| format!("Invalid snapshot name: {}", e))?;
+        let existing = db::list_snapshots_by_vm(vm_name)?;
+        if existing.iter().any(|r| r.snapshot_id == name) {
+            return Err(format!("Snapshot '{}' already exists for VM '{}'", name, vm_name));
+        }
+        name.to_string()
+    } else {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let rnd = generate_random_password(4);
+        format!("snap_{}_{}", ts, rnd)
+    };
 
     let mut created: Vec<String> = Vec::new();
     for dname in &disk_names {
@@ -2265,10 +2468,67 @@ pub fn revert_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, Strin
     Ok(format!("Reverted {} disk(s) to snapshot '{}'", reverted, snapshot_id))
 }
 
-/// Delete a snapshot from disk(s) and DB
+/// Create a live snapshot (VM running, RAM + device state included) via QEMU HMP savevm.
+/// snapshot_id is prefixed with "live_" so callers can tell them apart from offline snapshots.
+pub fn live_snapshot_create(vm_name: &str, name: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status != "running" {
+        return Err("VM must be running to create a live snapshot".into());
+    }
+    let disk_names = get_vm_disk_names(vm_name)?;
+
+    let snapshot_id = if !name.is_empty() {
+        sanitize_name(name).map_err(|e| format!("Invalid snapshot name: {}", e))?;
+        format!("live_{}", name)
+    } else {
+        let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+        let rnd = generate_random_password(4);
+        format!("live_{}_{}", ts, rnd)
+    };
+
+    let existing = db::list_snapshots_by_vm(vm_name)?;
+    if existing.iter().any(|r| r.snapshot_id == snapshot_id) {
+        return Err(format!("Snapshot '{}' already exists for VM '{}'", snapshot_id, vm_name));
+    }
+
+    let hmp = format!("savevm {}", snapshot_id);
+    let out = crate::api_helpers::qemu_monitor_cmd(vm_name, &hmp)?;
+    // savevm prints nothing on success; any output indicates an error from QEMU.
+    if !out.trim().is_empty() {
+        return Err(format!("savevm failed: {}", out.trim()));
+    }
+
+    let note = if name.is_empty() { String::from("live") } else { format!("live: {}", name) };
+    for dname in &disk_names {
+        db::insert_snapshot(&snapshot_id, dname, vm_name, &note)?;
+    }
+    Ok(format!("Live snapshot '{}' created", snapshot_id))
+}
+
+/// Restore a live snapshot (RAM + device state) via QEMU HMP loadvm.
+pub fn live_snapshot_restore(vm_name: &str, snapshot_id: &str) -> Result<String, String> {
+    sanitize_name(vm_name)?;
+    sanitize_name(snapshot_id)?;
+    let vm = db::get_vm(vm_name)?;
+    if vm.status != "running" {
+        return Err("VM must be running to restore a live snapshot".into());
+    }
+    let hmp = format!("loadvm {}", snapshot_id);
+    let out = crate::api_helpers::qemu_monitor_cmd(vm_name, &hmp)?;
+    if !out.trim().is_empty() {
+        return Err(format!("loadvm failed: {}", out.trim()));
+    }
+    Ok(format!("Restored VM '{}' to live snapshot '{}'", vm_name, snapshot_id))
+}
+
+/// Delete a snapshot from disk(s) and DB.
+/// Uses HMP `delvm` when the VM is running (qemu-img can't touch a live qcow2),
+/// otherwise falls back to qemu-img snapshot -d.
 pub fn delete_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, String> {
     sanitize_name(vm_name)?;
     sanitize_name(snapshot_id)?;
+    let vm = db::get_vm(vm_name)?;
     let records = db::list_snapshots_by_vm(vm_name)?;
     let snap_disks: Vec<&db::SnapshotRecord> = records.iter()
         .filter(|r| r.snapshot_id == snapshot_id)
@@ -2276,14 +2536,24 @@ pub fn delete_snapshot(vm_name: &str, snapshot_id: &str) -> Result<String, Strin
     if snap_disks.is_empty() {
         return Err(format!("Snapshot '{}' not found for VM '{}'", snapshot_id, vm_name));
     }
-    let disk_path = get_conf("disk_path");
-    let qemu_img = get_conf("qemu_img_path");
 
-    for r in &snap_disks {
-        let disk_file = format!("{}/{}.qcow2", disk_path, r.disk_name);
-        if std::path::Path::new(&disk_file).exists() {
-            let _ = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-d", snapshot_id, &disk_file]);
+    if vm.status == "running" {
+        let hmp = format!("delvm {}", snapshot_id);
+        let out = crate::api_helpers::qemu_monitor_cmd(vm_name, &hmp)?;
+        if !out.trim().is_empty() {
+            return Err(format!("delvm failed: {}", out.trim()));
         }
+    } else {
+        let disk_path = get_conf("disk_path");
+        let qemu_img = get_conf("qemu_img_path");
+        for r in &snap_disks {
+            let disk_file = format!("{}/{}.qcow2", disk_path, r.disk_name);
+            if std::path::Path::new(&disk_file).exists() {
+                let _ = crate::ssh::run_cmd(&qemu_img, &["snapshot", "-d", snapshot_id, &disk_file]);
+            }
+        }
+    }
+    for r in &snap_disks {
         let _ = db::delete_snapshot_record(snapshot_id, &r.disk_name);
     }
     Ok(format!("Deleted snapshot '{}'", snapshot_id))

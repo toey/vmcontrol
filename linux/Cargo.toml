@@ -19,3 +19,8 @@ zip = "2"
 futures-util = "0.3"
 actix-multipart = "0.7"
 base64 = "0.22"
+
+# Drop-in UnixStream for Windows (AF_UNIX via Win10 1803+).
+# Keeps qemu_monitor_cmd / QGA / MDS code nearly identical across platforms.
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1"

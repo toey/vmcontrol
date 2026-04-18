@@ -32,8 +32,11 @@ pub fn set_update_status(mode: &str, smac: &str) {
 /// Send a command to QEMU monitor via Unix socket (native Rust)
 pub fn qemu_monitor_cmd(smac: &str, command: &str) -> Result<String, String> {
     use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
     use std::time::Duration;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+    #[cfg(windows)]
+    use uds_windows::UnixStream;
 
     let pctl_path = get_conf("pctl_path");
     let sock_path = format!("{}/{}", pctl_path, smac);

@@ -842,9 +842,11 @@ async function deleteFullBackup(backupId) {
 async function createSnapshot() {
     var vmName = val('snapshot-vm');
     if (!vmName) { alert('Select a VM'); return; }
+    var name = val('snapshot-name').trim();
     var note = val('snapshot-note');
-    var ok = await apiCall('snapshot/create', { vm_name: vmName, note: note });
+    var ok = await apiCall('snapshot/create', { vm_name: vmName, name: name, note: note });
     if (ok) {
+        document.getElementById('snapshot-name').value = '';
         document.getElementById('snapshot-note').value = '';
         loadSnapshotList();
     }
