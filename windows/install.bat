@@ -607,6 +607,15 @@ if exist "%SCRIPT_DIR%..\static\app.js" (
 echo [OK]   Binary installed to %CTL_BIN%\vm_ctl.exe
 echo [OK]   Static files installed to %STATIC_DIR%\
 
+:: Service management scripts -- ship copies alongside the binary so users can
+:: manage the service even after the install source directory is removed.
+for %%S in (start.bat stop.bat restart.bat status.bat) do (
+    if exist "%SCRIPT_DIR%%%S" (
+        copy /y "%SCRIPT_DIR%%%S" "%CTL_BIN%\%%S" >nul
+    )
+)
+echo [OK]   Service scripts installed: start.bat, stop.bat, restart.bat, status.bat
+
 :: --- Step 7: Generate config.yaml ---
 if not exist "%CONFIG_YAML%" (
     echo [INFO] Generating config.yaml with detected paths...
@@ -737,20 +746,15 @@ echo.
 where nssm >nul 2>&1
 if %errorlevel% equ 0 (
     echo   Service:     %SERVICE_NAME% ^(NSSM^)
-    echo.
-    echo   Commands:
-    echo     nssm status %SERVICE_NAME%
-    echo     nssm stop %SERVICE_NAME%
-    echo     nssm start %SERVICE_NAME%
-    echo     nssm restart %SERVICE_NAME%
 ) else (
     echo   Service:     %SERVICE_NAME% ^(Scheduled Task^)
-    echo.
-    echo   Commands:
-    echo     schtasks /query /tn %SERVICE_NAME%
-    echo     schtasks /run /tn %SERVICE_NAME%
-    echo     schtasks /end /tn %SERVICE_NAME%
 )
+echo.
+echo   Service scripts ^(Run as administrator^):
+echo     %CTL_BIN%\start.bat     -- start the service
+echo     %CTL_BIN%\stop.bat      -- stop the service ^& kill stray vm_ctl.exe
+echo     %CTL_BIN%\restart.bat   -- restart the service
+echo     %CTL_BIN%\status.bat    -- show service state, listener, log tail
 echo.
 echo ================================================================
 echo.
