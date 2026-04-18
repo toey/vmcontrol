@@ -160,6 +160,104 @@ fn setup_switch_tap(bridge_name: &str, tap_name: &str, output_log: &mut String) 
     Ok(())
 }
 
+/// Ensure a TAP-Windows adapter with the given name exists and is enabled.
+/// Returns Err if the TAP-Windows driver isn't installed.
+#[cfg(target_os = "windows")]
+fn setup_switch_tap_windows(tap_name: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    let tapinstall = r"C:\Program Files\TAP-Windows\bin\tapinstall.exe";
+    if !std::path::Path::new(tapinstall).exists() {
+        return Err("TAP-Windows driver not installed".into());
+    }
+
+    // If an adapter with this name already exists, just make sure it's enabled.
+    let check = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "if (Get-NetAdapter -Name '{}' -ErrorAction SilentlyContinue) {{ Enable-NetAdapter -Name '{}' -Confirm:$false -ErrorAction SilentlyContinue; exit 0 }} else {{ exit 1 }}",
+                tap_name, tap_name
+            ),
+        ])
+        .output();
+    if let Ok(o) = check {
+        if o.status.success() {
+            return Ok(());
+        }
+    }
+
+    // Install a new TAP adapter (creates one named "Ethernet N" / "Local Area Connection N").
+    let out = Command::new(tapinstall)
+        .args([
+            "install",
+            r"C:\Program Files\TAP-Windows\driver\OemVista.inf",
+            "tap0901",
+        ])
+        .output()
+        .map_err(|e| format!("tapinstall failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "tapinstall install failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    // Rename the newest unrenamed TAP-Windows adapter to tap_name + enable.
+    let ps = format!(
+        "$a = Get-NetAdapter | Where-Object {{ $_.InterfaceDescription -match 'TAP-Windows' -and $_.Name -notmatch '^vmt' -and $_.Name -ne 'vmctl-tap0' }} | Sort-Object -Property ifIndex -Descending | Select-Object -First 1; if ($a) {{ Rename-NetAdapter -Name $a.Name -NewName '{}'; Enable-NetAdapter -Name '{}' -Confirm:$false }} else {{ exit 1 }}",
+        tap_name, tap_name
+    );
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .output()
+        .map_err(|e| format!("rename TAP failed: {}", e))?;
+    if !out.status.success() {
+        return Err(format!(
+            "rename TAP failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Disable a TAP-Windows adapter so it can be re-used on next boot.
+/// Leaving the adapter in place avoids churn from install/uninstall cycles.
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+fn cleanup_switch_tap_windows(tap_name: &str) {
+    use std::process::Command;
+    let _ = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!("Disable-NetAdapter -Name '{}' -Confirm:$false -ErrorAction SilentlyContinue", tap_name),
+        ])
+        .output();
+}
+
+/// Disable all TAP adapters for a VM's switch adapters on Windows.
+#[cfg(target_os = "windows")]
+fn cleanup_switch_taps_windows(smac: &str) {
+    let vm = match db::get_vm(smac) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let cfg: VmStartConfig = match serde_json::from_str(&vm.config) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    for adapter in &cfg.network_adapters {
+        if adapter.mode == "switch" && !adapter.switch_name.is_empty() {
+            let mac_clean = smac.replace(":", "");
+            let mac_suffix = &mac_clean[mac_clean.len().saturating_sub(4)..];
+            let tap_name = format!("vmt{}n{}", mac_suffix, adapter.netid);
+            cleanup_switch_tap_windows(&tap_name);
+        }
+    }
+}
+
 /// Clean up TAP interfaces for a VM's switch adapters on Linux
 #[cfg(target_os = "linux")]
 fn cleanup_switch_taps(smac: &str) {
@@ -1108,19 +1206,31 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
                     }
                     #[cfg(target_os = "windows")]
                     {
-                        // Windows QEMU can't mcast bind (group address rejected) and
-                        // loopback doesn't carry multicast, so switch networking has
-                        // no equivalent single-command netdev. Fall back to user-mode
-                        // (SLIRP) so the VM at least boots with NAT; VM-to-VM traffic
-                        // over a switch is not supported on Windows without TAP-Windows.
-                        output_log.push_str(&format!(
-                            "switch : {} (skipped — switch net not supported on Windows; using NAT fallback)\n",
-                            adapter.switch_name
-                        ));
-                        qemu_args.push(format!(
-                            "user,id=net{}",
-                            adapter.netid
-                        ));
+                        // Windows: use TAP-Windows adapter per VM. install.bat
+                        // auto-installs the driver; we create/rename an adapter
+                        // on demand so each VM gets a dedicated NIC.
+                        let mac_clean = smac.replace(":", "");
+                        let mac_suffix = &mac_clean[mac_clean.len().saturating_sub(4)..];
+                        let tap_name = format!("vmt{}n{}", mac_suffix, adapter.netid);
+                        match setup_switch_tap_windows(&tap_name) {
+                            Ok(_) => {
+                                output_log.push_str(&format!(
+                                    "switch : {} → TAP adapter {}\n",
+                                    adapter.switch_name, tap_name
+                                ));
+                                qemu_args.push(format!(
+                                    "tap,id=net{},ifname={}",
+                                    adapter.netid, tap_name
+                                ));
+                            }
+                            Err(e) => {
+                                output_log.push_str(&format!(
+                                    "switch : {} (TAP setup failed: {} — falling back to NAT)\n",
+                                    adapter.switch_name, e
+                                ));
+                                qemu_args.push(format!("user,id=net{}", adapter.netid));
+                            }
+                        }
                     }
                     let _ = &sw;
                     let _ = switch_port;
@@ -1494,9 +1604,11 @@ pub fn stop(json_str: &str) -> Result<String, String> {
         serde_json::from_str(json_str).map_err(|e| format!("JSON parse error: {}", e))?;
     sanitize_name(&cmd.smac)?;
     let mut output = format!("now stopping compute {}\n", cmd.smac);
-    // Clean up TAP interfaces before stopping QEMU (Linux switch mode)
+    // Clean up TAP interfaces before stopping QEMU
     #[cfg(target_os = "linux")]
     cleanup_switch_taps(&cmd.smac);
+    #[cfg(target_os = "windows")]
+    cleanup_switch_taps_windows(&cmd.smac);
     let pctl_output = send_cmd_pctl("stop", &cmd.smac);
     output.push_str(&pctl_output);
     // Only mark stopped if the QEMU monitor command succeeded (no error reported)
@@ -1530,9 +1642,11 @@ pub fn powerdown(json_str: &str) -> Result<String, String> {
     if !std::path::Path::new(&sock_path).exists() {
         // Monitor socket gone = QEMU exited
         let _ = db::set_vm_status(&cmd.smac, "stopped");
-        // Clean up TAP interfaces (Linux switch mode)
+        // Clean up TAP interfaces
         #[cfg(target_os = "linux")]
         cleanup_switch_taps(&cmd.smac);
+        #[cfg(target_os = "windows")]
+        cleanup_switch_taps_windows(&cmd.smac);
         output.push_str("VM stopped.\n");
     } else {
         // QEMU still running — guest is shutting down
@@ -1553,9 +1667,11 @@ pub fn delete_vm(json_str: &str) -> Result<String, String> {
         }
     }
 
-    // Clean up any leftover TAP interfaces (Linux switch mode)
+    // Clean up any leftover TAP interfaces
     #[cfg(target_os = "linux")]
     cleanup_switch_taps(&cmd.smac);
+    #[cfg(target_os = "windows")]
+    cleanup_switch_taps_windows(&cmd.smac);
 
     let mut output = String::new();
     set_ma_mode("1", &cmd.smac);

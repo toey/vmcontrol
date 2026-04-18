@@ -132,6 +132,45 @@ if "!QEMU_MISSING!"=="1" (
     echo.
 )
 
+:: --- Step 2a.5: Auto-install TAP-Windows driver for VM-to-VM networking ---
+:: QEMU on Windows has no built-in L2 networking for multi-VM; TAP-Windows
+:: gives virtual NICs that vm_ctl attaches per switch adapter at VM start.
+set "TAP_CTL=C:\Program Files\TAP-Windows\bin\tapinstall.exe"
+if not exist "%TAP_CTL%" (
+    echo [INFO] TAP-Windows driver not found. Downloading...
+    set "TAP_URL=https://build.openvpn.net/downloads/releases/tap-windows-9.24.2-I601-Win10.exe"
+    set "TAP_SETUP=%TEMP%\tap-windows-setup.exe"
+    powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest '!TAP_URL!' -OutFile '!TAP_SETUP!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+    if !errorlevel! neq 0 (
+        echo [WARN] Failed to download TAP-Windows. Switch adapters will fall back to NAT.
+    ) else (
+        echo [INFO] Running silent install...
+        "!TAP_SETUP!" /S
+        if !errorlevel! neq 0 if !errorlevel! neq 3010 (
+            echo [WARN] TAP-Windows installer exited with code !errorlevel!.
+        ) else (
+            echo [OK]   TAP-Windows driver installed
+        )
+    )
+) else (
+    echo [OK]   TAP-Windows driver already present
+)
+
+:: Ensure at least one TAP adapter exists so QEMU can attach to it.
+:: tapinstall lists installed adapters; create one if none match tap0901.
+if exist "%TAP_CTL%" (
+    "%TAP_CTL%" hwids tap0901 2>nul | findstr /c:"TAP0901" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo [INFO] Creating initial TAP adapter ^(vmctl-tap0^)...
+        "%TAP_CTL%" install "C:\Program Files\TAP-Windows\driver\OemVista.inf" tap0901 >nul 2>&1
+        :: Rename newest "Ethernet N" / "Local Area Connection N" created by TAP driver.
+        powershell -NoProfile -Command "$a = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match 'TAP-Windows' } | Sort-Object -Property MediaConnectionState, ifIndex | Select-Object -First 1; if ($a) { Rename-NetAdapter -Name $a.Name -NewName 'vmctl-tap0' -ErrorAction SilentlyContinue; Enable-NetAdapter -Name 'vmctl-tap0' -Confirm:$false -ErrorAction SilentlyContinue }"
+        echo [OK]   TAP adapter vmctl-tap0 provisioned
+    )
+)
+
+echo.
+
 :: On ARM64, check for qemu-system-aarch64 as primary binary
 if /I "%ARCH%"=="ARM64" (
     if exist "%QEMU_AARCH64_PATH%" (
