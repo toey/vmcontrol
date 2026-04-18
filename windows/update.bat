@@ -54,6 +54,12 @@ if not exist ".git" (
     popd & pause & exit /b 1
 )
 
+:: When the repo sits on a shared volume (Parallels psf, SMB, WSL mount, etc.)
+:: git refuses to touch it with "detected dubious ownership". Add the current
+:: path to safe.directory for this user so fetch/pull succeed.
+git config --global --add safe.directory "%CD%" >nul 2>&1
+git config --global --add safe.directory "*" >nul 2>&1
+
 echo [INFO] Pulling latest from origin...
 git fetch --all --prune
 if !errorlevel! neq 0 (
