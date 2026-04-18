@@ -707,6 +707,13 @@ if not exist "%CONFIG_YAML%" (
         echo edk2_x86_vars: %EDK2_X86_VARS%
         echo swtpm_path: %SWTPM_PATH%
         echo mkisofs_path: %MKISOFS_PATH%
+        :: TCG tuning: qemu64 avoids the Haswell-v4 CPUID features TCG doesn't
+        :: emulate (pcid/invpcid/tsc-deadline/spec-ctrl). thread=multi gives each
+        :: vCPU its own host core. TCG is safe on Parallels (no nested virt);
+        :: switch qemu_accel to "whpx" on bare-metal Windows with Hyper-V
+        :: Platform enabled for hardware acceleration.
+        echo qemu_cpu_x86: qemu64
+        echo qemu_accel: tcg,thread=multi
         echo ctl_bin_path: C:\vmcontrol\bin
         echo pctl_path: C:\vmcontrol
         echo disk_path: C:\vmcontrol\disks
@@ -741,6 +748,16 @@ if not exist "%CONFIG_YAML%" (
     if !errorlevel! neq 0 (
         echo mkisofs_path: %MKISOFS_PATH%>> "%CONFIG_YAML%"
         echo [INFO] Added mkisofs_path to existing config.yaml
+    )
+    findstr /c:"qemu_cpu_x86" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo qemu_cpu_x86: qemu64>> "%CONFIG_YAML%"
+        echo [INFO] Added qemu_cpu_x86: qemu64 to existing config.yaml
+    )
+    findstr /c:"qemu_accel" "%CONFIG_YAML%" >nul 2>&1
+    if !errorlevel! neq 0 (
+        echo qemu_accel: tcg,thread=multi>> "%CONFIG_YAML%"
+        echo [INFO] Added qemu_accel: tcg,thread=multi to existing config.yaml
     )
 )
 
