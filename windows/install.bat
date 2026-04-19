@@ -210,6 +210,35 @@ if not exist "%SWTPM_PATH%" (
 )
 :after_swtpm
 
+:: --- Step 2a.8b: Auto-install NSSM (Windows service manager) ---
+:: NSSM gives us reliable service start/stop + stdout/stderr redirect to
+:: log files. Without it we fall back to Scheduled Task which swallows
+:: output, making failures invisible.
+where nssm >nul 2>&1
+if %errorlevel% neq 0 (
+    if not exist "%CTL_BIN%\nssm.exe" (
+        echo [INFO] NSSM not found. Downloading nssm 2.24 from nssm.cc...
+        set "NSSM_ZIP=%TEMP%\nssm.zip"
+        set "NSSM_DIR=%TEMP%\nssm-2.24"
+        powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://nssm.cc/release/nssm-2.24.zip' -OutFile '!NSSM_ZIP!' -UseBasicParsing; if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+        if !errorlevel! neq 0 (
+            echo [WARN] Failed to download NSSM. Falling back to Scheduled Task.
+        ) else (
+            if /I "%ARCH%"=="ARM64" (
+                :: No native ARM64 NSSM build; win64 binary runs under emulation.
+                copy /y "!NSSM_DIR!\win64\nssm.exe" "%CTL_BIN%\nssm.exe" >nul
+            ) else (
+                copy /y "!NSSM_DIR!\win64\nssm.exe" "%CTL_BIN%\nssm.exe" >nul
+            )
+            set "PATH=%CTL_BIN%;!PATH!"
+            echo [OK]   NSSM installed at %CTL_BIN%\nssm.exe
+        )
+    ) else (
+        set "PATH=%CTL_BIN%;!PATH!"
+        echo [OK]   NSSM already at %CTL_BIN%\nssm.exe
+    )
+)
+
 :: --- Step 2a.9: Auto-install websockify via pip (noVNC WebSocket proxy) ---
 if not exist "%WEBSOCKIFY_PATH%" (
     if exist "C:\msys64\mingw64\bin\python.exe" (
@@ -852,12 +881,15 @@ if %errorlevel% equ 0 (
     echo [WARN] NSSM not found. Using Scheduled Task as fallback...
     echo        Download NSSM: https://nssm.cc/download
     echo.
-    :: Create a launcher script that sets working directory before running.
+    :: Create a launcher script that sets working directory before running
+    :: and redirects stdout+stderr to a log (Scheduled Task swallows console
+    :: output, so without this the user never sees crash reasons).
     :: No VMCONTROL_API_KEY baked in -- server runs unauthenticated by default.
+    if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"
     (
         echo @echo off
         echo cd /d "%CTL_BIN%"
-        echo "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080
+        echo "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080 ^>^> "%LOG_DIR%\vm_ctl.stdout.log" 2^>^&1
     ) > "%CTL_BIN%\start_vmcontrol.bat"
     schtasks /delete /tn "%SERVICE_NAME%" /f >nul 2>&1
     schtasks /create /tn "%SERVICE_NAME%" /tr "\"%CTL_BIN%\start_vmcontrol.bat\"" /sc onstart /ru SYSTEM /f >nul
