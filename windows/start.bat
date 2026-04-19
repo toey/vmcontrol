@@ -1,6 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 set "SERVICE_NAME=vmcontrol"
+set "NSSM=C:\vmcontrol\bin\nssm.exe"
 
 net session >nul 2>&1
 if %errorlevel% neq 0 (
@@ -9,11 +10,10 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
-    nssm status %SERVICE_NAME% >nul 2>&1
+if exist "%NSSM%" (
+    "%NSSM%" status %SERVICE_NAME% >nul 2>&1
     if !errorlevel! equ 0 (
-        nssm start %SERVICE_NAME%
+        "%NSSM%" start %SERVICE_NAME%
         echo [OK] Service started via NSSM.
         goto :end
     )

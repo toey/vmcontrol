@@ -14,6 +14,7 @@ set "QEMU_IMG_PATH=C:\Program Files\qemu\qemu-img.exe"
 set "EDK2_AARCH64_BIOS=C:\Program Files\qemu\share\edk2-aarch64-code.fd"
 set "EDK2_X86_SECURE_CODE=C:\Program Files\qemu\share\edk2-x86_64-secure-code.fd"
 set "EDK2_X86_VARS=C:\Program Files\qemu\share\edk2-i386-vars.fd"
+set "NSSM=C:\vmcontrol\bin\nssm.exe"
 set "CTL_BIN=C:\vmcontrol\bin"
 set "CONFIG_YAML=C:\vmcontrol\bin\config.yaml"
 set "PCTL_PATH=C:\vmcontrol"
@@ -214,29 +215,21 @@ if not exist "%SWTPM_PATH%" (
 :: NSSM gives us reliable service start/stop + stdout/stderr redirect to
 :: log files. Without it we fall back to Scheduled Task which swallows
 :: output, making failures invisible.
-where nssm >nul 2>&1
-if %errorlevel% neq 0 (
-    if not exist "%CTL_BIN%\nssm.exe" (
-        echo [INFO] NSSM not found. Downloading nssm 2.24 from nssm.cc...
-        set "NSSM_ZIP=%TEMP%\nssm.zip"
-        set "NSSM_DIR=%TEMP%\nssm-2.24"
-        powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://nssm.cc/release/nssm-2.24.zip' -OutFile '!NSSM_ZIP!' -UseBasicParsing; if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
-        if !errorlevel! neq 0 (
-            echo [WARN] Failed to download NSSM. Falling back to Scheduled Task.
-        ) else (
-            if /I "%ARCH%"=="ARM64" (
-                :: No native ARM64 NSSM build; win64 binary runs under emulation.
-                copy /y "!NSSM_DIR!\win64\nssm.exe" "%CTL_BIN%\nssm.exe" >nul
-            ) else (
-                copy /y "!NSSM_DIR!\win64\nssm.exe" "%CTL_BIN%\nssm.exe" >nul
-            )
-            set "PATH=%CTL_BIN%;!PATH!"
-            echo [OK]   NSSM installed at %CTL_BIN%\nssm.exe
-        )
+if not exist "%CTL_BIN%" mkdir "%CTL_BIN%"
+if not exist "%NSSM%" (
+    echo [INFO] NSSM not found. Downloading nssm 2.24 from nssm.cc...
+    set "NSSM_ZIP=%TEMP%\nssm.zip"
+    set "NSSM_DIR=%TEMP%\nssm-2.24"
+    powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://nssm.cc/release/nssm-2.24.zip' -OutFile '!NSSM_ZIP!' -UseBasicParsing; if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+    if !errorlevel! neq 0 (
+        echo [WARN] Failed to download NSSM. Falling back to Scheduled Task.
     ) else (
-        set "PATH=%CTL_BIN%;!PATH!"
-        echo [OK]   NSSM already at %CTL_BIN%\nssm.exe
+        :: No native ARM64 NSSM build; win64 binary runs under emulation on ARM.
+        copy /y "!NSSM_DIR!\win64\nssm.exe" "%NSSM%" >nul
+        echo [OK]   NSSM installed at %NSSM%
     )
+) else (
+    echo [OK]   NSSM already at %NSSM%
 )
 
 :: --- Step 2a.9: Auto-install websockify via pip (noVNC WebSocket proxy) ---
@@ -330,12 +323,11 @@ echo.
 
 :: --- Step 2b: Stop old processes before build ---
 echo [INFO] Checking for running vm_ctl processes...
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
-    nssm status %SERVICE_NAME% >nul 2>&1
+if exist "%NSSM%" (
+    "%NSSM%" status %SERVICE_NAME% >nul 2>&1
     if !errorlevel! equ 0 (
         echo [INFO] Stopping existing NSSM service...
-        nssm stop %SERVICE_NAME% >nul 2>&1
+        "%NSSM%" stop %SERVICE_NAME% >nul 2>&1
         echo [OK]   Service stopped
     )
 )
@@ -714,13 +706,14 @@ if exist "%VIRTIO_DEST%" (
 echo.
 
 :: --- Step 5: Remove existing service (already stopped in Step 2b) ---
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
-    nssm status %SERVICE_NAME% >nul 2>&1
+if exist "%NSSM%" (
+    "%NSSM%" status %SERVICE_NAME% >nul 2>&1
     if !errorlevel! equ 0 (
-        nssm remove %SERVICE_NAME% confirm >nul 2>&1
+        "%NSSM%" remove %SERVICE_NAME% confirm >nul 2>&1
     )
 )
+:: Also delete any stale Scheduled Task so NSSM install below doesn't conflict
+schtasks /delete /tn "%SERVICE_NAME%" /f >nul 2>&1
 
 :: --- Step 6: Copy binary and static files ---
 echo [INFO] Installing binary and static files...
@@ -861,21 +854,20 @@ echo.
 :: --- Step 9: Set up Windows Service ---
 echo [INFO] Setting up Windows service...
 
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
+if exist "%NSSM%" (
     echo [INFO] Installing service via NSSM...
-    nssm install %SERVICE_NAME% "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080
-    nssm set %SERVICE_NAME% AppDirectory "%CTL_BIN%"
-    nssm set %SERVICE_NAME% DisplayName "vmcontrol VM Management Server"
-    nssm set %SERVICE_NAME% Description "QEMU VM management control panel"
-    nssm set %SERVICE_NAME% Start SERVICE_AUTO_START
-    nssm set %SERVICE_NAME% AppStdout "%LOG_DIR%\vm_ctl.stdout.log"
-    nssm set %SERVICE_NAME% AppStderr "%LOG_DIR%\vm_ctl.stderr.log"
-    nssm set %SERVICE_NAME% AppRotateFiles 1
-    nssm set %SERVICE_NAME% AppRotateBytes 10485760
+    "%NSSM%" install %SERVICE_NAME% "%CTL_BIN%\vm_ctl.exe" server 0.0.0.0:8080
+    "%NSSM%" set %SERVICE_NAME% AppDirectory "%CTL_BIN%"
+    "%NSSM%" set %SERVICE_NAME% DisplayName "vmcontrol VM Management Server"
+    "%NSSM%" set %SERVICE_NAME% Description "QEMU VM management control panel"
+    "%NSSM%" set %SERVICE_NAME% Start SERVICE_AUTO_START
+    "%NSSM%" set %SERVICE_NAME% AppStdout "%LOG_DIR%\vm_ctl.stdout.log"
+    "%NSSM%" set %SERVICE_NAME% AppStderr "%LOG_DIR%\vm_ctl.stderr.log"
+    "%NSSM%" set %SERVICE_NAME% AppRotateFiles 1
+    "%NSSM%" set %SERVICE_NAME% AppRotateBytes 10485760
     :: Don't bake VMCONTROL_API_KEY into the service env -- leave auth off.
-    nssm set %SERVICE_NAME% AppEnvironmentExtra "" >nul 2>&1
-    nssm start %SERVICE_NAME%
+    "%NSSM%" set %SERVICE_NAME% AppEnvironmentExtra "" >nul 2>&1
+    "%NSSM%" start %SERVICE_NAME%
     echo [OK]   Service installed and started via NSSM
 ) else (
     echo [WARN] NSSM not found. Using Scheduled Task as fallback...
@@ -929,14 +921,14 @@ if "!HEALTH_HTTP!"=="200" (
 ) else if "!HEALTH_HTTP!"=="401" (
     echo [WARN] /api/vm/list returned 401 -- stale API key still in service env
     echo [INFO] Killing service + retrying after clean env...
-    where nssm >nul 2>&1 && nssm stop %SERVICE_NAME% >nul 2>&1
+    if exist "%NSSM%" "%NSSM%" stop %SERVICE_NAME% >nul 2>&1
     schtasks /end /tn %SERVICE_NAME% >nul 2>&1
     taskkill /f /im vm_ctl.exe >nul 2>&1
     timeout /t 2 /nobreak >nul
-    where nssm >nul 2>&1 && (
-        nssm set %SERVICE_NAME% AppEnvironmentExtra "" >nul 2>&1
-        nssm start %SERVICE_NAME%
-    ) || (
+    if exist "%NSSM%" (
+        "%NSSM%" set %SERVICE_NAME% AppEnvironmentExtra "" >nul 2>&1
+        "%NSSM%" start %SERVICE_NAME%
+    ) else (
         schtasks /delete /tn %SERVICE_NAME% /f >nul 2>&1
         schtasks /create /tn %SERVICE_NAME% /tr "\"%CTL_BIN%\start_vmcontrol.bat\"" /sc onstart /ru SYSTEM /f >nul
         schtasks /run /tn %SERVICE_NAME% >nul 2>&1
@@ -952,9 +944,9 @@ if "!HEALTH_HTTP!"=="200" (
     echo [WARN] /api/vm/list returned '!HEALTH_HTTP!' -- service not responding
     echo [INFO] Attempting to (re)start the service...
     taskkill /f /im vm_ctl.exe >nul 2>&1
-    where nssm >nul 2>&1 && (
-        nssm start %SERVICE_NAME% >nul 2>&1
-    ) || (
+    if exist "%NSSM%" (
+        "%NSSM%" start %SERVICE_NAME% >nul 2>&1
+    ) else (
         schtasks /run /tn %SERVICE_NAME% >nul 2>&1
     )
     timeout /t 5 /nobreak >nul
@@ -1003,8 +995,7 @@ echo.
 echo   Web UI:      http://localhost:8080
 echo   API Key:     (not set — open in browser directly; use "Generate New Key" in UI to enable auth)
 echo.
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
+if exist "%NSSM%" (
     echo   Service:     %SERVICE_NAME% ^(NSSM^)
 ) else (
     echo   Service:     %SERVICE_NAME% ^(Scheduled Task^)

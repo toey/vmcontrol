@@ -2,6 +2,7 @@
 setlocal enabledelayedexpansion
 set "SERVICE_NAME=vmcontrol"
 set "LOG_DIR=C:\vmcontrol\logs"
+set "NSSM=C:\vmcontrol\bin\nssm.exe"
 
 echo ================================================================
 echo   vmcontrol service status
@@ -9,13 +10,12 @@ echo ================================================================
 
 set "FOUND=0"
 
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
-    nssm status %SERVICE_NAME% >nul 2>&1
+if exist "%NSSM%" (
+    "%NSSM%" status %SERVICE_NAME% >nul 2>&1
     if !errorlevel! equ 0 (
         echo.
         echo [NSSM] Service state:
-        nssm status %SERVICE_NAME%
+        "%NSSM%" status %SERVICE_NAME%
         set "FOUND=1"
     )
 )
@@ -45,10 +45,16 @@ if %errorlevel% neq 0 echo   (nothing listening on :8080)
 
 echo.
 echo [Recent log tail -- last 20 lines]
+if exist "%LOG_DIR%\vm_ctl.stdout.log" (
+    echo --- stdout.log ---
+    powershell -NoProfile -Command "Get-Content -Path '%LOG_DIR%\vm_ctl.stdout.log' -Tail 20"
+)
 if exist "%LOG_DIR%\vm_ctl.stderr.log" (
+    echo --- stderr.log ---
     powershell -NoProfile -Command "Get-Content -Path '%LOG_DIR%\vm_ctl.stderr.log' -Tail 20"
-) else (
-    echo   (no log file at %LOG_DIR%\vm_ctl.stderr.log)
+)
+if not exist "%LOG_DIR%\vm_ctl.stdout.log" if not exist "%LOG_DIR%\vm_ctl.stderr.log" (
+    echo   (no log files in %LOG_DIR%)
 )
 echo.
 pause

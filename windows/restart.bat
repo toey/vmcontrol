@@ -2,6 +2,7 @@
 setlocal enabledelayedexpansion
 set "SERVICE_NAME=vmcontrol"
 set "SCRIPT_DIR=%~dp0"
+set "NSSM=C:\vmcontrol\bin\nssm.exe"
 
 net session >nul 2>&1
 if %errorlevel% neq 0 (
@@ -10,11 +11,10 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-where nssm >nul 2>&1
-if %errorlevel% equ 0 (
-    nssm status %SERVICE_NAME% >nul 2>&1
+if exist "%NSSM%" (
+    "%NSSM%" status %SERVICE_NAME% >nul 2>&1
     if !errorlevel! equ 0 (
-        nssm restart %SERVICE_NAME%
+        "%NSSM%" restart %SERVICE_NAME%
         echo [OK] NSSM service restarted.
         timeout /t 2 >nul
         echo [INFO] Web UI: http://localhost:8080
