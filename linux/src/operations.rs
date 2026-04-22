@@ -320,17 +320,25 @@ fn cleanup_switch_taps(smac: &str) {
 /// savevm refuses to run if any writable device backed by raw is attached, so NVRAM must be qcow2.
 /// Idempotent: returns Ok if already qcow2 or if file is missing (caller creates it later).
 fn ensure_nvram_qcow2(nvram_file: &str) -> Result<(), String> {
+    use std::io::Read;
     if !std::path::Path::new(nvram_file).exists() {
         return Ok(());
     }
+    // Cheap format check: qcow2 files start with the "QFI\xfb" magic.
+    // Reading the first 4 bytes works even when QEMU is holding a write
+    // lock on the file (the locked-file path triggered
+    // "Failed to get shared write lock" with qemu-img info).
+    let mut magic = [0u8; 4];
+    if let Ok(mut f) = std::fs::File::open(nvram_file) {
+        let _ = f.read(&mut magic);
+    }
+    if &magic == b"QFI\xfb" {
+        return Ok(());
+    }
+
     let qemu_img = get_conf("qemu_img_path");
     if qemu_img.is_empty() {
         return Err("qemu_img_path not configured".into());
-    }
-    let info = crate::ssh::run_cmd(&qemu_img, &["info", "--output=json", nvram_file])
-        .unwrap_or_default();
-    if info.contains("\"format\": \"qcow2\"") {
-        return Ok(());
     }
     let tmp = format!("{}.qcow2.tmp", nvram_file);
     let _ = std::fs::remove_file(&tmp);
@@ -1705,6 +1713,12 @@ pub fn start(json_str: &str) -> Result<String, String> {
 
     // Load VM config from database
     let vm = db::get_vm(&cmd.smac)?;
+    if vm.status == "running" {
+        return Err(format!(
+            "VM '{}' is already running — stop it first before starting again",
+            cmd.smac
+        ));
+    }
     let cfg: VmStartConfig =
         serde_json::from_str(&vm.config).map_err(|e| format!("Config parse error: {}", e))?;
 
