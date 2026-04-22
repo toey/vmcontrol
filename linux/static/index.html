@@ -7,20 +7,6 @@
     <link rel="stylesheet" href="/style.css?v=7">
 </head>
 <body>
-    <!-- Login Overlay (shown when API key is required but not set) -->
-    <div id="login-overlay" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);z-index:9999;justify-content:center;align-items:center;">
-        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px 40px;max-width:420px;width:90%;text-align:center;">
-            <h2 style="color:#c9d1d9;margin:0 0 8px 0;">VM Control Panel</h2>
-            <p style="color:#8b949e;margin:0 0 20px 0;">Enter your API Key to continue</p>
-            <input type="password" id="login-apikey-input" placeholder="VMCONTROL_API_KEY" style="width:100%;padding:10px 14px;background:#0d1117;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;font-family:monospace;font-size:0.95em;box-sizing:border-box;margin-bottom:12px;">
-            <div id="login-error" style="color:#f85149;font-size:0.85em;margin-bottom:12px;display:none;"></div>
-            <div style="display:flex;gap:8px;">
-                <button onclick="submitLogin()" style="flex:1;padding:10px;background:#238636;border:none;color:#fff;border-radius:6px;font-size:1em;cursor:pointer;">Login</button>
-                <button onclick="generateAndLogin()" style="flex:1;padding:10px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;font-size:1em;cursor:pointer;">Generate New Key</button>
-            </div>
-        </div>
-    </div>
-
     <header>
         <h1>VM Control Panel</h1>
         <p class="subtitle">QEMU / KVM Management</p>

@@ -28,11 +28,26 @@ pub fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
 /// Used for QEMU instead of -daemonize which has WebSocket VNC bugs.
 /// Returns (pid, log_path) so caller can check logs on failure.
 pub fn spawn_background(program: &str, args: &[&str]) -> Result<(u32, String), String> {
+    // Prefer {pctl_path}/logs/ but fall back to a user-writable dir if we
+    // can't create or write there (common when vm_ctl runs as a regular user
+    // against a root-owned install tree, e.g. the desktop app on macOS).
     let pctl_path = std::path::PathBuf::from(crate::config::get_conf("pctl_path"));
-    let _ = std::fs::create_dir_all(pctl_path.join("logs"));
-    let log_path = pctl_path.join(format!("logs/qemu_{}.log", std::process::id()));
-    let log_file = std::fs::File::create(&log_path)
-        .map_err(|e| format!("unable to create log file: {}", e))?;
+    let file_name = format!("qemu_{}.log", std::process::id());
+    let primary_dir = pctl_path.join("logs");
+    let primary = primary_dir.join(&file_name);
+    let _ = std::fs::create_dir_all(&primary_dir);
+    let (log_path, log_file) = match std::fs::File::create(&primary) {
+        Ok(f) => (primary, f),
+        Err(_) => {
+            let fallback_dir = std::env::temp_dir().join("vmcontrol-logs");
+            let _ = std::fs::create_dir_all(&fallback_dir);
+            let fallback = fallback_dir.join(&file_name);
+            let f = std::fs::File::create(&fallback)
+                .map_err(|e| format!("unable to create log file at {} or {}: {}",
+                    primary.display(), fallback.display(), e))?;
+            (fallback, f)
+        }
+    };
     let log_file2 = log_file.try_clone()
         .map_err(|e| format!("unable to clone log handle: {}", e))?;
     let mut child = Command::new(program)

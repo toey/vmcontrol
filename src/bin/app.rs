@@ -71,11 +71,28 @@ fn spawn_server() -> Option<Child> {
         return None;
     }
 
+    // Pick a cwd that has ./static next to it so the Files service resolves.
+    // Walk upward from the binary dir looking for a sibling static/app.js;
+    // this covers both production installs (static/ next to vm_ctl[.exe])
+    // and dev checkouts (static/ at repo root, binary in target/release/).
+    let server_cwd = {
+        let mut candidate = Some(dir.clone());
+        let mut chosen = dir.clone();
+        while let Some(d) = candidate {
+            if d.join("static").join("app.js").exists() {
+                chosen = d;
+                break;
+            }
+            candidate = d.parent().map(|p| p.to_path_buf());
+        }
+        chosen
+    };
+
     let bind = format!("{}:{}", BIND_HOST, BIND_PORT);
     let mut cmd = Command::new(&server_bin);
     cmd.arg("server")
         .arg(&bind)
-        .current_dir(&dir)
+        .current_dir(&server_cwd)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 

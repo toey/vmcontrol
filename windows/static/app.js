@@ -1,178 +1,21 @@
 // ──────────────────────────────────────────
-// API Key Authentication Helper
+// Fetch wrapper (no auth — server is always unauthenticated).
+// Kept as a thin wrapper so callers can still centralise headers
+// and future-proof in case we re-add auth later.
 // ──────────────────────────────────────────
-var _authLocked = false; // prevent multiple login overlays
-function getApiKey() {
-    return localStorage.getItem('vmcontrol_api_key') || '';
-}
-function setApiKey(key) {
-    if (key) localStorage.setItem('vmcontrol_api_key', key);
-    else localStorage.removeItem('vmcontrol_api_key');
-}
-function apiHeaders(extra) {
-    var h = extra || {};
-    var key = getApiKey();
-    if (key) h['X-API-Key'] = key;
-    return h;
-}
-function showLoginOverlay(msg) {
-    if (_authLocked) return;
-    _authLocked = true;
-    var overlay = document.getElementById('login-overlay');
-    var errEl = document.getElementById('login-error');
-    if (msg) { errEl.textContent = msg; errEl.style.display = 'block'; }
-    else { errEl.style.display = 'none'; }
-    overlay.style.display = 'flex';
-    var input = document.getElementById('login-apikey-input');
-    input.value = '';
-    setTimeout(function() { input.focus(); }, 100);
-}
-function submitLogin() {
-    var input = document.getElementById('login-apikey-input');
-    var key = input.value.trim();
-    if (!key) return;
-    // Test the key with a simple API call
-    fetch('/api/vm/list', { headers: { 'X-API-Key': key } }).then(function(res) {
-        if (res.status === 401) {
-            document.getElementById('login-error').textContent = 'Invalid API key';
-            document.getElementById('login-error').style.display = 'block';
-            input.value = '';
-            input.focus();
-        } else {
-            setApiKey(key);
-            document.getElementById('login-overlay').style.display = 'none';
-            _authLocked = false;
-            initApp(); // load all data
-        }
-    });
-}
-// Allow Enter key to submit login
-document.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter' && document.getElementById('login-overlay').style.display === 'flex') {
-        submitLogin();
-    }
-});
-// Generate a new API key from the login overlay.
-// If a key already exists on the server, the current key must be provided for auth.
-// First-time setup (no key yet) works without auth.
-async function generateAndLogin() {
-    var errEl = document.getElementById('login-error');
-    errEl.textContent = 'Generating new API key...';
-    errEl.style.display = 'block';
-    errEl.style.color = '#8b949e';
-    try {
-        // Send current key from input field (if any) for authentication
-        var currentKey = document.getElementById('login-apikey-input').value.trim();
-        var headers = { 'Content-Type': 'application/json' };
-        if (currentKey) headers['X-API-Key'] = currentKey;
-        var res = await fetch('/api/apikey/generate', { method: 'POST', headers: headers });
-        if (res.status === 401) throw new Error('A key already exists. Enter your current key first, then click Generate.');
-        if (!res.ok) throw new Error('Server returned HTTP ' + res.status);
-        var text = await res.text();
-        var data;
-        try { data = JSON.parse(text); } catch (_) { throw new Error('Invalid response from server'); }
-        if (data && data.api_key) {
-            setApiKey(data.api_key);
-            document.getElementById('login-apikey-input').value = data.api_key;
-            errEl.textContent = 'New API key generated! Click Login or press Enter.';
-            errEl.style.color = '#3fb950';
-        } else {
-            errEl.textContent = 'Failed to generate API key';
-            errEl.style.color = '#f85149';
-        }
-    } catch (e) {
-        errEl.textContent = 'Error: ' + e.message;
-        errEl.style.color = '#f85149';
-    }
-}
-// Wrapper for fetch that handles 401 (auth required)
+function getApiKey() { return ''; }
+function setApiKey() {}
+function apiHeaders(extra) { return extra || {}; }
 async function apiFetch(url, opts) {
     opts = opts || {};
-    opts.headers = apiHeaders(opts.headers || {});
-    var res = await fetch(url, opts);
-    if (res.status === 401) {
-        showLoginOverlay('Session expired. Please re-enter your API key.');
-    }
-    return res;
+    opts.headers = opts.headers || {};
+    return fetch(url, opts);
 }
-
-// ──────────────────────────────────────────
-// API Key Management UI
-// ──────────────────────────────────────────
-async function loadApikey() {
-    try {
-        var response = await apiFetch('/api/apikey');
-        var data = await safeJson(response);
-        if (data && data.api_key) {
-            document.getElementById('apikey-display').value = data.api_key;
-            // Sync to localStorage
-            setApiKey(data.api_key);
-        } else {
-            document.getElementById('apikey-display').value = '';
-            document.getElementById('apikey-display').placeholder = '(not set)';
-        }
-    } catch (e) {
-        console.error('Failed to load API key:', e);
-    }
-}
-
-function toggleApikeyVisibility() {
-    var inp = document.getElementById('apikey-display');
-    var btn = document.getElementById('apikey-toggle-btn');
-    if (inp.type === 'password') {
-        inp.type = 'text';
-        btn.textContent = 'Hide';
-    } else {
-        inp.type = 'password';
-        btn.textContent = 'Show';
-    }
-}
-
-function copyApikey() {
-    var inp = document.getElementById('apikey-display');
-    var key = inp.value;
-    if (!key) return;
-    navigator.clipboard.writeText(key).then(function() {
-        var statusEl = document.getElementById('status-indicator');
-        statusEl.className = 'success';
-        statusEl.textContent = 'API key copied to clipboard';
-    }).catch(function() {
-        // Fallback
-        inp.type = 'text';
-        inp.select();
-        document.execCommand('copy');
-        inp.type = 'password';
-    });
-}
-
-async function generateApikey() {
-    if (!confirm('Generate a new API key? The current key will be replaced.\n\nYou will need to update all clients with the new key.')) return;
-    var statusEl = document.getElementById('status-indicator');
-    statusEl.className = 'loading';
-    statusEl.textContent = 'Generating new API key...';
-    try {
-        var response = await apiFetch('/api/apikey/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: '{}',
-        });
-        var data = await safeJson(response);
-        if (data && data.success) {
-            // Update localStorage with new key
-            setApiKey(data.api_key);
-            // Update display
-            document.getElementById('apikey-display').value = data.api_key;
-            statusEl.className = 'success';
-            statusEl.textContent = 'API key generated successfully';
-        } else {
-            statusEl.className = 'error';
-            statusEl.textContent = 'Error: ' + (data ? data.message : 'Unknown error');
-        }
-    } catch (err) {
-        statusEl.className = 'error';
-        statusEl.textContent = 'Error: ' + err.message;
-    }
-}
+// Stubs for any call sites that still reference the old UI elements.
+async function loadApikey() { /* removed */ }
+function toggleApikeyVisibility() {}
+function copyApikey() {}
+async function generateApikey() {}
 
 // HTML entity escaping to prevent XSS when inserting server data into innerHTML
 function escapeHtml(str) {
@@ -439,8 +282,6 @@ window.uploadTemplateImage = function() {
 
     var xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/image/upload', true);
-    var key = localStorage.getItem('vmcontrol_api_key') || '';
-    if (key) xhr.setRequestHeader('X-API-Key', key);
     var safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
     if (safeName.indexOf('template-') !== 0) safeName = 'template-' + safeName;
     xhr.setRequestHeader('X-Filename', safeName);
@@ -1731,7 +1572,7 @@ function importVm() {
     xhr.open('POST', '/api/vm/import');
     xhr.setRequestHeader('X-Filename', file.name);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+    // no auth header
 
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
@@ -1823,7 +1664,7 @@ function importGroup() {
     xhr.open('POST', '/api/group/import');
     xhr.setRequestHeader('X-Filename', file.name);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+    // no auth header
 
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
@@ -2156,7 +1997,7 @@ async function uploadImage() {
     xhr.open('POST', '/api/image/upload');
     xhr.setRequestHeader('X-Filename', file.name);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+    // no auth header
 
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
@@ -2344,7 +2185,7 @@ async function uploadIso() {
     xhr.open('POST', '/api/iso/upload');
     xhr.setRequestHeader('X-Filename', file.name);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    if (getApiKey()) xhr.setRequestHeader('X-API-Key', getApiKey());
+    // no auth header
 
     xhr.upload.onprogress = function(e) {
         if (e.lengthComputable) {
@@ -3311,23 +3152,9 @@ function initApp() {
     loadImageMappings();
     loadOsTemplates();
     loadVfioDevices();
-    loadApikey();
 }
 window.addEventListener('DOMContentLoaded', function() {
-    // Check auth first — if API key is required and missing/invalid, show login overlay
-    var key = getApiKey();
-    var headers = {};
-    if (key) headers['X-API-Key'] = key;
-    fetch('/api/vm/list', { headers: headers }).then(function(res) {
-        if (res.status === 401) {
-            showLoginOverlay();
-        } else {
-            initApp();
-        }
-    }).catch(function() {
-        // Network error — try loading anyway
-        initApp();
-    });
+    initApp();
 });
 
 // ──────────────────────────────────────────

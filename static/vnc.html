@@ -208,19 +208,12 @@
             return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
         }
 
-        // API key helper — read from localStorage (shared with main app)
-        function getApiKey() {
-            return localStorage.getItem('vmcontrol_api_key') || '';
-        }
-        function authHeaders(extra) {
-            var h = extra || {};
-            var key = getApiKey();
-            if (key) h['X-API-Key'] = key;
-            return h;
-        }
+        // Auth is disabled server-side — apiFetch is a thin fetch wrapper.
+        function getApiKey() { return ''; }
+        function authHeaders(extra) { return extra || {}; }
         async function apiFetch(url, opts) {
             opts = opts || {};
-            opts.headers = authHeaders(opts.headers || {});
+            opts.headers = opts.headers || {};
             return fetch(url, opts);
         }
 

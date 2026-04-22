@@ -1,18 +1,12 @@
 use actix_files as fs;
-use actix_web::{dev, middleware, web, App, HttpResponse, HttpServer};
+use actix_web::{middleware, web, App, HttpResponse, HttpServer};
 use std::collections::HashMap;
-use std::future::{ready, Future, Ready};
-use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use crate::config::get_conf;
 use crate::mds;
 use crate::models::ApiResponse;
 use crate::operations;
-
-/// Shared API key state for runtime updates
-pub type SharedApiKey = Arc<Mutex<String>>;
 
 /// One-time VNC access token
 #[derive(Clone)]
@@ -23,124 +17,6 @@ pub struct VncToken {
 
 /// Shared VNC token store
 pub type VncTokenStore = Arc<Mutex<HashMap<String, VncToken>>>;
-
-// ──────────────────────────────────────────
-// API Key Authentication Middleware
-// ──────────────────────────────────────────
-
-/// Optional API key authentication.
-/// Set env VMCONTROL_API_KEY to enable. If unset, all requests are allowed.
-pub struct ApiKeyAuth(pub SharedApiKey);
-
-impl<S, B> dev::Transform<S, dev::ServiceRequest> for ApiKeyAuth
-where
-    S: dev::Service<dev::ServiceRequest, Response = dev::ServiceResponse<B>, Error = actix_web::Error> + 'static,
-    B: 'static,
-{
-    type Response = dev::ServiceResponse<B>;
-    type Error = actix_web::Error;
-    type InitError = ();
-    type Transform = ApiKeyAuthMiddleware<S>;
-    type Future = Ready<Result<Self::Transform, Self::InitError>>;
-
-    fn new_transform(&self, service: S) -> Self::Future {
-        ready(Ok(ApiKeyAuthMiddleware {
-            service: Rc::new(service),
-            api_key: self.0.clone(),
-        }))
-    }
-}
-
-pub struct ApiKeyAuthMiddleware<S> {
-    service: Rc<S>,
-    api_key: SharedApiKey,
-}
-
-impl<S, B> dev::Service<dev::ServiceRequest> for ApiKeyAuthMiddleware<S>
-where
-    S: dev::Service<dev::ServiceRequest, Response = dev::ServiceResponse<B>, Error = actix_web::Error> + 'static,
-    B: 'static,
-{
-    type Response = dev::ServiceResponse<B>;
-    type Error = actix_web::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>>>>;
-
-    dev::forward_ready!(service);
-
-    fn call(&self, req: dev::ServiceRequest) -> Self::Future {
-        let svc = self.service.clone();
-        let api_key_lock = self.api_key.clone();
-
-        Box::pin(async move {
-            let api_key = match api_key_lock.lock() {
-                Ok(guard) => guard.clone(),
-                Err(poisoned) => poisoned.into_inner().clone(),
-            };
-
-            // No API key configured = no auth required
-            if api_key.is_empty() {
-                return svc.call(req).await;
-            }
-
-            // Skip auth for static files, EC2 metadata endpoints, and VNC token resolve
-            let path = req.path().to_string();
-            if !path.starts_with("/api/") {
-                return svc.call(req).await;
-            }
-            if path.starts_with("/api/vnc/resolve/") {
-                return svc.call(req).await;
-            }
-            // Allow phone-home callback from VMs without API key
-            if path.ends_with("/phone-home") && path.starts_with("/api/vm/") {
-                return svc.call(req).await;
-            }
-            // Allow /api/apikey/generate without auth when .api_key file has been
-            // deleted (e.g., by install.sh before rebuild). Even if the server still
-            // has an old key in memory, the missing file signals a fresh install.
-            // Only bypasses if the key did NOT come from VMCONTROL_API_KEY env var.
-            if path == "/api/apikey/generate"
-                && req.method() == actix_web::http::Method::POST
-                && std::env::var("VMCONTROL_API_KEY").unwrap_or_default().is_empty()
-            {
-                let pctl_path = crate::config::get_conf("pctl_path");
-                let key_file = format!("{}/.api_key", pctl_path);
-                if !std::path::Path::new(&key_file).exists() {
-                    return svc.call(req).await;
-                }
-            }
-
-            // Check X-API-Key header
-            let provided = req.headers()
-                .get("X-API-Key")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("");
-
-            // Constant-time comparison to prevent timing attacks
-            let key_match = constant_time_eq(provided.as_bytes(), api_key.as_bytes());
-            if key_match {
-                svc.call(req).await
-            } else {
-                Err(actix_web::error::ErrorUnauthorized(
-                    "Invalid or missing API key. Set X-API-Key header."
-                ))
-            }
-        })
-    }
-}
-
-/// Constant-time byte comparison to prevent timing attacks on API key validation.
-/// Returns false immediately if lengths differ (length is not secret), but compares
-/// all bytes when lengths match to avoid leaking content via timing.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
 
 // ──────────────────────────────────────────
 // API Handlers
@@ -4247,61 +4123,6 @@ async fn host_ram_handler() -> HttpResponse {
 }
 
 // ──────────────────────────────────────────
-// API Key Management Handlers
-// ──────────────────────────────────────────
-
-async fn get_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
-    let key = match key_state.lock() {
-        Ok(guard) => guard.clone(),
-        Err(poisoned) => poisoned.into_inner().clone(),
-    };
-    HttpResponse::Ok().json(serde_json::json!({
-        "api_key": key,
-        "enabled": !key.is_empty(),
-    }))
-}
-
-async fn generate_apikey_handler(key_state: web::Data<SharedApiKey>) -> HttpResponse {
-    // Generate 64-char hex key using shared random source
-    let bytes = operations::read_urandom_bytes(32);
-    let new_key = bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
-
-    // Update shared state
-    {
-        let mut key = match key_state.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        *key = new_key.clone();
-    }
-
-    // Save to .api_key file with restrictive permissions
-    let pctl_path = get_conf("pctl_path");
-    let key_file = format!("{}/.api_key", pctl_path);
-    if let Err(e) = std::fs::write(&key_file, &new_key) {
-        eprintln!("Failed to save API key to {}: {}", key_file, e);
-    } else {
-        // Set permissions to owner-only (0600)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&key_file, std::fs::Permissions::from_mode(0o600));
-        }
-    }
-
-    // Also update env var for this process
-    std::env::set_var("VMCONTROL_API_KEY", &new_key);
-
-    println!("API key regenerated");
-
-    HttpResponse::Ok().json(serde_json::json!({
-        "success": true,
-        "api_key": new_key,
-        "message": "API key generated. Update your client with the new key.",
-    }))
-}
-
-// ──────────────────────────────────────────
 // Disk File Editor handlers
 // ──────────────────────────────────────────
 
@@ -4483,34 +4304,27 @@ fn cleanup_stale_seed_isos() {
 pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     env_logger::init();
 
-    // Read API key from environment or .api_key file
-    let mut api_key = std::env::var("VMCONTROL_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        // Try reading from .api_key file
+    // API key auth is not supported — the server is always unauthenticated.
+    // Legacy .api_key files are ignored so previous installs don't re-enable
+    // auth accidentally.
+    {
         let pctl_path = get_conf("pctl_path");
         let key_file = format!("{}/.api_key", pctl_path);
-        if let Ok(key) = std::fs::read_to_string(&key_file) {
-            let key = key.trim().to_string();
-            if !key.is_empty() {
-                api_key = key;
-                println!("API key loaded from {}", key_file);
+        if std::path::Path::new(&key_file).exists() {
+            if let Err(e) = std::fs::remove_file(&key_file) {
+                eprintln!("note: could not remove stale {}: {}", key_file, e);
+            } else {
+                println!("removed stale {} (auth disabled)", key_file);
             }
         }
     }
-    if api_key.is_empty() {
-        println!("WARNING: No VMCONTROL_API_KEY set — API is unauthenticated");
-    } else {
-        println!("API key authentication enabled");
-    }
+    std::env::remove_var("VMCONTROL_API_KEY");
 
     // Repair VMs missing mds IPs (from old update_config bug)
     operations::repair_missing_mds_ips();
 
     // Cleanup stale seed ISOs from deleted VMs
     cleanup_stale_seed_isos();
-
-    // Shared API key state for runtime updates
-    let shared_api_key: SharedApiKey = Arc::new(Mutex::new(api_key));
 
     // Shared VNC token store (one-time tokens)
     let vnc_tokens: VncTokenStore = Arc::new(Mutex::new(HashMap::new()));
@@ -4569,21 +4383,15 @@ pub async fn start_server(bind_addr: &str) -> std::io::Result<()> {
     }
 
     // Main control panel + MDS on main port
-    let api_key_for_server = shared_api_key.clone();
     let vnc_tokens_for_server = vnc_tokens.clone();
     let mounted_disks_for_server = mounted_disks.clone();
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
-            .wrap(ApiKeyAuth(api_key_for_server.clone()))
-            .app_data(web::Data::new(api_key_for_server.clone()))
             .app_data(web::Data::new(vnc_tokens_for_server.clone()))
             .app_data(web::Data::new(mounted_disks_for_server.clone()))
             // Allow up to 16GB uploads for large disk images and ISOs
             .app_data(web::PayloadConfig::new(17_179_869_184))
-            // API key management routes
-            .route("/api/apikey", web::get().to(get_apikey_handler))
-            .route("/api/apikey/generate", web::post().to(generate_apikey_handler))
             // API routes
             .route("/api/vm/start", web::post().to(start_vm))
             .route("/api/vm/stop", web::post().to(stop_vm))
