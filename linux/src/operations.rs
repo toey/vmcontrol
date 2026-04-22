@@ -1657,12 +1657,27 @@ fn start_vm_with_config(smac: &str, cfg: &VmStartConfig) -> Result<String, Strin
     let (pid, log_path) = if use_sudo {
         let sudo_path = get_conf_or("bridge_sudo_path", "/usr/bin/sudo");
         output_log.push_str("SUDO: bridge mode requires elevated privileges\n");
-        let mut sudo_args: Vec<String> = vec![qemu_path.clone()];
+        // `-n` = non-interactive. vm_ctl runs under a service / the desktop
+        // app with no tty, so an interactive password prompt would hang
+        // forever. Fail fast instead and tell the user what to grant.
+        let mut sudo_args: Vec<String> = vec!["-n".to_string(), qemu_path.clone()];
         sudo_args.extend(qemu_args.iter().cloned());
-        output_log.push_str(&format!("QEMU: {} {} {}\n", sudo_path, qemu_path, qemu_args.join(" ")));
+        output_log.push_str(&format!("QEMU: {} -n {} {}\n", sudo_path, qemu_path, qemu_args.join(" ")));
         let sudo_args_ref: Vec<&str> = sudo_args.iter().map(|s| s.as_str()).collect();
-        spawn_background(&sudo_path, &sudo_args_ref)
-            .map_err(|e| format!("QEMU start error (sudo): {}", e))?
+        spawn_background(&sudo_path, &sudo_args_ref).map_err(|e| {
+            let hint = if e.contains("password is required") || e.contains("terminal is required") {
+                format!(
+                    "\n\nBridge/vmnet mode needs passwordless sudo for {qp}. Add it:\n\n  \
+                     echo \"$(whoami) ALL=(ALL) NOPASSWD: {qp}\" | sudo tee -a /etc/sudoers.d/vmcontrol-dev\n  \
+                     sudo chmod 440 /etc/sudoers.d/vmcontrol-dev\n\n\
+                     Or disable it in the VM config (set internal_ip to empty / use NAT-only adapters).",
+                    qp = qemu_path,
+                )
+            } else {
+                String::new()
+            };
+            format!("QEMU start error (sudo): {}{}", e, hint)
+        })?
     } else {
         output_log.push_str(&format!("QEMU: {} {}\n", qemu_path, qemu_args.join(" ")));
         let args_ref: Vec<&str> = qemu_args.iter().map(|s| s.as_str()).collect();
