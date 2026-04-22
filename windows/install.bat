@@ -718,6 +718,22 @@ schtasks /delete /tn "%SERVICE_NAME%" /f >nul 2>&1
 :: --- Step 6: Copy binary and static files ---
 echo [INFO] Installing binary and static files...
 copy /y "%BINARY%" "%CTL_BIN%\vm_ctl.exe" >nul
+:: Also copy the desktop-app wrapper if cargo built it alongside vm_ctl.exe
+for %%A in (
+    "%SCRIPT_DIR%vm_ctl_app.exe"
+    "!CARGO_TARGET_DIR!\release\vm_ctl_app.exe"
+    "%SCRIPT_DIR%target\release\vm_ctl_app.exe"
+    "%SCRIPT_DIR%target\x86_64-pc-windows-gnu\release\vm_ctl_app.exe"
+    "%SCRIPT_DIR%target\aarch64-pc-windows-msvc\release\vm_ctl_app.exe"
+) do (
+    if exist %%A (
+        copy /y %%A "%CTL_BIN%\vm_ctl_app.exe" >nul
+        echo [OK]   Desktop app installed: %CTL_BIN%\vm_ctl_app.exe
+        goto :app_copied
+    )
+)
+echo [INFO] vm_ctl_app.exe not found in build output -- skipping desktop app
+:app_copied
 :: Prefer root static\ (single source of truth), fall back to platform static\
 if exist "%SCRIPT_DIR%..\static\app.js" (
     xcopy /s /y /i /q "%SCRIPT_DIR%..\static\*" "%STATIC_DIR%\" >nul
@@ -969,10 +985,16 @@ echo [INFO] Creating desktop shortcut...
 set "DESKTOP=%USERPROFILE%\Desktop"
 set "SHORTCUT=%DESKTOP%\vmcontrol.lnk"
 
-powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%SHORTCUT%'); $sc.TargetPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; $sc.Arguments = '-NoExit -Command cd C:\vmcontrol; C:\vmcontrol\bin\vm_ctl.exe server 0.0.0.0:8080'; $sc.WorkingDirectory = 'C:\vmcontrol'; $sc.Description = 'vmcontrol Server (Admin)'; $sc.Save()"
-
-:: Set shortcut to Run as Administrator
-powershell -NoProfile -Command "$bytes = [System.IO.File]::ReadAllBytes('%SHORTCUT%'); $bytes[0x15] = $bytes[0x15] -bor 0x20; [System.IO.File]::WriteAllBytes('%SHORTCUT%', $bytes)"
+if exist "%CTL_BIN%\vm_ctl_app.exe" (
+    :: Native app shortcut: one double-click opens the VMware-style window.
+    :: vm_ctl_app auto-spawns vm_ctl server if it isn't already listening.
+    powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%SHORTCUT%'); $sc.TargetPath = '%CTL_BIN%\vm_ctl_app.exe'; $sc.WorkingDirectory = '%CTL_BIN%'; $sc.Description = 'VM Control Panel'; $sc.Save()"
+) else (
+    :: Fallback: open the server + browser in a PowerShell window.
+    powershell -NoProfile -Command "$ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut('%SHORTCUT%'); $sc.TargetPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'; $sc.Arguments = '-NoExit -Command cd C:\vmcontrol; C:\vmcontrol\bin\vm_ctl.exe server 0.0.0.0:8080'; $sc.WorkingDirectory = 'C:\vmcontrol'; $sc.Description = 'vmcontrol Server (Admin)'; $sc.Save()"
+    :: Set shortcut to Run as Administrator
+    powershell -NoProfile -Command "$bytes = [System.IO.File]::ReadAllBytes('%SHORTCUT%'); $bytes[0x15] = $bytes[0x15] -bor 0x20; [System.IO.File]::WriteAllBytes('%SHORTCUT%', $bytes)"
+)
 
 echo [OK]   Desktop shortcut created: %SHORTCUT%
 echo.

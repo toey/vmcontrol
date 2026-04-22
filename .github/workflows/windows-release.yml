@@ -48,7 +48,7 @@ jobs:
 
       - name: Build release
         shell: pwsh
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --bins
 
       - name: Stage package contents
         shell: pwsh
@@ -56,8 +56,12 @@ jobs:
           $stage = "dist/vmcontrol-win-${{ matrix.arch }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/vm_ctl.exe" "$stage/"
+          Copy-Item "target/${{ matrix.target }}/release/vm_ctl_app.exe" "$stage/"
           Copy-Item -Recurse static "$stage/static"
           Copy-Item windows/install.bat "$stage/"
+          foreach ($s in @('start.bat','stop.bat','restart.bat','status.bat','update.bat')) {
+            if (Test-Path "windows/$s") { Copy-Item "windows/$s" "$stage/" }
+          }
           if (Test-Path windows/readme.txt) { Copy-Item windows/readme.txt "$stage/" }
           Get-ChildItem -Recurse $stage | Select-Object FullName, Length
 

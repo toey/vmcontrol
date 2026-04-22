@@ -3,6 +3,16 @@ name = "vm_ctl"
 version = "0.3.0"
 edition = "2021"
 
+[[bin]]
+name = "vm_ctl"
+path = "src/main.rs"
+
+[[bin]]
+name = "vm_ctl_app"
+path = "src/bin/app.rs"
+# Windows GUI: hide the cmd window when double-clicked from Explorer
+required-features = []
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -19,6 +29,12 @@ zip = "2"
 futures-util = "0.3"
 actix-multipart = "0.7"
 base64 = "0.22"
+
+# Native desktop wrapper (vm_ctl_app binary): hosts the web UI in a
+# system WebView (WebView2 on Windows, WKWebView on macOS, WebKitGTK
+# on Linux) so users don't need to open a browser at localhost:8080.
+wry = "0.48"
+tao = "0.33"
 
 # Drop-in UnixStream for Windows (AF_UNIX via Win10 1803+).
 # Keeps qemu_monitor_cmd / QGA / MDS code nearly identical across platforms.
