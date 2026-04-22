@@ -71,11 +71,54 @@ fn spawn_server() -> Option<Child> {
         return None;
     }
 
+    // Pick a cwd that has ./static next to it so the Files service resolves.
+    // Walk upward from the binary dir looking for a sibling static/app.js;
+    // this covers both production installs (static/ next to vm_ctl[.exe])
+    // and dev checkouts (static/ at repo root, binary in target/release/).
+    let server_cwd = {
+        let mut candidate = Some(dir.clone());
+        let mut chosen = dir.clone();
+        while let Some(d) = candidate {
+            if d.join("static").join("app.js").exists() {
+                chosen = d;
+                break;
+            }
+            candidate = d.parent().map(|p| p.to_path_buf());
+        }
+        chosen
+    };
+
     let bind = format!("{}:{}", BIND_HOST, BIND_PORT);
+    // On macOS the server often needs to touch root-owned paths
+    // (/opt/ctl/data, vmnet, QEMU under sudo). If sudo -n can run the
+    // server binary without prompting (NOPASSWD granted for it), launch
+    // it that way so it has full access; otherwise fall back to
+    // user-level and rely on fallback paths.
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let bin_str = server_bin.to_string_lossy().to_string();
+        let can_sudo = Command::new("sudo")
+            .args(["-n", "-l", &bin_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if can_sudo {
+            eprintln!("vm_ctl_app: launching server via sudo -n (NOPASSWD granted)");
+            let mut c = Command::new("sudo");
+            c.args(["-n", &bin_str]);
+            c
+        } else {
+            Command::new(&server_bin)
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut cmd = Command::new(&server_bin);
+
     cmd.arg("server")
         .arg(&bind)
-        .current_dir(&dir)
+        .current_dir(&server_cwd)
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 

@@ -89,7 +89,33 @@ fn spawn_server() -> Option<Child> {
     };
 
     let bind = format!("{}:{}", BIND_HOST, BIND_PORT);
+    // On macOS the server often needs to touch root-owned paths
+    // (/opt/ctl/data, vmnet, QEMU under sudo). If sudo -n can run the
+    // server binary without prompting (NOPASSWD granted for it), launch
+    // it that way so it has full access; otherwise fall back to
+    // user-level and rely on fallback paths.
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let bin_str = server_bin.to_string_lossy().to_string();
+        let can_sudo = Command::new("sudo")
+            .args(["-n", "-l", &bin_str])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if can_sudo {
+            eprintln!("vm_ctl_app: launching server via sudo -n (NOPASSWD granted)");
+            let mut c = Command::new("sudo");
+            c.args(["-n", &bin_str]);
+            c
+        } else {
+            Command::new(&server_bin)
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut cmd = Command::new(&server_bin);
+
     cmd.arg("server")
         .arg(&bind)
         .current_dir(&server_cwd)
