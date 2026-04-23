@@ -2279,16 +2279,11 @@ function getVmVncPort(smac) {
 async function vmVncStart(smac) {
     var port = getVmVncPort(smac);
     if (!port) { alert('No VNC port assigned for ' + smac); return; }
-    // Try opening a new tab first (browser). If the host is a native
-    // WebView (vm_ctl_app desktop wrapper) window.open returns null —
-    // navigate in-place instead; vnc.html has a Back button.
-    var vncWin = null;
-    try { vncWin = window.open('about:blank', '_blank'); } catch (_) {}
-    function go(url) {
-        if (vncWin) vncWin.location.href = url;
-        else window.location.href = url;
-    }
-    // Generate one-time VNC token
+    // Navigate in-place. Opening a new tab via window.open is unreliable:
+    // wry / WKWebView in vm_ctl_app blocks it, and even in Chrome async
+    // window.open() after an awaited fetch gets flagged as a popup.
+    // vnc.html has a "← Back" button that returns to the VM list.
+    console.log('[vnc] vmVncStart smac=', smac);
     try {
         var response = await apiFetch('/api/vnc/token', {
             method: 'POST',
@@ -2298,15 +2293,15 @@ async function vmVncStart(smac) {
         var data = await safeJson(response);
         if (data && data.success && data.token) {
             window._vncActive[smac] = true;
-            loadVmListTable();
-            go('/vnc.html?token=' + encodeURIComponent(data.token));
+            window.location.href = '/vnc.html?token=' + encodeURIComponent(data.token);
             return;
         }
-    } catch (e) {}
-    // Fallback if token generation fails
+        console.warn('[vnc] token response had no token, falling back:', data);
+    } catch (e) {
+        console.warn('[vnc] token fetch failed, falling back:', e);
+    }
     window._vncActive[smac] = true;
-    loadVmListTable();
-    go('/vnc.html?smac=' + encodeURIComponent(smac));
+    window.location.href = '/vnc.html?smac=' + encodeURIComponent(smac);
 }
 
 async function vmVncStop(smac) {
