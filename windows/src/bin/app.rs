@@ -173,6 +173,10 @@ fn main() -> wry::Result<()> {
     let _webview = WebViewBuilder::new()
         .with_url(&url)
         .with_accept_first_mouse(true)
+        // DevTools is on so users can right-click -> Inspect Element
+        // (macOS WKWebView) or press F12 (Windows WebView2) when
+        // something in the UI misbehaves.
+        .with_devtools(true)
         .build(&window)?;
 
     event_loop.run(move |event, _, control_flow| {
