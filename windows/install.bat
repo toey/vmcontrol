@@ -66,45 +66,55 @@ set "PREBUILT_CHECK=%~dp0vm_ctl.exe"
 if exist "%PREBUILT_CHECK%" (
     echo [OK]   Pre-built vm_ctl.exe found -- skipping Rust toolchain check
 ) else (
-    where cargo >nul 2>&1
-    if !errorlevel! neq 0 (
-        echo [INFO] Rust toolchain not found. Installing rustup directly...
-        :: Download rustup-init.exe from rust-lang.org (avoids winget / msstore issues)
-        set "RUSTUP_INIT=%TEMP%\rustup-init.exe"
-        if /I "%ARCH%"=="ARM64" (
-            set "RUSTUP_URL=https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe"
-            set "DEFAULT_HOST=aarch64-pc-windows-msvc"
-        ) else (
-            set "RUSTUP_URL=https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
-            set "DEFAULT_HOST=x86_64-pc-windows-msvc"
-        )
-        echo [INFO] Downloading !RUSTUP_URL!
-        powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '!RUSTUP_URL!' -OutFile '!RUSTUP_INIT!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
-        if !errorlevel! neq 0 (
-            echo [ERR] Failed to download rustup-init.exe.
-            echo       Install Rust manually from: https://rustup.rs then re-run.
-            pause
-            exit /b 1
-        )
-        echo [INFO] Running rustup-init ^(silent, stable-msvc, default-host=!DEFAULT_HOST!^)...
-        "!RUSTUP_INIT!" -y --default-toolchain stable-msvc --default-host !DEFAULT_HOST! --no-modify-path
-        if !errorlevel! neq 0 (
-            echo [ERR] rustup-init failed. Install Rust manually from: https://rustup.rs
-            pause
-            exit /b 1
-        )
-        :: rustup installs to %USERPROFILE%\.cargo\bin — add to this session's PATH.
+    :: Step 1: Check standard rustup install location FIRST so re-runs don't
+    :: re-download rustup-init.exe just because the user's permanent PATH
+    :: doesn't include %USERPROFILE%\.cargo\bin.
+    if exist "%USERPROFILE%\.cargo\bin\cargo.exe" (
         set "PATH=%USERPROFILE%\.cargo\bin;!PATH!"
+        echo [OK]   cargo found at %USERPROFILE%\.cargo\bin ^(added to session PATH^)
+    ) else (
         where cargo >nul 2>&1
         if !errorlevel! neq 0 (
-            echo [ERR] Rust installed but cargo still not on PATH.
-            echo       Close and re-open the terminal, then re-run install.bat.
-            pause
-            exit /b 1
+            echo [INFO] Rust toolchain not found. Installing rustup directly...
+            :: Download rustup-init.exe from rust-lang.org (avoids winget / msstore issues)
+            set "RUSTUP_INIT=%TEMP%\rustup-init.exe"
+            if /I "%ARCH%"=="ARM64" (
+                set "RUSTUP_URL=https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe"
+                set "DEFAULT_HOST=aarch64-pc-windows-msvc"
+            ) else (
+                set "RUSTUP_URL=https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
+                set "DEFAULT_HOST=x86_64-pc-windows-msvc"
+            )
+            echo [INFO] Downloading !RUSTUP_URL!
+            powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '!RUSTUP_URL!' -OutFile '!RUSTUP_INIT!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+            if !errorlevel! neq 0 (
+                echo [ERR] Failed to download rustup-init.exe.
+                echo       Install Rust manually from: https://rustup.rs then re-run.
+                pause
+                exit /b 1
+            )
+            :: Drop --no-modify-path so cargo lands in the user's permanent PATH;
+            :: future install.bat runs (or any new shell) will find it without re-running rustup.
+            echo [INFO] Running rustup-init ^(silent, stable-msvc, default-host=!DEFAULT_HOST!^)...
+            "!RUSTUP_INIT!" -y --default-toolchain stable-msvc --default-host !DEFAULT_HOST!
+            if !errorlevel! neq 0 (
+                echo [ERR] rustup-init failed. Install Rust manually from: https://rustup.rs
+                pause
+                exit /b 1
+            )
+            :: Add to this session's PATH (rustup updates User PATH for new shells).
+            set "PATH=%USERPROFILE%\.cargo\bin;!PATH!"
+            where cargo >nul 2>&1
+            if !errorlevel! neq 0 (
+                echo [ERR] Rust installed but cargo still not on PATH.
+                echo       Close and re-open the terminal, then re-run install.bat.
+                pause
+                exit /b 1
+            )
+            echo [OK]   Rust installed ^(cargo on PATH for this session^)
+        ) else (
+            echo [OK]   cargo found
         )
-        echo [OK]   Rust installed ^(cargo on PATH for this session^)
-    ) else (
-        echo [OK]   cargo found
     )
 )
 
