@@ -482,23 +482,34 @@ if exist "%PREBUILT_LOCAL%" (
             echo [INFO] Downloading Visual Studio Build Tools bootstrapper...
             powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest '!VSBT_URL!' -OutFile '!VSBT_EXE!' -UseBasicParsing; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
             if !errorlevel! neq 0 (
-                echo [WARN] Failed to download VS Build Tools. Attempting build with current toolchain...
-                set "USE_TOOLCHAIN=unknown"
-            ) else (
-                echo [INFO] Installing VS Build Tools -- this may take several minutes...
-                "!VSBT_EXE!" --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended
-                if !errorlevel! neq 0 if !errorlevel! neq 3010 (
-                    echo [WARN] VS Build Tools exited with code !errorlevel!. Attempting build anyway...
-                    set "USE_TOOLCHAIN=unknown"
-                ) else (
-                    echo [OK]   Visual Studio Build Tools installed
-                    echo [INFO] Switching to stable-msvc toolchain...
-                    rustup toolchain install stable-msvc >nul 2>&1
-                    rustup default stable-msvc >nul 2>&1
-                    echo [OK]   Switched to stable-msvc
-                    set "USE_TOOLCHAIN=msvc"
-                )
+                echo [ERR] Failed to download VS Build Tools bootstrapper.
+                echo       Check your internet connection, then re-run install.bat.
+                echo       Or install manually from:
+                echo         https://visualstudio.microsoft.com/visual-cpp-build-tools/
+                pause
+                exit /b 1
             )
+            echo [INFO] Installing VS Build Tools ^(VC.Tools.x86.x64 + Win11 SDK^) -- may take several minutes...
+            "!VSBT_EXE!" --quiet --wait --norestart --nocache --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended
+            :: Exit codes: 0 = success, 3010 = restart required (still ok), others = failure
+            if !errorlevel! neq 0 if !errorlevel! neq 3010 (
+                echo [ERR] VS Build Tools installer exited with code !errorlevel!.
+                echo       Common causes:
+                echo         - Another VS install is in progress ^(close it and re-run^)
+                echo         - User clicked Cancel on the installer dialog
+                echo         - Disk full or insufficient permissions
+                echo       Install manually from:
+                echo         https://visualstudio.microsoft.com/visual-cpp-build-tools/
+                echo       Then select "Desktop development with C++" workload.
+                pause
+                exit /b 1
+            )
+            echo [OK]   Visual Studio Build Tools installed
+            echo [INFO] Switching to stable-msvc toolchain...
+            rustup toolchain install stable-msvc >nul 2>&1
+            rustup default stable-msvc >nul 2>&1
+            echo [OK]   Switched to stable-msvc
+            set "USE_TOOLCHAIN=msvc"
         )
     )
 
@@ -526,9 +537,9 @@ if exist "%PREBUILT_LOCAL%" (
                         echo [OK]   MSVC environment loaded -- link.exe found
                     ) else (
                         echo [WARN] vcvarsall.bat ran but link.exe still not found
+                        set "VS_SETUP=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe"
                         if /I "%ARCH%"=="ARM64" (
                             echo [INFO] ARM64 native build tools missing. Adding component via VS Installer...
-                            set "VS_SETUP=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\setup.exe"
                             if exist "!VS_SETUP!" (
                                 echo [INFO] Running: setup.exe modify --add VC.Tools.ARM64 + Windows SDK
                                 "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.ARM64 --add Microsoft.VisualStudio.Component.VC.Llvm.Clang --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet
@@ -554,6 +565,36 @@ if exist "%PREBUILT_LOCAL%" (
                             ) else (
                                 echo [ERR] VS Installer setup.exe not found.
                                 echo       Open "Visual Studio Installer" manually and add ARM64 tools.
+                                pause
+                                exit /b 1
+                            )
+                        ) else (
+                            echo [INFO] x86_64 native build tools missing. Adding component via VS Installer...
+                            if exist "!VS_SETUP!" (
+                                echo [INFO] Running: setup.exe modify --add VC.Tools.x86.x64 + Windows SDK
+                                "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --quiet
+                                if !errorlevel! neq 0 (
+                                    echo [WARN] setup.exe modify returned error, trying with Windows10 SDK...
+                                    "!VS_SETUP!" modify --installPath "!VS_INSTALL_PATH!" --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows10SDK.20348 --quiet
+                                )
+                                echo [INFO] Retrying vcvarsall.bat amd64...
+                                call "!VCVARSALL!" amd64
+                                where link.exe >nul 2>&1
+                                if !errorlevel! equ 0 (
+                                    echo [OK]   x86_64 tools installed -- link.exe found
+                                ) else (
+                                    echo [ERR] link.exe still not found.
+                                    echo       Open "Visual Studio Installer" ^> Modify ^> Individual Components
+                                    echo       Check these items:
+                                    echo         [x] MSVC v143 - VS 2022 C++ x64/x86 build tools ^(Latest^)
+                                    echo         [x] Windows 11 SDK ^(any version^)
+                                    echo       Click Modify, then re-run install.bat
+                                    pause
+                                    exit /b 1
+                                )
+                            ) else (
+                                echo [ERR] VS Installer setup.exe not found.
+                                echo       Open "Visual Studio Installer" manually and add x86/x64 tools.
                                 pause
                                 exit /b 1
                             )
@@ -623,6 +664,38 @@ if exist "%PREBUILT_LOCAL%" (
         echo [OK]   clang.exe found in PATH
     )
 
+    :: --- Final pre-build sanity check: linker MUST be present ---
+    :: GNU toolchain uses x86_64-w64-mingw32-gcc as linker, MSVC uses link.exe.
+    set "LINKER_OK=0"
+    if "!USE_TOOLCHAIN!"=="gnu" (
+        where x86_64-w64-mingw32-gcc.exe >nul 2>&1 && set "LINKER_OK=1"
+    ) else (
+        where link.exe >nul 2>&1 && set "LINKER_OK=1"
+    )
+    if "!LINKER_OK!"=="0" (
+        echo.
+        echo [ERR] No C/C++ linker is available -- cannot build vm_ctl.
+        echo.
+        echo       Toolchain selected: !USE_TOOLCHAIN!
+        echo       Tried auto-installing Visual Studio Build Tools but linker is still missing.
+        echo.
+        echo       Manual fix:
+        echo         1. Open "Visual Studio Installer" ^(or download from
+        echo            https://visualstudio.microsoft.com/visual-cpp-build-tools/^)
+        echo         2. Modify your install ^> Individual Components, check:
+        if /I "%ARCH%"=="ARM64" (
+            echo            [x] MSVC v143 - ARM64/ARM64EC build tools
+        ) else (
+            echo            [x] MSVC v143 - VS 2022 C++ x64/x86 build tools
+        )
+        echo            [x] Windows 11 SDK ^(any version^)
+        echo         3. Click Modify, wait for it to finish
+        echo         4. **Reboot the machine** ^(important for PATH changes^)
+        echo         5. Re-run install.bat
+        pause
+        exit /b 1
+    )
+
     echo [INFO] Building vm_ctl from source ^(release mode^)...
     cargo build --release 2>"%TEMP%\vmcontrol_build.log"
     if !errorlevel! neq 0 (
@@ -631,27 +704,7 @@ if exist "%PREBUILT_LOCAL%" (
         echo.
         echo [ERR] Build failed.
         echo.
-        if "!USE_TOOLCHAIN!"=="unknown" (
-            echo       No C/C++ linker was found.
-            echo.
-            echo       Install Visual Studio Build Tools:
-            echo         1. Download from: https://visualstudio.microsoft.com/visual-cpp-build-tools/
-            echo         2. Select "Desktop development with C++"
-            if /I not "%ARCH%"=="ARM64" (
-                echo         3. Also select "ARM64/ARM64EC build tools" if on ARM
-            )
-            echo         3. Re-run install.bat ^(toolchain will be auto-configured^)
-            if /I not "%ARCH%"=="ARM64" (
-                echo.
-                echo       Alternative -- MinGW-w64 ^(x86_64 only, not available for ARM64^):
-                echo         1. Run:  winget install -e --id MSYS2.MSYS2
-                echo         2. Open MSYS2 and run:  pacman -S mingw-w64-x86_64-toolchain
-                echo         3. Add C:\msys64\mingw64\bin to your PATH
-                echo         4. Re-run install.bat
-            )
-        ) else (
-            echo       See build log: %TEMP%\vmcontrol_build.log
-        )
+        echo       See full build log at: %TEMP%\vmcontrol_build.log
         echo.
         echo       Alternatively, cross-compile from Mac:
         echo         cd windows
