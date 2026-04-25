@@ -195,16 +195,29 @@ if not exist "%SWTPM_PATH%" (
             goto :after_swtpm
         )
     )
-    echo [INFO] Installing swtpm + cdrtools + python via pacman...
-    C:\msys64\usr\bin\bash.exe -lc "pacman -Sy --noconfirm --needed mingw-w64-x86_64-swtpm mingw-w64-x86_64-cdrtools mingw-w64-x86_64-python mingw-w64-x86_64-python-pip"
+    echo [INFO] Refreshing MSYS2 keyring + package databases ^(force resync^)...
+    :: Fresh installs sometimes have stale or unsigned keyrings — init + populate
+    :: avoids "target not found" because pacman silently skipped a repo.
+    C:\msys64\usr\bin\bash.exe -lc "pacman-key --init >/dev/null 2>&1; pacman-key --populate msys2 >/dev/null 2>&1; pacman -Syy --noconfirm" >nul 2>&1
+    echo [INFO] Installing swtpm + cdrtools + python via pacman ^(batch attempt^)...
+    C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-swtpm mingw-w64-x86_64-cdrtools mingw-w64-x86_64-python mingw-w64-x86_64-python-pip"
     if !errorlevel! neq 0 (
-        echo [WARN] pacman install swtpm failed. Windows 11 guests will need Win11 Bypass.
-        goto :after_swtpm
+        :: One package may be unavailable (renamed / removed) -- retry per-package
+        :: so the others still install. swtpm is the only critical one for Win11.
+        echo [INFO] Batch failed -- retrying packages one at a time...
+        for %%P in (swtpm cdrtools python python-pip) do (
+            C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-%%P" >nul 2>&1
+            if !errorlevel! equ 0 (
+                echo [OK]   pacman: mingw-w64-x86_64-%%P installed
+            ) else (
+                echo [WARN] pacman: mingw-w64-x86_64-%%P not available
+            )
+        )
     )
     if exist "%SWTPM_PATH%" (
         echo [OK]   swtpm installed at %SWTPM_PATH%
     ) else (
-        echo [WARN] swtpm.exe not found at expected path after install: %SWTPM_PATH%
+        echo [WARN] swtpm not installed -- Windows 11 guests will need Win11 Bypass.
     )
 ) else (
     echo [OK]   swtpm already present at %SWTPM_PATH%
@@ -217,16 +230,36 @@ if not exist "%SWTPM_PATH%" (
 :: output, making failures invisible.
 if not exist "%CTL_BIN%" mkdir "%CTL_BIN%"
 if not exist "%NSSM%" (
-    echo [INFO] NSSM not found. Downloading nssm 2.24 from nssm.cc...
+    echo [INFO] NSSM not found. Downloading nssm 2.24...
     set "NSSM_ZIP=%TEMP%\nssm.zip"
     set "NSSM_DIR=%TEMP%\nssm-2.24"
-    powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://nssm.cc/release/nssm-2.24.zip' -OutFile '!NSSM_ZIP!' -UseBasicParsing; if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
-    if !errorlevel! neq 0 (
-        echo [WARN] Failed to download NSSM. Falling back to Scheduled Task.
+    set "NSSM_OK=0"
+    :: Try nssm.cc first (3 retries — site is sometimes flaky / 503)
+    for /l %%i in (1,1,3) do (
+        if "!NSSM_OK!"=="0" (
+            echo [INFO] Attempt %%i: https://nssm.cc/release/nssm-2.24.zip
+            powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://nssm.cc/release/nssm-2.24.zip' -OutFile '!NSSM_ZIP!' -UseBasicParsing -TimeoutSec 30; exit 0 } catch { exit 1 }"
+            if !errorlevel! equ 0 set "NSSM_OK=1"
+            if "!NSSM_OK!"=="0" timeout /t 3 /nobreak >nul
+        )
+    )
+    :: Fallback: Wayback Machine cached copy (nssm.cc has been down for days at a time)
+    if "!NSSM_OK!"=="0" (
+        echo [INFO] nssm.cc unreachable -- trying Wayback Machine mirror...
+        powershell -NoProfile -Command "try { [Net.ServicePointManager]::SecurityProtocol='Tls12'; Invoke-WebRequest 'https://web.archive.org/web/2/https://nssm.cc/release/nssm-2.24.zip' -OutFile '!NSSM_ZIP!' -UseBasicParsing -TimeoutSec 60; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+        if !errorlevel! equ 0 set "NSSM_OK=1"
+    )
+    if "!NSSM_OK!"=="0" (
+        echo [WARN] Failed to download NSSM from all sources. Falling back to Scheduled Task.
     ) else (
-        :: No native ARM64 NSSM build; win64 binary runs under emulation on ARM.
-        copy /y "!NSSM_DIR!\win64\nssm.exe" "%NSSM%" >nul
-        echo [OK]   NSSM installed at %NSSM%
+        powershell -NoProfile -Command "try { if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+        if !errorlevel! neq 0 (
+            echo [WARN] NSSM zip downloaded but extract failed. Falling back to Scheduled Task.
+        ) else (
+            :: No native ARM64 NSSM build; win64 binary runs under emulation on ARM.
+            copy /y "!NSSM_DIR!\win64\nssm.exe" "%NSSM%" >nul
+            echo [OK]   NSSM installed at %NSSM%
+        )
     )
 ) else (
     echo [OK]   NSSM already at %NSSM%
