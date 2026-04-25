@@ -184,10 +184,24 @@ if exist "%TAP_CTL%" (
 
 echo.
 
-:: --- Step 2a.8: Auto-install swtpm via MSYS2 (for Windows 11 guest TPM 2.0) ---
-set "SWTPM_PATH=C:\msys64\mingw64\bin\swtpm.exe"
-set "MKISOFS_PATH=C:\msys64\mingw64\bin\mkisofs.exe"
-set "WEBSOCKIFY_PATH=C:\msys64\mingw64\bin\websockify.exe"
+:: --- Step 2a.8: Auto-install swtpm + tools via MSYS2 (for Windows 11 guest TPM 2.0) ---
+:: MSYS2 deprecated the mingw64 (MSVCRT) environment in 2024 — packages like
+:: swtpm/cdrtools were removed there. ucrt64 is the modern default for fresh
+:: installs. We probe both to support legacy mingw64 setups too.
+if exist "C:\msys64\ucrt64\bin" (
+    set "MSYS_BIN=C:\msys64\ucrt64\bin"
+    set "MSYS_PKG=mingw-w64-ucrt-x86_64"
+) else if exist "C:\msys64\mingw64\bin" (
+    set "MSYS_BIN=C:\msys64\mingw64\bin"
+    set "MSYS_PKG=mingw-w64-x86_64"
+) else (
+    :: MSYS2 not installed yet — assume ucrt64 (the installer's default since 2022)
+    set "MSYS_BIN=C:\msys64\ucrt64\bin"
+    set "MSYS_PKG=mingw-w64-ucrt-x86_64"
+)
+set "SWTPM_PATH=!MSYS_BIN!\swtpm.exe"
+set "MKISOFS_PATH=!MSYS_BIN!\mkisofs.exe"
+set "WEBSOCKIFY_PATH=!MSYS_BIN!\websockify.exe"
 if not exist "%SWTPM_PATH%" (
     if not exist "C:\msys64\usr\bin\bash.exe" (
         echo [INFO] MSYS2 not installed. Downloading latest installer...
@@ -204,23 +218,29 @@ if not exist "%SWTPM_PATH%" (
             echo [WARN] MSYS2 installer exited with code !errorlevel!. TPM 2.0 may not work.
             goto :after_swtpm
         )
+        :: Re-detect after fresh install (ucrt64 directory now exists)
+        set "MSYS_BIN=C:\msys64\ucrt64\bin"
+        set "MSYS_PKG=mingw-w64-ucrt-x86_64"
+        set "SWTPM_PATH=!MSYS_BIN!\swtpm.exe"
+        set "MKISOFS_PATH=!MSYS_BIN!\mkisofs.exe"
+        set "WEBSOCKIFY_PATH=!MSYS_BIN!\websockify.exe"
     )
     echo [INFO] Refreshing MSYS2 keyring + package databases ^(force resync^)...
-    :: Fresh installs sometimes have stale or unsigned keyrings — init + populate
-    :: avoids "target not found" because pacman silently skipped a repo.
-    C:\msys64\usr\bin\bash.exe -lc "pacman-key --init >/dev/null 2>&1; pacman-key --populate msys2 >/dev/null 2>&1; pacman -Syy --noconfirm" >nul 2>&1
-    echo [INFO] Installing swtpm + cdrtools + python via pacman ^(batch attempt^)...
-    C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-swtpm mingw-w64-x86_64-cdrtools mingw-w64-x86_64-python mingw-w64-x86_64-python-pip"
+    :: cd / first to avoid "drive specified" warnings when bash inherits a cwd
+    :: it can't translate to a POSIX path.
+    C:\msys64\usr\bin\bash.exe -lc "cd /; pacman-key --init >/dev/null 2>&1; pacman-key --populate msys2 >/dev/null 2>&1; pacman -Syy --noconfirm" >nul 2>&1
+    echo [INFO] Installing swtpm + cdrtools + python + websockify via pacman ^(env: !MSYS_PKG!^)...
+    C:\msys64\usr\bin\bash.exe -lc "cd /; pacman -S --noconfirm --needed !MSYS_PKG!-swtpm !MSYS_PKG!-cdrtools !MSYS_PKG!-python !MSYS_PKG!-python-pip !MSYS_PKG!-python-websockify"
     if !errorlevel! neq 0 (
         :: One package may be unavailable (renamed / removed) -- retry per-package
         :: so the others still install. swtpm is the only critical one for Win11.
         echo [INFO] Batch failed -- retrying packages one at a time...
-        for %%P in (swtpm cdrtools python python-pip) do (
-            C:\msys64\usr\bin\bash.exe -lc "pacman -S --noconfirm --needed mingw-w64-x86_64-%%P" >nul 2>&1
+        for %%P in (swtpm cdrtools python python-pip python-websockify) do (
+            C:\msys64\usr\bin\bash.exe -lc "cd /; pacman -S --noconfirm --needed !MSYS_PKG!-%%P" >nul 2>&1
             if !errorlevel! equ 0 (
-                echo [OK]   pacman: mingw-w64-x86_64-%%P installed
+                echo [OK]   pacman: !MSYS_PKG!-%%P installed
             ) else (
-                echo [WARN] pacman: mingw-w64-x86_64-%%P not available
+                echo [WARN] pacman: !MSYS_PKG!-%%P not available
             )
         )
     )
@@ -260,32 +280,57 @@ if not exist "%NSSM%" (
         if !errorlevel! equ 0 set "NSSM_OK=1"
     )
     if "!NSSM_OK!"=="0" (
+        :: Final fallback: winget (Microsoft Store / community repo)
+        where winget >nul 2>&1
+        if !errorlevel! equ 0 (
+            echo [INFO] All HTTP sources failed -- trying winget install NSSM.NSSM...
+            winget install -e --id NSSM.NSSM --silent --accept-package-agreements --accept-source-agreements >nul 2>&1
+            :: winget drops nssm.exe under %LOCALAPPDATA%\Microsoft\WinGet\Packages\NSSM.NSSM_*
+            for /r "%LOCALAPPDATA%\Microsoft\WinGet\Packages" %%N in (nssm.exe) do (
+                if not exist "%NSSM%" (
+                    copy /y "%%N" "%NSSM%" >nul 2>&1
+                )
+            )
+            if exist "%NSSM%" (
+                set "NSSM_OK=1"
+                echo [OK]   NSSM installed via winget at %NSSM%
+            )
+        )
+    )
+    if "!NSSM_OK!"=="0" (
         echo [WARN] Failed to download NSSM from all sources. Falling back to Scheduled Task.
     ) else (
-        powershell -NoProfile -Command "try { if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
-        if !errorlevel! neq 0 (
-            echo [WARN] NSSM zip downloaded but extract failed. Falling back to Scheduled Task.
-        ) else (
-            :: No native ARM64 NSSM build; win64 binary runs under emulation on ARM.
-            copy /y "!NSSM_DIR!\win64\nssm.exe" "%NSSM%" >nul
-            echo [OK]   NSSM installed at %NSSM%
+        :: If %NSSM% already exists, the winget path already copied it -- nothing to do.
+        :: Otherwise we have a downloaded ZIP that needs to be extracted.
+        if not exist "%NSSM%" (
+            powershell -NoProfile -Command "try { if (Test-Path '!NSSM_DIR!') { Remove-Item '!NSSM_DIR!' -Recurse -Force }; Expand-Archive '!NSSM_ZIP!' -DestinationPath '%TEMP%' -Force; exit 0 } catch { Write-Host $_.Exception.Message; exit 1 }"
+            if !errorlevel! neq 0 (
+                echo [WARN] NSSM zip downloaded but extract failed. Falling back to Scheduled Task.
+            ) else (
+                :: No native ARM64 NSSM build; win64 binary runs under emulation on ARM.
+                copy /y "!NSSM_DIR!\win64\nssm.exe" "%NSSM%" >nul
+                echo [OK]   NSSM installed at %NSSM%
+            )
         )
     )
 ) else (
     echo [OK]   NSSM already at %NSSM%
 )
 
-:: --- Step 2a.9: Auto-install websockify via pip (noVNC WebSocket proxy) ---
+:: --- Step 2a.9: Verify websockify (fallback to pip if pacman package missing) ---
+:: We installed it via pacman above, but if that package wasn't available the
+:: fallback is pip with --break-system-packages (PEP 668 requires this on
+:: MSYS2 since 2024 — system Python rejects unmanaged installs by default).
 if not exist "%WEBSOCKIFY_PATH%" (
-    if exist "C:\msys64\mingw64\bin\python.exe" (
-        echo [INFO] Installing websockify via pip...
-        C:\msys64\mingw64\bin\python.exe -m pip install --quiet --no-warn-script-location websockify
+    if exist "!MSYS_BIN!\python.exe" (
+        echo [INFO] websockify pacman package unavailable -- trying pip ^(--break-system-packages^)...
+        "!MSYS_BIN!\python.exe" -m pip install --quiet --break-system-packages --no-warn-script-location websockify
         if exist "%WEBSOCKIFY_PATH%" (
-            echo [OK]   websockify installed at %WEBSOCKIFY_PATH%
+            echo [OK]   websockify installed via pip at %WEBSOCKIFY_PATH%
         ) else (
             :: pip may drop a .exe shim or a bare script; try the no-extension fallback
-            if exist "C:\msys64\mingw64\bin\websockify" (
-                set "WEBSOCKIFY_PATH=C:\msys64\mingw64\bin\websockify"
+            if exist "!MSYS_BIN!\websockify" (
+                set "WEBSOCKIFY_PATH=!MSYS_BIN!\websockify"
                 echo [OK]   websockify installed at !WEBSOCKIFY_PATH!
             ) else (
                 echo [WARN] websockify not found after pip install
